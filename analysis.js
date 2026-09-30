@@ -64,16 +64,16 @@ function validateResult(data,context) {
   if(!assessments.length&&!suggestions.length&&(data.assessments.length||data.suggestions.length))throw new LlmError('ungrounded-response','The model returned no valid evidence-linked analysis.');
   return {assessments,suggestions,rejected};
 }
-async function analyze(doc,scope,llm) {
+async function analyze(doc,scope,llm,model='') {
   const selected=scopedDocument(doc,scope),context=buildContext(selected),result=baseResult(selected,scope,context);
   if(!selected.findings.length)return {...result,status:'no-findings',source:'built-in',model:null,message:'No findings are recorded in this scope.'};
   try {
-    const response=await llm.complete([{role:'system',content:prompt},{role:'user',content:JSON.stringify(context)}]);
+    const response=await llm.complete([{role:'system',content:prompt},{role:'user',content:JSON.stringify(context)}],{model});
     const validated=validateResult(response.data,context);
     if(validated.rejected)result.warnings.push(`${validated.rejected} unsupported model item(s) were rejected.`);
     return {...result,status:'complete',source:'local model',model:response.model,assessments:validated.assessments,suggestions:validated.suggestions,message:'Evidence references and next commands were verified. Interpretations are model hypotheses for review.'};
   }catch(error){
-    return {...result,status:'fallback',source:'built-in',model:llm.configuration().model,error:{code:error.code||'model-error',message:error.message},assessments:builtIn(selected),suggestions:workflow(selected).candidates.slice(0,6),message:'Local model analysis is unavailable. Showing recorded facts and built-in next checks.'};
+    return {...result,status:'fallback',source:'built-in',model:model||llm.configuration().model,error:{code:error.code||'model-error',message:error.message},assessments:builtIn(selected),suggestions:workflow(selected).candidates.slice(0,6),message:'Local model analysis is unavailable. Showing recorded facts and built-in next checks.'};
   }
 }
 module.exports={analyze,scopedDocument,fingerprint,buildContext,validateResult};

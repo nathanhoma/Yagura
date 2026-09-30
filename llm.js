@@ -38,7 +38,8 @@ function createLlmService({baseUrl='',model='',apiKey='',request=fetch,timeoutMs
     if(!Array.isArray(data?.data))throw new LlmError('invalid-response','The model list is not in OpenAI-compatible format.');
     return [...new Set(data.data.filter(m=>m&&typeof m.id==='string'&&m.id.trim()).map(m=>m.id))];
   }
-  async function selectModel(list) {
+  async function selectModel(list,requested='') {
+    if(requested){const ids=list||await models();if(!ids.includes(requested))throw new LlmError('model-unavailable','The selected model is not in the endpoint model list.');return requested;}
     if(model)return model;
     if(resolvedModel)return resolvedModel;
     const ids=list||await models();
@@ -46,14 +47,15 @@ function createLlmService({baseUrl='',model='',apiKey='',request=fetch,timeoutMs
     resolvedModel=ids[0];return resolvedModel;
   }
   async function health() {
+    let ids=[];
     try {
-      const ids=await models(),selected=await selectModel(ids);
+      ids=await models();const selected=await selectModel(ids);
       if(!ids.includes(selected))throw new LlmError('model-unavailable','The configured LLM_MODEL is not in the endpoint model list.');
       return {...configuration(),status:'ready',model:selected,models:ids};
-    }catch(e){return {...configuration(),status:e.code||'unreachable',message:e.message};}
+    }catch(e){return {...configuration(),status:e.code||'unreachable',message:e.message,models:ids};}
   }
-  async function complete(messages,{maxTokens=1600}={}) {
-    assertConfiguration();const selected=await selectModel();
+  async function complete(messages,{maxTokens=1600,model:requestedModel=''}={}) {
+    assertConfiguration();const selected=await selectModel(null,requestedModel);
     const data=await call('/chat/completions',{model:selected,temperature:0.1,max_tokens:maxTokens,response_format:{type:'json_object'},messages});
     const raw=data?.choices?.[0]?.message?.content;
     if(typeof raw!=='string'||!raw.trim())throw new LlmError('invalid-response','The local model returned no JSON content.');

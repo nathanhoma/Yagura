@@ -24,6 +24,15 @@ test('Multiple models require explicit selection; unsafe URLs never receive requ
   let calls=0;for(const baseUrl of ['https://example.com/v1','http://user:secret@localhost/v1','http://localhost/v1?api_key=secret']){const llm=createLlmService({baseUrl,request:async()=>{calls++;}});assert.equal((await llm.health()).status,'blocked');}
   assert.equal(calls,0);
 });
+test('Selected advertised model overrides the server default; unknown models are rejected',async()=>{
+  let used;
+  const llm=createLlmService({baseUrl:'http://localhost:8100/v1',model:'default',request:async(url,options)=>{
+    if(url.endsWith('/models'))return response({data:[{id:'default'},{id:'chosen'}]});
+    used=JSON.parse(options.body).model;return response({choices:[{message:{content:'{}'}}]});
+  }});
+  await llm.complete([],{model:'chosen'});assert.equal(used,'chosen');
+  await assert.rejects(llm.complete([],{model:'missing'}),e=>e.code==='model-unavailable');
+});
 test('Analyses cite supplied evidence and use server-generated candidate commands',async()=>{
   const d=doc();let sent;
   const llm=createLlmService({baseUrl:'http://localhost:8100/v1',model:'local-model',request:async(url,options)=>{sent=JSON.parse(options.body);const context=JSON.parse(sent.messages[1].content),result=validModelResult(context);result.suggestions[0].command='invented-command';return response({choices:[{message:{content:JSON.stringify(result)}}]});}});
@@ -49,6 +58,31 @@ test('Context and excerpts are bounded without changing raw evidence',()=>{
   const context=buildContext(d);assert.ok(context.truncated);assert.ok(context.evidence.length>0);assert.ok(context.findings.length<=100);assert.ok(context.evidence.length<=40);assert.ok(JSON.stringify(context).length<24500);assert.equal(d.evidence[0].output,raw);
 });
 async function listen(t,server) {await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);}));return `http://127.0.0.1:${server.address().port}`;}
+test('Suggested checks execute fixed arguments only after authorization',async t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'yagura-check-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const calls=[];
+  const app=await listen(t,createServer({findingsFile:path.join(dir,'findings.json'),run:async(program,args)=>{calls.push([program,args]);return {ok:true,stdout:output,stderr:''};}}));
+  const post=async(route,body)=>{const r=await fetch(app+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return {status:r.status,data:await r.json()};};
+  await post('/api/import',{tool:'nmap',output,command:`nmap -sV ${target}`});
+  const checks=await (await fetch(app+'/api/workflow')).json(),candidate=checks.candidates.find(c=>c.catalogId==='http-headers');
+  assert.ok(candidate);
+  assert.equal((await post('/api/checks/run',{candidateId:candidate.id})).status,400);
+  assert.equal((await post('/api/checks/run',{candidateId:'invented',authorized:true})).status,400);
+  assert.equal(calls.length,0);
+  const done=await post('/api/checks/run',{candidateId:candidate.id,authorized:true});
+  assert.equal(done.status,200);assert.deepEqual(calls[0],['curl',['-I','--max-time','5',`https://${target}:443/`]]);
+  assert.equal(done.data.command,candidate.command);assert.equal(done.data.imported,false);
+});
+test('Nmap check output becomes linked findings',async t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'yagura-check-import-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const app=await listen(t,createServer({findingsFile:path.join(dir,'findings.json'),run:async()=>({ok:true,stdout:output,stderr:''})}));
+  const post=async(route,body)=>{const r=await fetch(app+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return {status:r.status,data:await r.json()};};
+  await post('/api/findings',{ip:target,title:'Target',detail:'Authorized local target'});
+  const workflow=await (await fetch(app+'/api/workflow')).json(),candidate=workflow.candidates.find(c=>c.catalogId==='nmap-ports');
+  assert.ok(candidate);
+  const done=await post('/api/checks/run',{candidateId:candidate.id,authorized:true});assert.equal(done.status,200);assert.equal(done.data.imported,true);
+  const doc=await (await fetch(app+'/api/findings')).json();assert.ok(doc.findings.some(f=>f.kind==='service'&&f.port===443));
+});
 test('Real HTTP model adapter: health, scoped analysis, saved results, stale detection and input validation',async t=>{
   let completions=0,lastContext;
   const model=http.createServer(async(req,res)=>{

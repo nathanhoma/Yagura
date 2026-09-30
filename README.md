@@ -1,11 +1,11 @@
 # Yagura
 
-Yagura is a local recon and initial-access triage workspace. Import command results, review linked hosts/services/observations, inspect original evidence, and choose the next check from recorded findings. Node.js 18+ runs the app without npm dependencies.
+Yagura is a local recon and initial-access triage workspace. Import command results, review linked hosts/services/observations, inspect original evidence, and choose the next check from recorded findings. The backend runs on Python 3.10+ using only the standard library; the browser UI remains HTML and JavaScript.
 
 ## Run
 
 ```sh
-node server.js
+python3 main.py
 ```
 
 Open <http://127.0.0.1:8080>. On Kali, install `iproute2` and optionally `nmap` to use local discovery. Findings are stored in `data/findings.json`. The server binds to localhost by default.
@@ -31,17 +31,17 @@ See [the common findings format](docs/findings-format.md) for fields, identity r
 
 ## Workflow and suggestions
 
-The target map shows recon, service identification, and access triage stages. Built-in rules propose checks for known targets: ICMP reachability, common TCP ports, version probes for recorded open ports, web headers, and SMB shares. Commands have concrete target/port values and links to their supporting findings and evidence. The full command catalog remains available even without a model. Commands are copyable; suggestions do not execute automatically.
+The workspace is split into Recon, Findings, Analysis, and Next checks views. The target map shows recon, service identification, and access triage stages. Built-in rules propose checks for known targets: ICMP reachability, common TCP ports, version probes for recorded open ports, web headers, and SMB shares. Commands have concrete target/port values and links to their supporting findings and evidence. The full command catalog remains available even without a model. Each concrete suggestion has a Run button. Confirm authorization in the Next checks view before running one; the server checks the current stored candidate and runs fixed arguments without a shell. Ping and Nmap output is imported when parseable. Other check output appears in the result dialog.
 
 Optional local LLM configuration uses an OpenAI-compatible endpoint:
 
 ```env
 LLM_BASE_URL=http://127.0.0.1:11434/v1
-LLM_MODEL=your-installed-model
+LLM_MODEL=
 LLM_API_KEY=
 ```
 
-Copy `.env.example` to `.env` and set your installed model. Only localhost or literal private/local IP endpoints are accepted; redirects are refused. Command ranking receives stored finding summaries, eligible checks, and the fixed command catalog. Findings analysis also receives bounded excerpts from linked raw evidence. It selects candidate IDs, while the server supplies verified commands, reasons, and evidence links. If `LLM_MODEL` is empty and `/models` advertises exactly one model, the service selects it automatically; multiple models require an explicit setting. Invented commands or unsupported targets cannot pass through. Built-in checks remain available if the model is missing, unreachable, or returns invalid results.
+Copy `.env.example` to `.env` and set the endpoint. The Analysis view lists models advertised by that endpoint; the selected model is used for analysis and suggestions. `LLM_MODEL` remains an optional server default. Only localhost or literal private/local IP endpoints are accepted; redirects are refused. Command ranking receives stored finding summaries, eligible checks, and the fixed command catalog. Findings analysis also receives bounded excerpts from linked raw evidence. It selects candidate IDs, while the server supplies verified commands, reasons, and evidence links. If `LLM_MODEL` is empty and `/models` advertises exactly one model, the service selects it automatically; with multiple models, choose one in the UI. Invented commands or unsupported targets cannot pass through. Built-in checks remain available if the model is missing, unreachable, or returns invalid results.
 
 ## Local discovery scope
 
@@ -53,10 +53,10 @@ Copy `.env.example` to `.env` and set your installed model. Only localhost or li
 ## Validate
 
 ```sh
-npm test
+python3 -m unittest discover -s test -p 'test_*.py'
 ```
 
-Tests cover parser fixtures, graph references, import deduplication, chronological updates, correction preservation, merges/deletes, legacy migration, API persistence/export, scope limits, and LLM candidate validation using a stub model. No real scans or real model are required. HTTP integration tests bind ephemeral localhost ports.
+Python tests cover the parser, record merging, API persistence, scope limits, and analysis fallback. No real scans or model are required. The former Node implementation and its tests remain in the repository for reference; `npm start` and `npm test` now run the Python app and tests.
 
 ## Findings analysis backend
 
@@ -65,8 +65,9 @@ Use **Findings analysis** in the UI to analyze all recorded findings or one host
 | API | Purpose |
 | --- | --- |
 | `GET /api/llm/health` | Check model discovery, authentication, endpoint reachability, and model selection. Credentials are never returned. |
-| `POST /api/analysis` | Analyze persisted findings; body `{}` selects all or `{"hostId":"stored-host-id"}` selects one host. Client-supplied findings/commands are rejected. |
+| `POST /api/analysis` | Analyze persisted findings; body `{}` selects all or `{"hostId":"stored-host-id","model":"advertised-model"}` selects a host and model. Client-supplied findings/commands are rejected. |
 | `GET /api/analysis/latest` | Return the saved analysis and current `stale` flag, or `{"analysis":null}`. |
+| `POST /api/checks/run` | Run a current suggested check by `candidateId` with `authorized:true`; arbitrary command strings are ignored. |
 
 Responses contain `status`, `source`, `model`, `scope`, `counts`, `summary`, `assessments`, `suggestions`, `snapshotId`, `generatedAt`, `stale`, and `warnings`. Assessments have `findingIds`, `evidenceIds`, `interpretation`, and `uncertainties`. References must point to evidence supplied to the model and linked to each cited finding. Suggestions resolve only to server-generated eligible commands. Citation validation checks references, not the factual correctness of model prose.
 
@@ -78,4 +79,4 @@ Analysis uses a bounded context (up to 100 findings, 40 evidence excerpts, and a
 npm run test:llm
 ```
 
-This test checks the configured LLM endpoint first. When its model is ready, it runs only a three-request ping against **10.0.4.80**, imports that real output into an isolated temporary workspace, sends that host's findings/evidence to the configured LLM endpoint, and verifies analysis references and saved results. It does not scan ports or execute suggested checks. It writes a report to `/tmp/yagura-llm-live-test.json` after analysis and exits unsuccessfully if a real model analysis was unavailable. Your normal findings remain untouched.
+This legacy Node script checks the former backend. The Python backend is covered by the tests above; a live Python model check can be made from the Analysis view. The script runs only a three-request ping against **10.0.4.80** and writes a report to `/tmp/yagura-llm-live-test.json`.

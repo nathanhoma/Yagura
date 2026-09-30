@@ -4,8 +4,9 @@
   "private": true,
   "description": "Local recon findings and initial-access triage workspace",
   "scripts": {
-    "start": "node server.js",
-    "test": "node --test test/*.test.js",
+    "start": "python3 main.py",
+    "test": "python3 -m unittest discover -s test -p 'test_*.py'",
+    "test:legacy": "node --test test/*.test.js",
     "test:llm": "node scripts/llm-smoke.js --live"
   },
   "engines": {
