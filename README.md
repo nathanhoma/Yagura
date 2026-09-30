@@ -10,6 +10,8 @@ python3 main.py
 
 Open <http://127.0.0.1:8080>. On Kali, install `iproute2` and optionally `nmap` to use local discovery. Findings are stored in `data/findings.json`. The server binds to localhost by default.
 
+If **Read local network state** reports that the API is unavailable or `Not found.`, check the address in the browser. This button sends `POST /api/discovery/local` to the same host and port that served the page. Start this project's Python server with `python3 main.py` and open its printed address. A static preview server or an older copy of Yagura may serve the page but lack that API route. For access from another machine, configure `APP_HOST` and `APP_PORT` on the machine running Yagura; the local network state shown is that server machine's state.
+
 ## Import and review
 
 1. Select `nmap`, `ip addr`, `ip neigh`, `ping`, `httpx`, or `nuclei` in **Import command output**.

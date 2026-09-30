@@ -57,6 +57,22 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/server.js')[0], 404)
         self.assertEqual(self.call('/.env')[0], 404)
 
+    def test_read_local_network_state_route(self):
+        outputs = {
+            ('ip', ('-j', '-4', 'addr')): (Path(__file__).parent / 'fixtures/addr.json').read_text(),
+            ('ip', ('-j', '-4', 'neigh')): (Path(__file__).parent / 'fixtures/neigh.json').read_text(),
+        }
+        self.workspace.runner = lambda program, args, timeout: {
+            'ok': True, 'stdout': outputs[(program, tuple(args))], 'stderr': ''
+        }
+        status, result = self.call('/api/discovery/local', 'POST', {})
+        self.assertEqual(status, 200)
+        self.assertTrue(result['interfaces'])
+        self.assertTrue(result['hosts'])
+        self.assertEqual(result['errors'], [])
+        commands = {e['command'] for e in self.call('/api/findings')[1]['evidence']}
+        self.assertEqual(commands, {'ip -j -4 addr', 'ip -j -4 neigh'})
+
     def test_authorized_fixed_check_and_invalid_body(self):
         status, note = self.call('/api/findings', 'POST', {'ip': '10.0.4.80', 'title': 'Target', 'detail': 'Authorized lab target'})
         self.assertEqual(status, 201)
