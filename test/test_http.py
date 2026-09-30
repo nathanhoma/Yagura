@@ -75,6 +75,22 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(result['command'], candidate['command'])
         self.assertEqual(self.call('/api/analysis', 'POST', {'findings': []})[0], 400)
 
+    def test_recon_scope_is_shared_and_persisted(self):
+        self.call('/api/findings', 'POST', {'ip': '10.0.4.80', 'title': 'Target', 'detail': 'Lab target'})
+        self.assertEqual(self.call('/api/scope')[1], {'cidr': ''})
+        self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': '8.8.8.8/32'})[0], 400)
+        self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': '10.0.4.80/32'}), (200, {'cidr': '10.0.4.80/32'}))
+        self.assertEqual(Workspace(findings_file=self.workspace.findings_file).load_scope(), '10.0.4.80/32')
+        candidates = self.call('/api/workflow')[1]['candidates']
+        candidate = next(c for c in candidates if c['catalogId'] == 'nmap-ports')
+        self.assertEqual(self.call('/api/workflow?cidr=10.0.4.81/32')[0], 400)
+        self.assertFalse(self.call('/api/analysis', 'POST', {})[1]['stale'])
+        self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True})[0], 200)
+        self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': ''}), (200, {'cidr': ''}))
+        self.assertEqual(self.call('/api/workflow')[1]['candidates'], [])
+        self.assertEqual(self.call('/api/workflow?cidr=10.0.4.80/32')[0], 400)
+        self.assertTrue(self.call('/api/analysis/latest')[1]['analysis']['stale'])
+
     def test_model_result_only_uses_server_candidates(self):
         class FakeModel:
             base = 'http://127.0.0.1:11434/v1'

@@ -184,6 +184,7 @@ def csv_export(doc):
 class Workspace:
     def __init__(self, findings_file=None, analysis_file=None, llm=None, runner=None):
         self.findings_file = Path(findings_file or ROOT / 'data/findings.json')
+        self.scope_file = self.findings_file.with_name('scope.json')
         self.analysis_file = Path(analysis_file or self.findings_file.with_name('analysis.json'))
         self.drafts = DraftStore(self.findings_file.with_name('email-drafts.json'))
         self.llm = llm or LlmService(os.getenv('LLM_BASE_URL', ''), os.getenv('LLM_MODEL', ''), os.getenv('LLM_API_KEY', ''), os.getenv('LLM_TIMEOUT_MS', '30000'))
@@ -191,6 +192,35 @@ class Workspace:
         self.lock = threading.RLock()
         self.active_checks = set()
         self.active_analyses = {}
+
+    def load_scope(self):
+        try:
+            data = json.loads(self.scope_file.read_text())
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f'Cannot read scope setting: {exc}')
+        if not isinstance(data, dict) or not isinstance(data.get('cidr'), str):
+            raise RuntimeError('Cannot read scope setting: invalid format.')
+        return check_scope_cidr(data['cidr']) if data['cidr'] else None
+
+    def save_scope(self, cidr):
+        normalized = check_scope_cidr(cidr) if cidr else None
+        self.scope_file.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.scope_file.with_name(self.scope_file.name + '.tmp')
+        temp.write_text(json.dumps({'cidr': normalized or ''}) + '\n')
+        temp.chmod(0o600)
+        temp.replace(self.scope_file)
+        return normalized
+
+    def resolve_scope(self, requested=None):
+        selected = self.load_scope()
+        supplied = check_scope_cidr(requested) if requested else None
+        if self.scope_file.exists() and not selected and supplied:
+            raise ValueError('Set the authorized scope in Recon before proposing checks.')
+        if selected and supplied and supplied != selected:
+            raise ValueError('The requested range differs from the Recon scope. Refresh and use the saved scope.')
+        return selected or supplied
 
     def load(self):
         try:
@@ -225,7 +255,8 @@ class Workspace:
 
     def stale(self, result):
         try:
-            return fingerprint(scoped_document(self.load(), result['scope'].get('hostId'))) != result['snapshotId']
+            return (fingerprint(scoped_document(self.load(), result['scope'].get('hostId'))) != result['snapshotId'] or
+                    self.scope_file.exists() and result['scope'].get('authorizedCidr') != self.load_scope())
         except (ValueError, KeyError):
             return True
 
@@ -270,6 +301,9 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
             self.handle_route()
 
         def do_POST(self):
+            self.handle_route()
+
+        def do_PUT(self):
             self.handle_route()
 
         def do_PATCH(self):
@@ -333,6 +367,17 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     base = workspace.llm.base
                     return self.send_json(200, dict(ready=True, nmap=result['ok'], nuclei=bool(shutil.which('nuclei')),
                                                     llm='configured' if base and private_url(base) else 'blocked: URL must point to localhost or a private IP' if base else 'not configured'))
+                if self.command == 'GET' and path == '/api/scope':
+                    with workspace.lock:
+                        cidr = workspace.load_scope()
+                    return self.send_json(200, dict(cidr=cidr or ''))
+                if self.command == 'PUT' and path == '/api/scope':
+                    body = self.body(1000)
+                    if not isinstance(body, dict) or set(body) != {'cidr'} or not isinstance(body['cidr'], str):
+                        raise ValueError('Supply the private/local IPv4 scope as cidr.')
+                    with workspace.lock:
+                        cidr = workspace.save_scope(body['cidr'].strip())
+                    return self.send_json(200, dict(cidr=cidr or ''))
                 if self.command == 'GET' and path == '/api/llm/health':
                     return self.send_json(200, workspace.llm.health())
                 if self.command == 'GET' and path == '/api/analysis/latest':
@@ -350,8 +395,8 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     if not isinstance(body, dict) or any(k not in ('hostId', 'model', 'authorizedCidr') for k in body) or ('hostId' in body and not isinstance(body['hostId'], str)) or ('model' in body and (not isinstance(body['model'], str) or len(body['model']) > 200)):
                         raise ValueError('Supply only an optional stored hostId, selected model, and authorized check range for analysis.')
                     scope = {'hostId': body['hostId']} if body.get('hostId') else {}
-                    scope['authorizedCidr'] = check_scope_cidr(body.get('authorizedCidr'))
                     with workspace.lock:
+                        scope['authorizedCidr'] = workspace.resolve_scope(body.get('authorizedCidr'))
                         doc = workspace.load()
                         selected = scoped_document(doc, scope.get('hostId'))
                         key = fingerprint(selected) + ':' + body.get('model', '') + ':' + str(scope['authorizedCidr'])
@@ -383,8 +428,8 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         raise event.error
                     return self.send_json(200, event.result)
                 if self.command == 'GET' and path in ('/api/findings', '/api/workflow', '/api/commands'):
-                    cidr = check_scope_cidr(parse_qs(url.query).get('cidr', [None])[0]) if path == '/api/workflow' else None
                     with workspace.lock:
+                        cidr = workspace.resolve_scope(parse_qs(url.query).get('cidr', [None])[0]) if path == '/api/workflow' else None
                         data = {'/api/findings': lambda: workspace.load(), '/api/workflow': lambda: workflow(workspace.load(), cidr), '/api/commands': lambda: {'commands': COMMAND_CATALOG}}[path]()
                     return self.send_json(200, data)
                 if self.command == 'GET' and path == '/api/export':
@@ -437,6 +482,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         doc = workspace.load()
                         F.merge_parsed(doc, parsed)
                         workspace.save(doc)
+                        workspace.save_scope(cidr)
                     hosts = [dict(ip=h['ip'], name=h.get('name'), status=h.get('state')) for h in parsed['findings'] if h['kind'] == 'host']
                     return self.send_json(200, dict(cidr=cidr, hosts=hosts, count=len(hosts)))
                 if self.command == 'POST' and path == '/api/findings':
@@ -494,10 +540,10 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     body = self.body(4000)
                     if not isinstance(body, dict) or set(body) - {'candidateId', 'authorized', 'authorizedCidr'} or body.get('authorized') is not True or not isinstance(body.get('candidateId'), str):
                         raise ValueError('Choose a current suggested check and confirm authorization.')
-                    cidr = check_scope_cidr(body.get('authorizedCidr'))
-                    if cidr is None:
-                        raise ValueError('Choose an authorized check range before running a check.')
                     with workspace.lock:
+                        cidr = workspace.resolve_scope(body.get('authorizedCidr'))
+                        if cidr is None:
+                            raise ValueError('Choose an authorized check range before running a check.')
                         doc = workspace.load()
                         candidate = next((c for c in workflow(doc, cidr)['candidates'] if c['id'] == body['candidateId']), None)
                         if not candidate:
@@ -530,8 +576,8 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     body = self.body(4000)
                     if not isinstance(body, dict) or set(body) - {'model', 'authorizedCidr'} or ('model' in body and (not isinstance(body['model'], str) or len(body['model']) > 200)):
                         raise ValueError('Use a valid selected model.')
-                    cidr = check_scope_cidr(body.get('authorizedCidr'))
                     with workspace.lock:
+                        cidr = workspace.resolve_scope(body.get('authorizedCidr'))
                         doc = workspace.load()
                         available = workflow(doc, cidr)['candidates'][:100]
                     def fallback(message):
