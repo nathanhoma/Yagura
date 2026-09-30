@@ -76,14 +76,14 @@ def parse_import(data):
     if not isinstance(data, dict):
         raise ValueError('Invalid import request.')
     tool, output = data.get('tool'), data.get('output')
-    if tool not in ('nmap', 'ip addr', 'ip neigh', 'ping'):
-        raise ValueError('Choose nmap, ip addr, ip neigh, or ping.')
+    if tool not in ('nmap', 'ip addr', 'ip neigh', 'ping', 'httpx', 'nuclei'):
+        raise ValueError('Choose a supported parser.')
     if not isinstance(output, str) or not output.strip():
         raise ValueError('Command output is required.')
     if len(output.encode()) > 800000:
         raise ValueError('Output exceeds the 800 KB import limit.')
     time = timestamp(data.get('observedAt'))
-    fmt = 'json' if output.lstrip().startswith('[') else 'xml' if '<nmaprun' in output else 'text'
+    fmt = 'jsonl' if tool in ('httpx', 'nuclei') else 'json' if output.lstrip().startswith('[') else 'xml' if '<nmaprun' in output else 'text'
     command = data.get('command') or (re.search(r'<nmaprun\b[^>]*\bargs=["\']([^"\']+)', output).group(1) if tool == 'nmap' and re.search(r'<nmaprun\b[^>]*\bargs=["\']([^"\']+)', output) else tool)
     ev = dict(id=uid('evidence'), tool=tool, command=str(command).strip()[:2000], output=output, observedAt=time, importedAt=now(), format=fmt)
     findings, warnings = [], []
@@ -110,7 +110,38 @@ def parse_import(data):
         findings.append(s)
         return s
 
-    if tool == 'nmap':
+    if tool in ('httpx', 'nuclei'):
+        from urllib.parse import urlsplit
+        rows = []
+        try:
+            rows = [json.loads(line) for line in output.splitlines() if line.strip()]
+        except json.JSONDecodeError as exc:
+            raise ValueError(f'Invalid {tool} JSONL: {exc}')
+        if not rows or len(rows) > 1000 or any(not isinstance(row, dict) for row in rows):
+            raise ValueError(f'{tool} requires 1–1000 JSONL objects.')
+        for row in rows:
+            target = row.get('url') or row.get('matched-at') or row.get('matched') or ''
+            if not isinstance(target, str):
+                raise ValueError(f'{tool} target URL must be text.')
+            parsed_url = urlsplit(target)
+            ip = row.get('host') if is_ip(row.get('host')) else parsed_url.hostname
+            if not is_ip(ip):
+                warnings.append(f'{tool} row without a numeric target IP was not linked.')
+                continue
+            h = host(ip)
+            if tool == 'httpx':
+                port = parsed_url.port or (443 if parsed_url.scheme == 'https' else 80)
+                s = service(h, port=port, protocol='tcp', state='open', name='https' if parsed_url.scheme == 'https' else 'http')
+                detail = f"{target} · HTTP {row.get('status_code', '?')} · {row.get('title', '')}"
+                observe(h, 'HTTP probe', detail[:4000], s)
+                if row.get('tech'):
+                    observe(h, 'Web technologies', ', '.join(map(str, row['tech']))[:4000], s)
+            else:
+                info = row.get('info') if isinstance(row.get('info'), dict) else {}
+                title = str(info.get('name') or row.get('template-id') or 'Nuclei match')
+                detail = f"{target} · template {row.get('template-id', '?')} · severity {info.get('severity', 'unknown')}"
+                observe(h, f'Nuclei: {title}'[:160], detail[:4000])
+    elif tool == 'nmap':
         if '<nmaprun' in output:
             if '<!ENTITY' in output.upper():
                 raise ValueError('XML entity declarations are not supported.')

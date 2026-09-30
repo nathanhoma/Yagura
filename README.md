@@ -12,7 +12,7 @@ Open <http://127.0.0.1:8080>. On Kali, install `iproute2` and optionally `nmap` 
 
 ## Import and review
 
-1. Select `nmap`, `ip addr`, `ip neigh`, or `ping` in **Import command output**.
+1. Select `nmap`, `ip addr`, `ip neigh`, `ping`, `httpx`, or `nuclei` in **Import command output**.
 2. Paste the complete output or select a file up to 800 KB. Supply the source command and optionally the observation timestamp (entered in your browser's local time).
 3. Preview the parsed records, then save the import. Inspect and correct records using **Edit**; saving marks them reviewed.
 4. Use the target/service map and evidence links to inspect each relationship and original command output. **Merge** combines duplicates, preserves evidence, and redirects child links.
@@ -24,6 +24,8 @@ Open <http://127.0.0.1:8080>. On Kali, install `iproute2` and optionally `nmap` 
 | ip addr | `ip -j addr` JSON or normal `ip addr` text, including IPv4/IPv6 interface addresses |
 | ip neigh | `ip -j neigh` JSON or normal `ip neigh` text, including MAC/interface/neighbor state; `[]` represents an empty table |
 | ping | Linux/iputils text and Windows text with a numeric target address; reply statistics and reachability observations |
+| httpx | ProjectDiscovery JSONL with a numeric target IP; HTTP status, title, and technologies become linked observations |
+| nuclei | ProjectDiscovery JSONL with a numeric target IP; template ID, name, and severity become linked observations requiring review |
 
 XML preserves separate Nmap product and version fields. Normal text retains the full version description in `product`, because the text format does not consistently separate its components. Unrecognized or incomplete outputs return an error. A no-reply ping records `no-response`, which does not establish that a host is down. Re-imports deduplicate linked records while adding evidence; reviewed corrections survive later imports. Existing flat notes migrate automatically with a backup of the original file.
 
@@ -31,7 +33,11 @@ See [the common findings format](docs/findings-format.md) for fields, identity r
 
 ## Workflow and suggestions
 
-The workspace is split into Recon, Findings, Analysis, and Next checks views. The target map shows recon, service identification, and access triage stages. Enter an authorized IPv4 CIDR in Next checks before any concrete command is proposed; leaving it empty produces no target commands. Use a `/32` for one host. Built-in rules then propose checks only for recorded hosts inside that range: ICMP reachability, common TCP ports, version probes, OS fingerprinting for recorded open TCP services, web headers, and SMB shares. TCP port discovery and service version checks explicitly use Nmap TCP connect mode (`-sT`) for networks where SYN scans are filtered. OS detection uses `nmap -n -Pn -O` and may require elevated privileges. Commands have concrete target/port values and links to their supporting findings and evidence. The full command catalog remains available as reference templates. Each concrete suggestion has a Run button. Confirm authorization in the Next checks view before running one; the server checks that the current stored candidate is inside the supplied CIDR and runs fixed arguments without a shell. Ping and Nmap output is imported when parseable. Other check output appears in the result dialog.
+The workspace is split into Recon, Findings, Analysis, and Next checks views. The target map shows recon, service identification, and access triage stages. Enter an authorized IPv4 CIDR in Next checks before any concrete command is proposed; leaving it empty produces no target commands. Use a `/32` for one host. Built-in rules then propose checks only for recorded hosts inside that range: ICMP reachability, common TCP ports, version probes, OS fingerprinting for recorded open TCP services, reverse DNS, web headers, bounded web inventory, SMB shares, specific Nmap scripts for observed SSH, SMB, and NFS services, and one curated Nuclei exposure check. TCP port discovery and service version checks explicitly use Nmap TCP connect mode (`-sT`) for networks where SYN scans are filtered. OS detection uses `nmap -n -Pn -O` and may require elevated privileges. Commands have concrete target/port values and links to their supporting findings and evidence. The full command catalog remains available as reference templates. Each concrete suggestion has a Run button. Confirm authorization in the Next checks view before running one; the server checks that the current stored candidate is inside the supplied CIDR and runs fixed arguments without a shell. Parseable check output is saved as linked evidence and observations. `httpx` and Nuclei JSONL can also be imported for review.
+
+The web inventory check pins each connection to the recorded IP while preserving the configured hostname for virtual hosting. It reads up to five same-origin pages and records response status, title, server header, and up to 50 linked routes. It does not submit forms or execute JavaScript. Reverse DNS reports the local resolver's answer, which should be reviewed before treating it as a host identity.
+
+The optional Nuclei check runs only the bundled `backend/templates/git-head-exposure.yaml` template against a recorded IP and web port, with one request per second, one template worker, and redirects disabled. Install Nuclei separately to run it. A match is a finding to review, not proof of access. Other Nuclei templates can be imported as JSONL but are not executable from Yagura.
 
 Optional local LLM configuration uses an OpenAI-compatible endpoint:
 

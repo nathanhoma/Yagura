@@ -81,12 +81,88 @@ def invocation(candidate, doc):
     if kind == 'http-headers':
         s = services[0]
         scheme = 'https' if s.get('tunnel') == 'ssl' or 'https' in s.get('name', '').lower() or s['port'] in (443, 8443) else 'http'
-        return 'curl', ['-I', '--max-time', '5', f"{scheme}://{ip}:{s['port']}/"], None
+        return 'curl', ['-I', '--max-time', '5', f"{scheme}://{ip}:{s['port']}/"], 'http-headers'
     if kind == 'web-contacts':
         return sys.executable, [str(ROOT / 'backend/web_contacts.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-contacts'
     if kind == 'smb-shares':
-        return 'smbclient', ['-L', f'//{ip}', '-N'], None
+        return 'smbclient', ['-L', f'//{ip}', '-N'], 'smb-shares'
+    if kind == 'dns-ptr':
+        return 'getent', ['hosts', ip], 'dns-ptr'
+    if kind == 'web-inventory':
+        return sys.executable, [str(ROOT / 'backend/web_inventory.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-inventory'
+    if kind in ('ssh-hostkey', 'smb-security', 'nfs-exports'):
+        script = {'ssh-hostkey': 'ssh-hostkey', 'smb-security': 'smb2-security-mode', 'nfs-exports': 'nfs-showmount'}[kind]
+        return 'nmap', ['-n', '-Pn', '-sT', '-p', str(services[0]['port']), '--script', script, '-oX', '-', ip], 'nmap'
+    if kind == 'nuclei-git':
+        service = services[0]
+        scheme = 'https' if service.get('tunnel') == 'ssl' or 'https' in service.get('name', '').lower() or service['port'] in (443, 8443) else 'http'
+        url = f"{scheme}://{ip}:{service['port']}/"
+        return 'nuclei', ['-u', url, '-t', str(ROOT / 'backend/templates/git-head-exposure.yaml'), '-j', '-silent', '-rl', '1', '-c', '1', '-dr', '-ni', '-duc'], 'nuclei-git'
     raise ValueError('This check cannot be executed from a suggestion.')
+
+
+def parse_check_result(candidate, tool, output):
+    if tool in ('nmap', 'ping'):
+        return F.parse_import(dict(tool=tool, output=output, command=candidate['command'], observedAt=F.now()))
+    time = F.now()
+    ev = dict(id=F.uid('evidence'), tool=tool, command=candidate['command'], output=output,
+              observedAt=time, importedAt=time, format='json' if tool in ('web-contacts', 'web-inventory') else 'jsonl' if tool == 'nuclei-git' else 'text')
+    host_id = candidate['hostId']
+    service_id = candidate['serviceIds'][0] if candidate['serviceIds'] else None
+    observations = []
+    def add(title, detail, service=service_id):
+        observations.append(F.record('observation', dict(hostId=host_id, serviceId=service,
+                                                         title=title, detail=str(detail)[:4000]), ev['id'], time))
+    if tool == 'web-contacts':
+        report = json.loads(output)
+        if not isinstance(report, dict) or not isinstance(report.get('contacts'), list):
+            raise ValueError('Invalid website contacts report.')
+        detail = f"{report.get('count', 0)} distinct email address(es) found on {len(report.get('pages', []))} inspected page(s).\n"
+        detail += '\n'.join(f"{item['address']} — {', '.join(item['sources'])}" for item in report['contacts'])
+        detail += '\n' + report.get('coverage', '')
+        if report.get('errors'):
+            detail += '\nSome pages could not be inspected; see source evidence.'
+        add('Published website contacts', detail)
+    elif tool == 'web-inventory':
+        report = json.loads(output)
+        if not isinstance(report, dict) or not isinstance(report.get('pages'), list) or not isinstance(report.get('routes'), list):
+            raise ValueError('Invalid web inventory report.')
+        if not report['pages']:
+            raise ValueError('No web pages were inspected.')
+        detail = '\n'.join(f"{p.get('url', '')} · HTTP {p.get('status', '?')} · {p.get('title', '')} · {p.get('server', '')}" for p in report['pages'][:5])
+        add('Web inventory', detail)
+        if report['routes']:
+            add('Web routes', '\n'.join(str(route) for route in report['routes'][:50]))
+        if report.get('errors'):
+            add('Web inventory errors', '\n'.join(map(str, report['errors'][:10])))
+    elif tool == 'http-headers':
+        if not output.lstrip().startswith('HTTP/'):
+            raise ValueError('No HTTP response headers found.')
+        add('HTTP response headers', output)
+    elif tool == 'smb-shares':
+        if not re.search(r'\bSharename\b|\bDisk\b|\bIPC\b', output, re.I):
+            raise ValueError('No SMB share listing found.')
+        add('SMB share listing', output)
+    elif tool == 'dns-ptr':
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if not lines or not any(line.split()[0] == candidate['command'].split()[-1] for line in lines if line.split()):
+            raise ValueError('No reverse DNS result for target.')
+        add('Reverse DNS name', '\n'.join(lines[:10]), None)
+    elif tool == 'nuclei-git':
+        target = urlsplit(candidate['command'].split()[2])
+        rows = [json.loads(line) for line in output.splitlines() if line.strip()]
+        if len(rows) > 100 or any(not isinstance(row, dict) for row in rows):
+            raise ValueError('Invalid Nuclei result count or format.')
+        for row in rows:
+            matched = urlsplit(str(row.get('matched-at') or row.get('matched') or ''))
+            matched_port = matched.port or (443 if matched.scheme == 'https' else 80)
+            target_port = target.port or (443 if target.scheme == 'https' else 80)
+            if row.get('template-id') != 'yagura-git-head-exposure' or matched.hostname != target.hostname or matched_port != target_port or matched.scheme != target.scheme:
+                raise ValueError('Nuclei result is outside the selected template or target.')
+        add('Curated Nuclei exposure check', 'Exposed Git HEAD metadata matched; review the raw result.' if rows else 'No exposed Git HEAD metadata matched on this check.')
+    else:
+        raise ValueError('Unsupported check result.')
+    return dict(findings=observations, evidence=[ev])
 
 
 def csv_export(doc):
@@ -255,7 +331,8 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 if self.command == 'GET' and path == '/api/health':
                     result = workspace.runner('nmap', ['--version'], 2.5)
                     base = workspace.llm.base
-                    return self.send_json(200, dict(ready=True, nmap=result['ok'], llm='configured' if base and private_url(base) else 'blocked: URL must point to localhost or a private IP' if base else 'not configured'))
+                    return self.send_json(200, dict(ready=True, nmap=result['ok'], nuclei=bool(shutil.which('nuclei')),
+                                                    llm='configured' if base and private_url(base) else 'blocked: URL must point to localhost or a private IP' if base else 'not configured'))
                 if self.command == 'GET' and path == '/api/llm/health':
                     return self.send_json(200, workspace.llm.health())
                 if self.command == 'GET' and path == '/api/analysis/latest':
@@ -433,29 +510,13 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         result = workspace.runner(program, args, 45)
                         output, stderr = str(result.get('stdout') or '')[:100000], str(result.get('stderr') or '')[:3000]
                         imported, warning = False, ''
-                        if tool and output.strip():
+                        if tool and (output.strip() or tool == 'nuclei-git' and result['ok']):
                             try:
-                                if tool == 'web-contacts':
-                                    report = json.loads(output)
-                                    if not isinstance(report, dict) or not isinstance(report.get('contacts'), list):
-                                        raise ValueError('Invalid website contacts report.')
-                                    time = F.now()
-                                    ev = dict(id=F.uid('evidence'), tool=tool, command=candidate['command'], output=output,
-                                              observedAt=time, importedAt=time, format='json')
-                                    detail = f"{report.get('count', 0)} distinct email address(es) found on {len(report.get('pages', []))} inspected page(s).\n"
-                                    detail += '\n'.join(f"{item['address']} — {', '.join(item['sources'])}" for item in report['contacts'])
-                                    detail += '\n' + report.get('coverage', '')
-                                    if report.get('errors'):
-                                        detail += '\nSome pages could not be inspected; see source evidence.'
-                                    finding = F.record('observation', dict(hostId=candidate['hostId'], serviceId=candidate['serviceIds'][0],
-                                                       title='Published website contacts', detail=detail[:4000]), ev['id'], time)
-                                    parsed = dict(findings=[finding], evidence=[ev])
-                                else:
-                                    parsed = F.parse_import(dict(tool=tool, output=output, command=candidate['command'], observedAt=F.now()))
+                                parsed = parse_check_result(candidate, tool, output)
                                 with workspace.lock:
                                     latest = workspace.load()
-                                    if tool == 'web-contacts' and not all(any(f['id'] == required for f in latest['findings']) for required in candidate['findingIds']):
-                                        raise ValueError('The website target was removed while the check ran.')
+                                    if not all(any(f['id'] == required for f in latest['findings']) for required in candidate['findingIds']):
+                                        raise ValueError('The target changed while the check ran.')
                                     F.merge_parsed(latest, parsed)
                                     workspace.save(latest)
                                 imported = True

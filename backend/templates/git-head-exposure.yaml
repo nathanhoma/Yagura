@@ -1,0 +1,22 @@
+id: yagura-git-head-exposure
+
+info:
+  name: Exposed Git HEAD metadata
+  author: yagura
+  severity: medium
+  description: A read-only check for a publicly readable Git HEAD file.
+  tags: exposure,git
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.git/HEAD"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "ref: refs/"
