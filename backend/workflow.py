@@ -14,17 +14,26 @@ def is_local_ip(value):
 
 
 COMMAND_CATALOG = [
-    dict(id='neighbors', title='Refresh local neighbors', command='ip -4 neigh', when='Refresh neighbor entries seen on the local link.'),
+    dict(id='interfaces', title='Read local IPv4 interfaces', command='ip -j -4 addr', when='List local interface addresses and scan ranges.'),
+    dict(id='neighbors', title='Refresh local neighbors', command='ip -j -4 neigh', when='Refresh neighbor entries seen on the local link.'),
+    dict(id='nmap-discovery', title='Discover hosts in a local range', command='nmap -n -sn -oX - {cidr}', when='Discover reachable hosts in an authorized local IPv4 range of at most 1,024 addresses.'),
     dict(id='ping', title='Check host reachability', command='ping -c 3 {host}', when='Check ICMP reachability of a recorded host.'),
-    dict(id='nmap-ports', title='Check common TCP ports', command='nmap -n -Pn --top-ports 100 {host}', when='Discover common services when a target has no recorded open TCP ports.'),
-    dict(id='nmap-service', title='Identify service versions', command='nmap -n -Pn -sV --version-light -p {ports} {host}', when='Identify versions on recorded open TCP ports.'),
+    dict(id='nmap-ports', title='Check common TCP ports', command='nmap -n -Pn -sT --top-ports 100 {host}', when='Discover common services when a target has no recorded open TCP ports using a TCP connect scan.'),
+    dict(id='nmap-service', title='Identify service versions', command='nmap -n -Pn -sT -sV --version-light -p {ports} {host}', when='Identify versions on recorded open TCP ports using a TCP connect scan.'),
+    dict(id='nmap-os', title='Guess host operating system', command='nmap -n -Pn -O {host}', when='Use Nmap OS fingerprinting on a recorded host with an open TCP port. May require elevated privileges.'),
     dict(id='http-headers', title='Inspect HTTP headers', command='curl -I --max-time 5 {scheme}://{host}:{port}/', when='Review headers for a recorded open web service.'),
     dict(id='smb-shares', title='List SMB shares', command='smbclient -L //{host} -N', when='Check advertised shares for a recorded open SMB service.'),
 ]
 
 
-def workflow(doc):
+def workflow(doc, authorized_cidr=None):
     candidates, targets = [], []
+    try:
+        authorized_network = ipaddress.ip_network(authorized_cidr, strict=False) if authorized_cidr else None
+        if authorized_network and authorized_network.version != 4:
+            authorized_network = None
+    except ValueError:
+        authorized_network = None
     catalog = {c['id']: c for c in COMMAND_CATALOG}
     rows = doc['findings']
 
@@ -43,7 +52,9 @@ def workflow(doc):
         services = [s for s in rows if s['kind'] == 'service' and s.get('hostId') == host['id']]
         observations = [o for o in rows if o['kind'] == 'observation' and o.get('hostId') == host['id']]
         opened = [s for s in services if s.get('state') == 'open']
-        eligible = is_local_ip(host['ip']) and not host.get('local') and host.get('state') != 'down'
+        eligible = (is_local_ip(host['ip']) and authorized_network is not None and
+                    ipaddress.ip_address(host['ip']) in authorized_network and
+                    not host.get('local') and host.get('state') != 'down')
         if eligible:
             if host.get('state') != 'up':
                 add('ping', host, [], f"Host {host['ip']} is recorded with reachability {host.get('state')}; verify ICMP response.")
@@ -54,6 +65,8 @@ def workflow(doc):
             if unknown:
                 ports = ','.join(str(s['port']) for s in sorted(unknown, key=lambda s: s['port']))
                 add('nmap-service', host, unknown, f"Open TCP ports {', '.join(str(s['port']) for s in unknown)} lack recorded product/version information.", ports=ports)
+            if tcp and not any(o.get('title') == 'Nmap OS guess' for o in observations):
+                add('nmap-os', host, tcp, f"Host {host['ip']} has a recorded open TCP port but no Nmap OS guess; fingerprint its operating system.")
             for s in tcp:
                 port, name = s['port'], s.get('name', '')
                 if re.search('http|www', name, re.I) or port in (80, 443, 8000, 8080, 8443):
@@ -62,6 +75,10 @@ def workflow(doc):
                 if port == 445 or name in ('microsoft-ds', 'netbios-ssn', 'smb'):
                     add('smb-shares', host, [s], f"Recorded open {port}/tcp ({name or 'SMB-associated port'}) supports share enumeration.")
         stage = 'local context' if host.get('local') else 'recon' if not opened else 'service identification' if any(not s.get('product') and not s.get('version') for s in opened) else 'access triage'
-        reason = '' if eligible else 'Local interface address' if host.get('local') else 'Imported target outside local IPv4 suggestion scope' if not is_local_ip(host['ip']) else 'Last recorded host state is down'
+        reason = ('' if eligible else 'Local interface address' if host.get('local') else
+                  'Imported target outside local IPv4 suggestion scope' if not is_local_ip(host['ip']) else
+                  'No authorized check range selected' if authorized_network is None else
+                  'Outside selected authorized check range' if ipaddress.ip_address(host['ip']) not in authorized_network else
+                  'Last recorded host state is down')
         targets.append(dict(host=host, services=services, observations=observations, stage=stage, eligible=eligible, scopeReason=reason))
     return dict(targets=targets, candidates=candidates)

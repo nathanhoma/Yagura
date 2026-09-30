@@ -31,7 +31,7 @@ def fingerprint(doc):
     return hashlib.sha256(encoded(doc).encode()).hexdigest()
 
 
-def build_context(doc):
+def build_context(doc, authorized_cidr=None):
     context = dict(findings=[], evidence=[], candidates=[])
     included = set()
     fields = ('id', 'kind', 'hostId', 'serviceId', 'ip', 'aliases', 'name', 'state', 'local', 'port', 'protocol', 'product', 'version', 'tunnel', 'firstSeen', 'lastSeen', 'reviewStatus')
@@ -54,7 +54,7 @@ def build_context(doc):
         row = dict(id=ev['id'], tool=ev['tool'], command=ev.get('command', '')[:500], observedAt=ev['observedAt'], output=ev['output'][:1200], excerptTruncated=len(ev['output']) > 1200)
         if len(encoded(context['evidence'] + [row])) <= 7500:
             context['evidence'].append(row)
-    for candidate in workflow(doc)['candidates']:
+    for candidate in workflow(doc, authorized_cidr)['candidates']:
         if len(context['candidates']) >= 40:
             break
         if not all(x in included for x in candidate['findingIds']):
@@ -114,12 +114,12 @@ def built_in(doc):
 
 def analyze(doc, scope, llm, model=''):
     selected = scoped_document(doc, scope.get('hostId'))
-    context = build_context(selected)
+    context = build_context(selected, scope.get('authorizedCidr'))
     hosts = [f for f in selected['findings'] if f['kind'] == 'host']
     services = [f for f in selected['findings'] if f['kind'] == 'service']
     observations = [f for f in selected['findings'] if f['kind'] == 'observation']
     result = dict(schemaVersion=1, generatedAt=now(), snapshotId=fingerprint(selected),
-                  scope=dict(hostId=scope.get('hostId'), hostIds=[h['id'] for h in hosts], ips=[h['ip'] for h in hosts]),
+                  scope=dict(hostId=scope.get('hostId'), authorizedCidr=scope.get('authorizedCidr'), hostIds=[h['id'] for h in hosts], ips=[h['ip'] for h in hosts]),
                   counts=dict(hosts=len(hosts), services=len(services), observations=len(observations), evidence=len(selected['evidence'])),
                   summary=f'Recorded {len(hosts)} hosts, {len(services)} services, and {len(observations)} observations.',
                   context=dict(findingIds=[f['id'] for f in context['findings']], evidenceIds=[e['id'] for e in context['evidence']], truncated=context['truncated']),
@@ -135,4 +135,4 @@ def analyze(doc, scope, llm, model=''):
     except Exception as exc:
         return {**result, 'status': 'fallback', 'source': 'built-in', 'model': model or llm.configuration()['model'],
                 'error': dict(code=getattr(exc, 'code', 'model-error'), message=str(exc)), 'assessments': built_in(selected),
-                'suggestions': workflow(selected)['candidates'][:6], 'message': 'Local model analysis is unavailable. Showing recorded facts and built-in next checks.'}
+                'suggestions': workflow(selected, scope.get('authorizedCidr'))['candidates'][:6], 'message': 'Local model analysis is unavailable. Showing recorded facts and built-in next checks.'}

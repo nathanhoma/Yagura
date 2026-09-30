@@ -47,8 +47,12 @@ test('Service deletion cascades observations; host deletion cascades services; e
 });
 test('Legacy notes migrate to linked findings with evidence',()=>{const d=F.migrate([{id:'old',kind:'host',ip:'192.168.56.10',title:'lab',detail:'Discovered',source:'nmap',createdAt:'2026-09-29T12:00:00Z'},{kind:'note',ip:'192.168.56.10',title:'Web note',detail:'observed'}]);validLinks(d);assert.equal(d.findings.filter(f=>f.kind==='host').length,1);assert.equal(d.findings[1].kind,'observation');});
 test('Workflow uses only observed open services, resolves HTTPS, links evidence',()=>{
-  const d=imported(),w=workflow(d);assert.equal(w.targets[0].stage,'service identification');assert.ok(!w.candidates.some(c=>c.catalogId==='nmap-ports'));assert.ok(w.candidates.some(c=>c.command==='curl -I --max-time 5 https://192.168.56.10:443/'));assert.ok(w.candidates.some(c=>c.catalogId==='smb-shares'));
+  const d=imported(),w=workflow(d,'192.168.56.10/32');assert.equal(w.targets[0].stage,'service identification');assert.ok(!w.candidates.some(c=>c.catalogId==='nmap-ports'));assert.ok(w.candidates.some(c=>c.command==='curl -I --max-time 5 https://192.168.56.10:443/'));assert.ok(w.candidates.some(c=>c.catalogId==='smb-shares'));
   const version=w.candidates.find(c=>c.catalogId==='nmap-service');assert.ok(version.command.includes('-p 443,445'));for(const c of w.candidates){assert.ok(!c.command.includes('{'));assert.ok(c.evidenceIds.length);}
+  assert.ok(w.candidates.some(c=>c.catalogId==='nmap-os'&&c.command==='nmap -n -Pn -O 192.168.56.10'));
+  F.mergeParsed(d,F.parseImport({tool:'nmap',command:'nmap -n -Pn -O 192.168.56.10',output:'Nmap scan report for 192.168.56.10\nHost is up.\n80/tcp open http\nOS details: Linux 5.x\nNmap done: 1 IP address (1 host up) scanned'}));
+  assert.ok(d.findings.some(f=>f.title==='Nmap OS guess'&&f.detail.includes('Linux 5.x')));
+  assert.ok(!workflow(d,'192.168.56.10/32').candidates.some(c=>c.catalogId==='nmap-os'));
   d.findings.find(f=>f.kind==='host').ip='8.8.8.8';assert.equal(workflow(d).candidates.length,0);d.findings.find(f=>f.kind==='host').ip='192.168.56.10';d.findings.find(f=>f.kind==='host').local=true;assert.equal(workflow(d).candidates.length,0);
 });
 test('Scope validation rejects public, malformed and oversized ranges',()=>{
@@ -74,7 +78,7 @@ test('API preview does not persist; import, edit, export, merge and delete round
   const exported=await fetch(base+'/api/export');assert.deepEqual(await exported.json(),doc);assert.ok(exported.headers.get('content-disposition').includes('.json'));
   const csv=await (await fetch(base+'/api/export?format=csv')).text();assert.ok(csv.includes('sourceCommands'));assert.ok(csv.includes('nmap example'));
   for(const url of ['/.env','/server.js','/data/findings.json'])assert.equal((await fetch(base+url)).status,404);
-  const check=await call('/api/suggest','POST',{findings:[{ip:'8.8.8.8'}]});assert.equal(check.data.source,'built-in');assert.ok(check.data.suggestions.every(s=>s.command.includes('192.168.56.10')));
+  const check=await call('/api/suggest','POST',{findings:[{ip:'8.8.8.8'}],authorizedCidr:'192.168.56.10/32'});assert.equal(check.data.source,'built-in');assert.ok(check.data.suggestions.every(s=>s.command.includes('192.168.56.10')));
   const note=await call('/api/findings','POST',{ip:h.ip,title:'note',detail:'observed'});const note2=await call('/api/findings','POST',{ip:h.ip,title:'duplicate',detail:'duplicate observation'});
   const merged=await call('/api/findings/merge','POST',{targetId:note.data.finding.id,sourceId:note2.data.finding.id});assert.equal(merged.status,200);validLinks(merged.data);
   assert.equal((await call('/api/findings/'+h.id,'DELETE')).data.findings.length,0);
@@ -86,8 +90,8 @@ test('Local discovery stores source commands and normalized evidence',async t=>{
 test('LLM can only choose eligible candidates; invented commands and reasons never pass through',async t=>{
   let sent,malicious=false;
   const {call}=await serve(t,{llmBase:'http://127.0.0.1:11434/v1',llmModel:'test',fetch:async(url,options)=>{sent=JSON.parse(options.body);const context=JSON.parse(sent.messages[1].content);return {ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({suggestions:malicious?[{candidateId:'invented',command:'bad'}]:[{candidateId:context.candidates[0].id,command:'bad',reason:'Invented vulnerability'},{candidateId:'invented'}]})}}]})};}});
-  await call('/api/import','POST',input('nmap','nmap.xml'));const r=await call('/api/suggest','POST',{});assert.equal(r.data.source,'local model');assert.equal(r.data.suggestions.length,1);assert.ok(!JSON.stringify(r.data.suggestions).includes('Invented vulnerability'));assert.ok(r.data.suggestions.every(s=>s.command!=='bad'));assert.ok(JSON.parse(sent.messages[1].content).findings.length);
-  malicious=true;const fallback=await call('/api/suggest','POST',{});assert.equal(fallback.data.source,'built-in');assert.ok(fallback.data.suggestions.length);
+  await call('/api/import','POST',input('nmap','nmap.xml'));const r=await call('/api/suggest','POST',{authorizedCidr:'192.168.56.10/32'});assert.equal(r.data.source,'local model');assert.equal(r.data.suggestions.length,1);assert.ok(!JSON.stringify(r.data.suggestions).includes('Invented vulnerability'));assert.ok(r.data.suggestions.every(s=>s.command!=='bad'));assert.ok(JSON.parse(sent.messages[1].content).findings.length);
+  malicious=true;const fallback=await call('/api/suggest','POST',{authorizedCidr:'192.168.56.10/32'});assert.equal(fallback.data.source,'built-in');assert.ok(fallback.data.suggestions.length);
 });
 test('Unreadable storage fails explicitly instead of losing records',async t=>{const {call,file}=await serve(t);fs.writeFileSync(file,'broken');assert.equal((await call('/api/findings')).status,500);assert.equal((await call('/api/import','POST',input('nmap','nmap.xml'))).status,500);assert.equal(fs.readFileSync(file,'utf8'),'broken');});
 test('Legacy migration is persisted once so graph IDs remain stable across API reads',async t=>{
@@ -101,5 +105,5 @@ test('Malformed XML nesting fails before saving any findings',()=>assert.throws(
 test('Model selection is revalidated if a target is deleted during the request',async t=>{
   let started,release;const waiting=new Promise(resolve=>started=resolve),released=new Promise(resolve=>release=resolve);let chosen;
   const {call}=await serve(t,{llmBase:'http://127.0.0.1:11434/v1',llmModel:'test',fetch:async(url,options)=>{chosen=JSON.parse(JSON.parse(options.body).messages[1].content).candidates[0].id;started();await released;return {ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({suggestions:[{candidateId:chosen}]})}}]})};}});
-  const imported=await call('/api/import','POST',input('nmap','nmap.xml'));const h=imported.data.findings.find(f=>f.kind==='host');const pending=call('/api/suggest','POST',{});await waiting;await call('/api/findings/'+h.id,'DELETE');release();const result=await pending;assert.equal(result.data.suggestions.length,0);
+  const imported=await call('/api/import','POST',input('nmap','nmap.xml'));const h=imported.data.findings.find(f=>f.kind==='host');const pending=call('/api/suggest','POST',{authorizedCidr:'192.168.56.10/32'});await waiting;await call('/api/findings/'+h.id,'DELETE');release();const result=await pending;assert.equal(result.data.suggestions.length,0);
 });

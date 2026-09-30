@@ -147,6 +147,11 @@ def parse_import(data):
                             observe(h, script.get('id') or 'Nmap script', script.get('output') or '', s)
                 for script in node.findall('./hostscript/script'):
                     observe(h, script.get('id') or 'Nmap host script', script.get('output') or '')
+                for match in node.findall('./os/osmatch'):
+                    name = match.get('name', '').strip()
+                    if name:
+                        accuracy = match.get('accuracy', '')
+                        observe(h, 'Nmap OS guess', f"{name} ({accuracy}% accuracy)" if accuracy else name)
         else:
             h = current = None
             for line in output.splitlines():
@@ -168,6 +173,8 @@ def parse_import(data):
                 mac = re.match(r'^MAC Address:\s+(\S+)', line)
                 if mac:
                     h['mac'] = mac[1]
+                if re.match(r'^(Running:|OS details:|Aggressive OS guesses:|No exact OS matches for host)', line):
+                    observe(h, 'Nmap OS guess', line.strip())
                 if line.startswith('|'):
                     observe(h, 'Nmap script output', re.sub(r'^\|[_ ]?', '', line).strip(), current)
             if not re.search(r'Nmap scan report for|Nmap done:', output):

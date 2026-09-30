@@ -106,6 +106,7 @@ function parseImport(input) {
         }
         const hostScripts = part.match(/<hostscript\b[^>]*>[\s\S]*?<\/hostscript>/)?.[0] || '';
         for (const script of hostScripts.matchAll(/<script\b[^>]*>/g)) {const a=attributes(script[0]);observe(h, a.id || 'Nmap host script', a.output || '');}
+        for (const match of part.matchAll(/<osmatch\b[^>]*>/g)) {const a=attributes(match[0]);if(a.name)observe(h,'Nmap OS guess',a.accuracy?`${a.name} (${a.accuracy}% accuracy)`:a.name);}
       }
     } else {
       let h = null, currentService = null;
@@ -121,6 +122,7 @@ function parseImport(input) {
         const port = line.match(/^\s*(\d+)\/(tcp|udp|sctp)\s+(\S+)\s+(\S+)(?:\s+(.*))?$/);
         if (port) {currentService = service(h, {port:Number(port[1]),protocol:port[2],state:port[3],name:port[4] === 'unknown' ? '' : port[4],product:port[5] || ''});continue;}
         const mac = line.match(/^MAC Address:\s+(\S+)/); if (mac) h.mac=mac[1];
+        if (/^(Running:|OS details:|Aggressive OS guesses:|No exact OS matches for host)/.test(line)) observe(h,'Nmap OS guess',line.trim());
         if (/^\|/.test(line)) observe(h, 'Nmap script output', line.replace(/^\|[_ ]?/, '').trim(), currentService);
       }
       if (!/Nmap scan report for|Nmap done:/.test(output)) throw new Error('Output is not recognized as Nmap text or XML.');

@@ -11,7 +11,7 @@ function scopedDocument(doc,{hostId}={}) {
   return {schemaVersion:doc.schemaVersion,findings,evidence:doc.evidence.filter(e=>ids.has(e.id))};
 }
 function fingerprint(doc){return createHash('sha256').update(JSON.stringify(doc)).digest('hex');}
-function buildContext(doc) {
+function buildContext(doc,authorizedCidr=null) {
   const context={findings:[],evidence:[],candidates:[]},included=new Set();
   const fields=['id','kind','hostId','serviceId','ip','aliases','name','state','local','port','protocol','product','version','tunnel','firstSeen','lastSeen','reviewStatus'];
   const ordered=['host','service','observation'].flatMap(kind=>doc.findings.filter(f=>f.kind===kind));
@@ -30,7 +30,7 @@ function buildContext(doc) {
     if(JSON.stringify([...context.evidence,row]).length>7500)continue;
     context.evidence.push(row);
   }
-  for(const c of workflow(doc).candidates.filter(c=>c.findingIds.every(id=>included.has(id))).slice(0,40)) {
+  for(const c of workflow(doc,authorizedCidr).candidates.filter(c=>c.findingIds.every(id=>included.has(id))).slice(0,40)) {
     if(JSON.stringify({...context,candidates:[...context.candidates,c]}).length>MAX_CONTEXT-200)break;
     context.candidates.push(c);
   }
@@ -38,7 +38,7 @@ function buildContext(doc) {
 }
 function baseResult(doc,scope,context) {
   const hosts=doc.findings.filter(f=>f.kind==='host'),services=doc.findings.filter(f=>f.kind==='service'),observations=doc.findings.filter(f=>f.kind==='observation');
-  return {schemaVersion:1,generatedAt:new Date().toISOString(),snapshotId:fingerprint(doc),scope:{hostId:scope.hostId||null,hostIds:hosts.map(h=>h.id),ips:hosts.map(h=>h.ip)},counts:{hosts:hosts.length,services:services.length,observations:observations.length,evidence:doc.evidence.length},summary:`Recorded ${hosts.length} hosts, ${services.length} services, and ${observations.length} observations.`,context:{findingIds:context.findings.map(f=>f.id),evidenceIds:context.evidence.map(e=>e.id),truncated:context.truncated},assessments:[],suggestions:[],warnings:context.truncated?['Only a bounded subset of the recorded findings and evidence was sent to the model.']:[]};
+  return {schemaVersion:1,generatedAt:new Date().toISOString(),snapshotId:fingerprint(doc),scope:{hostId:scope.hostId||null,authorizedCidr:scope.authorizedCidr||null,hostIds:hosts.map(h=>h.id),ips:hosts.map(h=>h.ip)},counts:{hosts:hosts.length,services:services.length,observations:observations.length,evidence:doc.evidence.length},summary:`Recorded ${hosts.length} hosts, ${services.length} services, and ${observations.length} observations.`,context:{findingIds:context.findings.map(f=>f.id),evidenceIds:context.evidence.map(e=>e.id),truncated:context.truncated},assessments:[],suggestions:[],warnings:context.truncated?['Only a bounded subset of the recorded findings and evidence was sent to the model.']:[]};
 }
 function builtIn(doc) {
   return workflow(doc).targets.slice(0,6).map(t=>{
@@ -65,7 +65,7 @@ function validateResult(data,context) {
   return {assessments,suggestions,rejected};
 }
 async function analyze(doc,scope,llm,model='') {
-  const selected=scopedDocument(doc,scope),context=buildContext(selected),result=baseResult(selected,scope,context);
+  const selected=scopedDocument(doc,scope),context=buildContext(selected,scope.authorizedCidr),result=baseResult(selected,scope,context);
   if(!selected.findings.length)return {...result,status:'no-findings',source:'built-in',model:null,message:'No findings are recorded in this scope.'};
   try {
     const response=await llm.complete([{role:'system',content:prompt},{role:'user',content:JSON.stringify(context)}],{model});
@@ -73,7 +73,7 @@ async function analyze(doc,scope,llm,model='') {
     if(validated.rejected)result.warnings.push(`${validated.rejected} unsupported model item(s) were rejected.`);
     return {...result,status:'complete',source:'local model',model:response.model,assessments:validated.assessments,suggestions:validated.suggestions,message:'Evidence references and next commands were verified. Interpretations are model hypotheses for review.'};
   }catch(error){
-    return {...result,status:'fallback',source:'built-in',model:model||llm.configuration().model,error:{code:error.code||'model-error',message:error.message},assessments:builtIn(selected),suggestions:workflow(selected).candidates.slice(0,6),message:'Local model analysis is unavailable. Showing recorded facts and built-in next checks.'};
+    return {...result,status:'fallback',source:'built-in',model:model||llm.configuration().model,error:{code:error.code||'model-error',message:error.message},assessments:builtIn(selected),suggestions:workflow(selected,scope.authorizedCidr).candidates.slice(0,6),message:'Local model analysis is unavailable. Showing recorded facts and built-in next checks.'};
   }
 }
 module.exports={analyze,scopedDocument,fingerprint,buildContext,validateResult};

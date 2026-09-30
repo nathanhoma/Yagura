@@ -53,12 +53,20 @@ class BackendTests(unittest.TestCase):
 
     def test_workflow_scope_and_model_fallback(self):
         doc = imported()
-        candidates = workflow(doc)['candidates']
+        self.assertEqual(workflow(doc)['candidates'], [])
+        candidates = workflow(doc, '192.168.56.10/32')['candidates']
         self.assertTrue(any(c['catalogId'] == 'http-headers' for c in candidates))
+        self.assertIn('nmap -n -Pn -O 192.168.56.10', [c['command'] for c in candidates])
         self.assertTrue(all('{' not in c['command'] for c in candidates))
+        self.assertEqual(workflow(doc, '192.168.56.11/32')['candidates'], [])
         result = analyze(doc, {}, FakeLlm())
         self.assertEqual(result['status'], 'fallback')
         self.assertTrue(result['assessments'])
+        self.assertEqual(result['suggestions'], [])
+        os_output = 'Nmap scan report for 192.168.56.10\nHost is up.\n80/tcp open http\nOS details: Linux 5.x\nNmap done: 1 IP address (1 host up) scanned\n'
+        F.merge_parsed(doc, F.parse_import({'tool': 'nmap', 'command': 'nmap -n -Pn -O 192.168.56.10', 'output': os_output}))
+        self.assertTrue(any(f.get('title') == 'Nmap OS guess' and 'Linux 5.x' in f.get('detail', '') for f in doc['findings']))
+        self.assertFalse(any(c['catalogId'] == 'nmap-os' for c in workflow(doc, '192.168.56.10/32')['candidates']))
         context = build_context(doc)
         with self.assertRaises(Exception):
             validate_result({'assessments': [{'findingIds': ['invented'], 'evidenceIds': ['invented'], 'interpretation': 'bad', 'uncertainties': []}], 'suggestions': []}, context)

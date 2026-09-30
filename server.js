@@ -40,6 +40,11 @@ function validCidr(input) {
   const fromInt=v=>[24,16,8,0].map(shift=>(v>>>shift)&255).join('.');
   return isLocalIp(fromInt(base))&&isLocalIp(fromInt(base+size-1));
 }
+function checkScopeCidr(value){
+  if(value==null)return null;
+  if(!validCidr(value))throw new Error('Choose an authorized private/local IPv4 CIDR of at most 1,024 addresses (/22 to /32).');
+  return value.trim();
+}
 function checkInvocation(candidate,doc) {
   const host=doc.findings.find(f=>f.id===candidate.hostId&&f.kind==='host');
   if(!host||!isLocalIp(host.ip)||host.local||host.state==='down')throw new Error('Target is outside the executable local scope.');
@@ -50,6 +55,7 @@ function checkInvocation(candidate,doc) {
     case 'ping':return {tool:'ping',program:'ping',args:['-c','3',ip]};
     case 'nmap-ports':return {tool:'nmap',program:'nmap',args:['-n','-Pn','--top-ports','100',ip]};
     case 'nmap-service':return {tool:'nmap',program:'nmap',args:['-n','-Pn','-sV','--version-light','-p',services.map(s=>s.port).sort((a,b)=>a-b).join(','),ip]};
+    case 'nmap-os':return {tool:'nmap',program:'nmap',args:['-n','-Pn','-O',ip]};
     case 'http-headers':{const s=services[0],scheme=s.tunnel==='ssl'||/https/i.test(s.name)||[443,8443].includes(s.port)?'https':'http';return {tool:null,program:'curl',args:['-I','--max-time','5',`${scheme}://${ip}:${s.port}/`]};}
     case 'smb-shares':return {tool:null,program:'smbclient',args:['-L',`//${ip}`,'-N']};
     default:throw new Error('This check cannot be executed from a suggestion.');
@@ -92,26 +98,28 @@ function createServer(options={}) {
       }
       if(req.method==='GET'&&url.pathname==='/api/llm/health')return json(res,200,await llm.health());
       if(req.method==='GET'&&url.pathname==='/api/analysis/latest') {
-        try {const analysis=JSON.parse(fs.readFileSync(analysisFile,'utf8'));return json(res,200,{analysis:{...analysis,stale:isStale(analysis)}});}catch(e){if(e.code==='ENOENT')return json(res,200,{analysis:null});throw new Error('Cannot read saved analysis.');}
+        try {const analysis=JSON.parse(fs.readFileSync(analysisFile,'utf8')),stale=isStale(analysis);return json(res,200,{analysis:{...analysis,stale,suggestions:stale||!analysis.scope?.authorizedCidr?[]:analysis.suggestions}});}catch(e){if(e.code==='ENOENT')return json(res,200,{analysis:null});throw new Error('Cannot read saved analysis.');}
       }
       if(req.method==='POST'&&url.pathname==='/api/analysis') {
         const body=await readBody(req,4000);
-        if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some(k=>!['hostId','model'].includes(k))||('hostId' in body&&typeof body.hostId!=='string')||('model' in body&&(typeof body.model!=='string'||body.model.length>200)))throw new Error('Supply only an optional stored hostId and selected model for analysis.');
-        const scope=body.hostId?{hostId:body.hostId}:{},doc=load();
-        const selectedModel=body.model||'',key=fingerprint(scopedDocument(doc,scope))+':'+selectedModel;
+        if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some(k=>!['hostId','model','authorizedCidr'].includes(k))||('hostId' in body&&typeof body.hostId!=='string')||('model' in body&&(typeof body.model!=='string'||body.model.length>200)))throw new Error('Supply only an optional stored hostId, selected model, and authorized check range for analysis.');
+        const scope={...(body.hostId?{hostId:body.hostId}:{}),authorizedCidr:checkScopeCidr(body.authorizedCidr)},doc=load();
+        const selectedModel=body.model||'',key=fingerprint(scopedDocument(doc,scope))+':'+selectedModel+':'+scope.authorizedCidr;
         if(!activeAnalyses.has(key)){
-          const task=analyze(doc,scope,llm,selectedModel).then(result=>{const completed={...result,stale:isStale(result)};saveAnalysis(completed);return completed;});
+          const task=analyze(doc,scope,llm,selectedModel).then(result=>{const stale=isStale(result),completed={...result,stale,suggestions:stale?[]:result.suggestions};saveAnalysis(completed);return completed;});
           activeAnalyses.set(key,task);task.finally(()=>activeAnalyses.delete(key)).catch(()=>{});
         }
         return json(res,200,await activeAnalyses.get(key));
       }
       if(req.method==='GET'&&url.pathname==='/api/findings')return json(res,200,load());
-      if(req.method==='GET'&&url.pathname==='/api/workflow')return json(res,200,workflow(load()));
+      if(req.method==='GET'&&url.pathname==='/api/workflow')return json(res,200,workflow(load(),checkScopeCidr(url.searchParams.get('cidr'))));
       if(req.method==='GET'&&url.pathname==='/api/commands')return json(res,200,{commands:commandCatalog});
       if(req.method==='POST'&&url.pathname==='/api/checks/run') {
         const body=await readBody(req,4000);
-        if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some(k=>!['candidateId','authorized'].includes(k))||body.authorized!==true||typeof body.candidateId!=='string')throw new Error('Choose a current suggested check and confirm authorization.');
-        const doc=load(),candidate=workflow(doc).candidates.find(c=>c.id===body.candidateId);
+        if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some(k=>!['candidateId','authorized','authorizedCidr'].includes(k))||body.authorized!==true||typeof body.candidateId!=='string')throw new Error('Choose a current suggested check and confirm authorization.');
+        const cidr=checkScopeCidr(body.authorizedCidr);
+        if(!cidr)throw new Error('Choose an authorized check range before running a check.');
+        const doc=load(),candidate=workflow(doc,cidr).candidates.find(c=>c.id===body.candidateId);
         if(!candidate)throw new Error('Suggestion is no longer available. Refresh the findings.');
         if(activeChecks.has(candidate.id))return json(res,409,{error:'This check is already running.'});
         const invocation=checkInvocation(candidate,doc);
@@ -188,9 +196,10 @@ function createServer(options={}) {
         const body=await readBody(req,4000);
         if(!body||typeof body!=='object'||Array.isArray(body)||('model' in body&&(typeof body.model!=='string'||body.model.length>200)))throw new Error('Use a valid selected model.');
         // Client-provided findings are deliberately ignored: context comes from persisted records.
-        const doc=load(),{candidates}=workflow(doc);const available=candidates.slice(0,100);
-        const fallback=message=>json(res,200,{suggestions:workflow(load()).candidates.slice(0,6),source:'built-in',message});
-        if(!available.length)return fallback('No eligible recorded targets. Import output or add a host observation.');
+        const cidr=checkScopeCidr(body.authorizedCidr);
+        const doc=load(),{candidates}=workflow(doc,cidr);const available=candidates.slice(0,100);
+        const fallback=message=>json(res,200,{suggestions:workflow(load(),cidr).candidates.slice(0,6),source:'built-in',message});
+        if(!available.length)return fallback('No targets in the selected authorized range. Enter a range and review recorded hosts.');
         if(!llmBase)return fallback('Built-in checks grounded in recorded findings. Local model is not configured.');
         if(!isPrivateLlmUrl(llmBase))return fallback('Local model URL blocked. Built-in checks remain available.');
         try {
@@ -200,7 +209,7 @@ function createServer(options={}) {
           const parsed=response.data;
           if(!Array.isArray(parsed.suggestions))throw new Error('Invalid response');
           const originallyAllowed=new Set(available.map(s=>s.id));
-          const allowed=new Map(workflow(load()).candidates.filter(s=>originallyAllowed.has(s.id)).map(s=>[s.id,s])),used=new Set();
+          const allowed=new Map(workflow(load(),cidr).candidates.filter(s=>originallyAllowed.has(s.id)).map(s=>[s.id,s])),used=new Set();
           const suggestions=parsed.suggestions.filter(s=>s&&allowed.has(s.candidateId)&&!used.has(s.candidateId)&&used.add(s.candidateId)).slice(0,3).map(s=>allowed.get(s.candidateId));
           if(!suggestions.length&&parsed.suggestions.length)throw new Error('Ungrounded response');
           return json(res,200,{suggestions,source:'local model',model:response.model,message:'Local model selected recorded checks. Commands and evidence links were verified by the server.'});

@@ -31,7 +31,7 @@ See [the common findings format](docs/findings-format.md) for fields, identity r
 
 ## Workflow and suggestions
 
-The workspace is split into Recon, Findings, Analysis, and Next checks views. The target map shows recon, service identification, and access triage stages. Built-in rules propose checks for known targets: ICMP reachability, common TCP ports, version probes for recorded open ports, web headers, and SMB shares. Commands have concrete target/port values and links to their supporting findings and evidence. The full command catalog remains available even without a model. Each concrete suggestion has a Run button. Confirm authorization in the Next checks view before running one; the server checks the current stored candidate and runs fixed arguments without a shell. Ping and Nmap output is imported when parseable. Other check output appears in the result dialog.
+The workspace is split into Recon, Findings, Analysis, and Next checks views. The target map shows recon, service identification, and access triage stages. Enter an authorized IPv4 CIDR in Next checks before any concrete command is proposed; leaving it empty produces no target commands. Use a `/32` for one host. Built-in rules then propose checks only for recorded hosts inside that range: ICMP reachability, common TCP ports, version probes, OS fingerprinting for recorded open TCP services, web headers, and SMB shares. TCP port discovery and service version checks explicitly use Nmap TCP connect mode (`-sT`) for networks where SYN scans are filtered. OS detection uses `nmap -n -Pn -O` and may require elevated privileges. Commands have concrete target/port values and links to their supporting findings and evidence. The full command catalog remains available as reference templates. Each concrete suggestion has a Run button. Confirm authorization in the Next checks view before running one; the server checks that the current stored candidate is inside the supplied CIDR and runs fixed arguments without a shell. Ping and Nmap output is imported when parseable. Other check output appears in the result dialog.
 
 Optional local LLM configuration uses an OpenAI-compatible endpoint:
 
@@ -47,7 +47,7 @@ Copy `.env.example` to `.env` and set the endpoint. The Analysis view lists mode
 
 - **Read local network state** runs `ip -j -4 addr` and `ip -j -4 neigh` and saves results as linked findings/evidence.
 - Nmap discovery runs `nmap -n -sn -oX - <CIDR>` after authorization is checked. Only RFC1918, loopback, or link-local IPv4 CIDRs with up to 1,024 addresses (`/22` through `/32`) are accepted.
-- Passive imports may contain other addresses. Automated suggestion generation is limited to recorded non-interface private/local IPv4 targets.
+- Passive imports may contain other addresses. Automated suggestion generation requires an explicitly supplied authorized CIDR and is limited to recorded non-interface private/local IPv4 targets inside it. A private address or neighbor entry alone does not establish authorization.
 - Keep the app bound to localhost unless you add access controls. Public asset serving excludes configuration, source modules, and the data directory.
 
 ## Validate
@@ -67,7 +67,7 @@ Use **Findings analysis** in the UI to analyze all recorded findings or one host
 | `GET /api/llm/health` | Check model discovery, authentication, endpoint reachability, and model selection. Credentials are never returned. |
 | `POST /api/analysis` | Analyze persisted findings; body `{}` selects all or `{"hostId":"stored-host-id","model":"advertised-model"}` selects a host and model. Client-supplied findings/commands are rejected. |
 | `GET /api/analysis/latest` | Return the saved analysis and current `stale` flag, or `{"analysis":null}`. |
-| `POST /api/checks/run` | Run a current suggested check by `candidateId` with `authorized:true`; arbitrary command strings are ignored. |
+| `POST /api/checks/run` | Run a current suggested check by `candidateId` with `authorized:true` and `authorizedCidr`; arbitrary command strings are ignored. |
 
 Responses contain `status`, `source`, `model`, `scope`, `counts`, `summary`, `assessments`, `suggestions`, `snapshotId`, `generatedAt`, `stale`, and `warnings`. Assessments have `findingIds`, `evidenceIds`, `interpretation`, and `uncertainties`. References must point to evidence supplied to the model and linked to each cited finding. Suggestions resolve only to server-generated eligible commands. Citation validation checks references, not the factual correctness of model prose.
 

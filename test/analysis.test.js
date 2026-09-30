@@ -36,7 +36,7 @@ test('Selected advertised model overrides the server default; unknown models are
 test('Analyses cite supplied evidence and use server-generated candidate commands',async()=>{
   const d=doc();let sent;
   const llm=createLlmService({baseUrl:'http://localhost:8100/v1',model:'local-model',request:async(url,options)=>{sent=JSON.parse(options.body);const context=JSON.parse(sent.messages[1].content),result=validModelResult(context);result.suggestions[0].command='invented-command';return response({choices:[{message:{content:JSON.stringify(result)}}]});}});
-  const result=await analyze(d,{},llm);assert.equal(result.source,'local model');assert.equal(result.status,'complete');assert.equal(result.model,'local-model');assert.equal(result.assessments.length,1);assert.ok(result.suggestions.every(s=>s.command.includes(target)&&s.command!=='invented-command'));assert.ok(JSON.parse(sent.messages[1].content).evidence[0].output.includes(target));
+  const result=await analyze(d,{authorizedCidr:`${target}/32`},llm);assert.equal(result.source,'local model');assert.equal(result.status,'complete');assert.equal(result.model,'local-model');assert.equal(result.assessments.length,1);assert.ok(result.suggestions.every(s=>s.command.includes(target)&&s.command!=='invented-command'));assert.ok(JSON.parse(sent.messages[1].content).evidence[0].output.includes(target));
 });
 test('Unknown, unrelated, or missing citations are rejected',()=>{
   const d=doc(),context=buildContext(d),valid=validModelResult(context);
@@ -64,23 +64,27 @@ test('Suggested checks execute fixed arguments only after authorization',async t
   const app=await listen(t,createServer({findingsFile:path.join(dir,'findings.json'),run:async(program,args)=>{calls.push([program,args]);return {ok:true,stdout:output,stderr:''};}}));
   const post=async(route,body)=>{const r=await fetch(app+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return {status:r.status,data:await r.json()};};
   await post('/api/import',{tool:'nmap',output,command:`nmap -sV ${target}`});
-  const checks=await (await fetch(app+'/api/workflow')).json(),candidate=checks.candidates.find(c=>c.catalogId==='http-headers');
+  const checks=await (await fetch(app+`/api/workflow?cidr=${target}/32`)).json(),candidate=checks.candidates.find(c=>c.catalogId==='http-headers');
   assert.ok(candidate);
   assert.equal((await post('/api/checks/run',{candidateId:candidate.id})).status,400);
   assert.equal((await post('/api/checks/run',{candidateId:'invented',authorized:true})).status,400);
   assert.equal(calls.length,0);
-  const done=await post('/api/checks/run',{candidateId:candidate.id,authorized:true});
+  const done=await post('/api/checks/run',{candidateId:candidate.id,authorized:true,authorizedCidr:`${target}/32`});
   assert.equal(done.status,200);assert.deepEqual(calls[0],['curl',['-I','--max-time','5',`https://${target}:443/`]]);
   assert.equal(done.data.command,candidate.command);assert.equal(done.data.imported,false);
+  const osCandidate=checks.candidates.find(c=>c.catalogId==='nmap-os');assert.ok(osCandidate);
+  assert.equal((await post('/api/checks/run',{candidateId:osCandidate.id,authorized:true,authorizedCidr:`10.0.4.81/32`})).status,400);
+  const osRun=await post('/api/checks/run',{candidateId:osCandidate.id,authorized:true,authorizedCidr:`${target}/32`});
+  assert.equal(osRun.status,200);assert.deepEqual(calls[1],['nmap',['-n','-Pn','-O',target]]);
 });
 test('Nmap check output becomes linked findings',async t=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'yagura-check-import-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const app=await listen(t,createServer({findingsFile:path.join(dir,'findings.json'),run:async()=>({ok:true,stdout:output,stderr:''})}));
   const post=async(route,body)=>{const r=await fetch(app+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return {status:r.status,data:await r.json()};};
   await post('/api/findings',{ip:target,title:'Target',detail:'Authorized local target'});
-  const workflow=await (await fetch(app+'/api/workflow')).json(),candidate=workflow.candidates.find(c=>c.catalogId==='nmap-ports');
+  const workflow=await (await fetch(app+`/api/workflow?cidr=${target}/32`)).json(),candidate=workflow.candidates.find(c=>c.catalogId==='nmap-ports');
   assert.ok(candidate);
-  const done=await post('/api/checks/run',{candidateId:candidate.id,authorized:true});assert.equal(done.status,200);assert.equal(done.data.imported,true);
+  const done=await post('/api/checks/run',{candidateId:candidate.id,authorized:true,authorizedCidr:`${target}/32`});assert.equal(done.status,200);assert.equal(done.data.imported,true);
   const doc=await (await fetch(app+'/api/findings')).json();assert.ok(doc.findings.some(f=>f.kind==='service'&&f.port===443));
 });
 test('Real HTTP model adapter: health, scoped analysis, saved results, stale detection and input validation',async t=>{

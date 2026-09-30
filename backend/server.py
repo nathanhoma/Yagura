@@ -43,6 +43,14 @@ def valid_cidr(value):
         return False
 
 
+def check_scope_cidr(value):
+    if value is None:
+        return None
+    if not valid_cidr(value):
+        raise ValueError('Choose an authorized private/local IPv4 CIDR of at most 1,024 addresses (/22 to /32).')
+    return str(ipaddress.ip_network(value.strip(), strict=False))
+
+
 def run_command(program, args, timeout=15):
     try:
         result = subprocess.run([program, *args], capture_output=True, text=True, timeout=timeout, check=False)
@@ -62,9 +70,11 @@ def invocation(candidate, doc):
     if kind == 'ping':
         return 'ping', ['-c', '3', ip], 'ping'
     if kind == 'nmap-ports':
-        return 'nmap', ['-n', '-Pn', '--top-ports', '100', ip], 'nmap'
+        return 'nmap', ['-n', '-Pn', '-sT', '--top-ports', '100', ip], 'nmap'
     if kind == 'nmap-service':
-        return 'nmap', ['-n', '-Pn', '-sV', '--version-light', '-p', ','.join(str(s['port']) for s in sorted(services, key=lambda s: s['port'])), ip], 'nmap'
+        return 'nmap', ['-n', '-Pn', '-sT', '-sV', '--version-light', '-p', ','.join(str(s['port']) for s in sorted(services, key=lambda s: s['port'])), ip], 'nmap'
+    if kind == 'nmap-os':
+        return 'nmap', ['-n', '-Pn', '-O', ip], 'nmap'
     if kind == 'http-headers':
         s = services[0]
         scheme = 'https' if s.get('tunnel') == 'ssl' or 'https' in s.get('name', '').lower() or s['port'] in (443, 8443) else 'http'
@@ -204,18 +214,21 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         try:
                             result = json.loads(workspace.analysis_file.read_text())
                             result['stale'] = workspace.stale(result)
+                            if result['stale'] or not result.get('scope', {}).get('authorizedCidr'):
+                                result['suggestions'] = []
                         except FileNotFoundError:
                             result = None
                     return self.send_json(200, {'analysis': result})
                 if self.command == 'POST' and path == '/api/analysis':
                     body = self.body(4000)
-                    if not isinstance(body, dict) or any(k not in ('hostId', 'model') for k in body) or ('hostId' in body and not isinstance(body['hostId'], str)) or ('model' in body and (not isinstance(body['model'], str) or len(body['model']) > 200)):
-                        raise ValueError('Supply only an optional stored hostId and selected model for analysis.')
+                    if not isinstance(body, dict) or any(k not in ('hostId', 'model', 'authorizedCidr') for k in body) or ('hostId' in body and not isinstance(body['hostId'], str)) or ('model' in body and (not isinstance(body['model'], str) or len(body['model']) > 200)):
+                        raise ValueError('Supply only an optional stored hostId, selected model, and authorized check range for analysis.')
                     scope = {'hostId': body['hostId']} if body.get('hostId') else {}
+                    scope['authorizedCidr'] = check_scope_cidr(body.get('authorizedCidr'))
                     with workspace.lock:
                         doc = workspace.load()
                         selected = scoped_document(doc, scope.get('hostId'))
-                        key = fingerprint(selected) + ':' + body.get('model', '')
+                        key = fingerprint(selected) + ':' + body.get('model', '') + ':' + str(scope['authorizedCidr'])
                         if key in workspace.active_analyses:
                             event = workspace.active_analyses[key]
                             owner = False
@@ -228,6 +241,8 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             result = analyze(doc, scope, workspace.llm, body.get('model', ''))
                             with workspace.lock:
                                 result['stale'] = workspace.stale(result)
+                                if result['stale']:
+                                    result['suggestions'] = []
                                 workspace.save_analysis(result)
                                 event.result = result
                         except Exception as exc:
@@ -242,8 +257,9 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         raise event.error
                     return self.send_json(200, event.result)
                 if self.command == 'GET' and path in ('/api/findings', '/api/workflow', '/api/commands'):
+                    cidr = check_scope_cidr(parse_qs(url.query).get('cidr', [None])[0]) if path == '/api/workflow' else None
                     with workspace.lock:
-                        data = {'/api/findings': lambda: workspace.load(), '/api/workflow': lambda: workflow(workspace.load()), '/api/commands': lambda: {'commands': COMMAND_CATALOG}}[path]()
+                        data = {'/api/findings': lambda: workspace.load(), '/api/workflow': lambda: workflow(workspace.load(), cidr), '/api/commands': lambda: {'commands': COMMAND_CATALOG}}[path]()
                     return self.send_json(200, data)
                 if self.command == 'GET' and path == '/api/export':
                     with workspace.lock:
@@ -350,11 +366,14 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(200, doc)
                 if self.command == 'POST' and path == '/api/checks/run':
                     body = self.body(4000)
-                    if not isinstance(body, dict) or set(body) - {'candidateId', 'authorized'} or body.get('authorized') is not True or not isinstance(body.get('candidateId'), str):
+                    if not isinstance(body, dict) or set(body) - {'candidateId', 'authorized', 'authorizedCidr'} or body.get('authorized') is not True or not isinstance(body.get('candidateId'), str):
                         raise ValueError('Choose a current suggested check and confirm authorization.')
+                    cidr = check_scope_cidr(body.get('authorizedCidr'))
+                    if cidr is None:
+                        raise ValueError('Choose an authorized check range before running a check.')
                     with workspace.lock:
                         doc = workspace.load()
-                        candidate = next((c for c in workflow(doc)['candidates'] if c['id'] == body['candidateId']), None)
+                        candidate = next((c for c in workflow(doc, cidr)['candidates'] if c['id'] == body['candidateId']), None)
                         if not candidate:
                             raise ValueError('Suggestion is no longer available. Refresh the findings.')
                         if candidate['id'] in workspace.active_checks:
@@ -381,17 +400,18 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             workspace.active_checks.discard(candidate['id'])
                 if self.command == 'POST' and path == '/api/suggest':
                     body = self.body(4000)
-                    if not isinstance(body, dict) or ('model' in body and (not isinstance(body['model'], str) or len(body['model']) > 200)):
+                    if not isinstance(body, dict) or set(body) - {'model', 'authorizedCidr'} or ('model' in body and (not isinstance(body['model'], str) or len(body['model']) > 200)):
                         raise ValueError('Use a valid selected model.')
+                    cidr = check_scope_cidr(body.get('authorizedCidr'))
                     with workspace.lock:
                         doc = workspace.load()
-                        available = workflow(doc)['candidates'][:100]
+                        available = workflow(doc, cidr)['candidates'][:100]
                     def fallback(message):
                         with workspace.lock:
-                            suggestions = workflow(workspace.load())['candidates'][:6]
+                            suggestions = workflow(workspace.load(), cidr)['candidates'][:6]
                         return self.send_json(200, dict(suggestions=suggestions, source='built-in', message=message))
                     if not available:
-                        return fallback('No eligible recorded targets. Import output or add a host observation.')
+                        return fallback('No targets in the selected authorized range. Enter a range and review recorded hosts.')
                     if not workspace.llm.base:
                         return fallback('Built-in checks grounded in recorded findings. Local model is not configured.')
                     if not private_url(workspace.llm.base):
@@ -405,7 +425,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             raise ValueError('Invalid response')
                         allowed_ids = {c['id'] for c in available}
                         with workspace.lock:
-                            allowed = {c['id']: c for c in workflow(workspace.load())['candidates'] if c['id'] in allowed_ids}
+                            allowed = {c['id']: c for c in workflow(workspace.load(), cidr)['candidates'] if c['id'] in allowed_ids}
                         suggestions, used = [], set()
                         for s in selected:
                             cid = s.get('candidateId') if isinstance(s, dict) else None
