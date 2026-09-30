@@ -1,0 +1,10 @@
+Starting Nmap 7.95
+Nmap scan report for lab-web (192.168.56.10)
+Host is up (0.001s latency).
+PORT     STATE SERVICE VERSION
+80/tcp   open  http    nginx 1.24.0
+|_http-title: Lab page
+443/tcp  open  https
+22/tcp   closed ssh
+MAC Address: AA:BB:CC:DD:EE:FF (Lab)
+Nmap done: 1 IP address (1 host up) scanned in 1.23 seconds

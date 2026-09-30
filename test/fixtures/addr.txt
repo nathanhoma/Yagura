@@ -1,0 +1,6 @@
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN group default
+    inet 127.0.0.1/8 scope host lo
+    inet6 ::1/128 scope host
+2: eth0@if3: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP group default
+    inet 192.168.56.2/24 brd 192.168.56.255 scope global eth0
+    inet6 fe80::1234/64 scope link

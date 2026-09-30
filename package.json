@@ -1,0 +1,14 @@
+{
+  "name": "iafinder",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Local recon findings and initial-access triage workspace",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js",
+    "test:llm": "node scripts/llm-smoke.js --live"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

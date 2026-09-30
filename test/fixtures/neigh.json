@@ -1,0 +1,1 @@
+[{"dst":"192.168.56.10","dev":"eth0","lladdr":"aa:bb:cc:dd:ee:ff","state":["STALE"]},{"dst":"192.168.56.11","dev":"eth0","state":["FAILED"]}]

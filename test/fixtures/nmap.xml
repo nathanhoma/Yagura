@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<!DOCTYPE nmaprun>
+<nmaprun><host><status reason='echo-reply' state='up'/><address addrtype='mac' addr='AA:BB:CC:DD:EE:FF'/><address addrtype='ipv4' addr='192.168.56.10'/><hostnames><hostname type='PTR' name='lab&amp;web'/></hostnames><ports>
+<port protocol='tcp' portid='80'><state reason='syn-ack' state='open'/><service version='1.24' product='nginx' name='http'/><script output='Hello &quot;lab&quot;' id='http-title'/></port>
+<port portid='443' protocol='tcp'><state state='open'/><service tunnel='ssl' name='http'/></port>
+<port protocol='tcp' portid='445'><state state='open'/><service name='microsoft-ds'/></port>
+<port protocol='tcp' portid='22'><state state='closed'/><service name='ssh'/></port>
+<port protocol='udp' portid='53'><state state='open|filtered'/><service name='domain'/></port>
+</ports><hostscript><script id='host-info' output='lab'/></hostscript></host><runstats><finished/></runstats></nmaprun>

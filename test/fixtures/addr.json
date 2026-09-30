@@ -1,0 +1,1 @@
+[{"ifname":"eth0","operstate":"UP","addr_info":[{"family":"inet","local":"192.168.56.2","prefixlen":24,"scope":"global"},{"family":"inet6","local":"fe80::1234","prefixlen":64,"scope":"link"}]}]
