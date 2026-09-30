@@ -1,6 +1,6 @@
-# IAFinder
+# Yagura
 
-IAFinder is a local recon and initial-access triage workspace. Import command results, review linked hosts/services/observations, inspect original evidence, and choose the next check from recorded findings. Node.js 18+ runs the app without npm dependencies.
+Yagura is a local recon and initial-access triage workspace. Import command results, review linked hosts/services/observations, inspect original evidence, and choose the next check from recorded findings. Node.js 18+ runs the app without npm dependencies.
 
 ## Run
 
@@ -78,4 +78,4 @@ Analysis uses a bounded context (up to 100 findings, 40 evidence excerpts, and a
 npm run test:llm
 ```
 
-This test checks the configured LLM endpoint first. When its model is ready, it runs only a three-request ping against **10.0.4.80**, imports that real output into an isolated temporary workspace, sends that host's findings/evidence to the configured LLM endpoint, and verifies analysis references and saved results. It does not scan ports or execute suggested checks. It writes a report to `/tmp/iafinder-llm-live-test.json` after analysis and exits unsuccessfully if a real model analysis was unavailable. Your normal findings remain untouched.
+This test checks the configured LLM endpoint first. When its model is ready, it runs only a three-request ping against **10.0.4.80**, imports that real output into an isolated temporary workspace, sends that host's findings/evidence to the configured LLM endpoint, and verifies analysis references and saved results. It does not scan ports or execute suggested checks. It writes a report to `/tmp/yagura-llm-live-test.json` after analysis and exits unsuccessfully if a real model analysis was unavailable. Your normal findings remain untouched.

@@ -59,7 +59,7 @@ test('Real HTTP model adapter: health, scoped analysis, saved results, stale det
     const body=JSON.parse(raw);lastContext=JSON.parse(body.messages[1].content);assert.equal(body.model,'integration-model');
     res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(validModelResult(lastContext))}}]}));
   });
-  const modelUrl=await listen(t,model),dir=fs.mkdtempSync(path.join(os.tmpdir(),'iafinder-analysis-'));
+  const modelUrl=await listen(t,model),dir=fs.mkdtempSync(path.join(os.tmpdir(),'yagura-analysis-'));
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const app=await listen(t,createServer({findingsFile:path.join(dir,'findings.json'),llmBase:modelUrl+'/v1',llmModel:'',llmKey:'dummy-key'}));
   const call=async(route,body,method='POST')=>{const r=await fetch(app+route,{method,headers:{'Content-Type':'application/json'},...(method==='POST'?{body:JSON.stringify(body)}:{})});return {status:r.status,data:await r.json()};};
@@ -72,7 +72,7 @@ test('Real HTTP model adapter: health, scoped analysis, saved results, stale det
 });
 test('Requests for an identical analysis snapshot share a single in-flight completion',async t=>{
   let resolveModel,notify;const started=new Promise(r=>notify=r);let calls=0;
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'iafinder-analysis-concurrent-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'yagura-analysis-concurrent-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const app=await listen(t,createServer({findingsFile:path.join(dir,'findings.json'),llmBase:'http://localhost:8100/v1',llmModel:'test',fetch:async(url,options)=>{calls++;const context=JSON.parse(JSON.parse(options.body).messages[1].content);notify();await new Promise(r=>resolveModel=r);return response({choices:[{message:{content:JSON.stringify(validModelResult(context))}}]});}}));
   const post=(route,body)=>fetch(app+route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   await post('/api/import',{tool:'nmap',output});const a=post('/api/analysis',{});await started;const b=post('/api/analysis',{});

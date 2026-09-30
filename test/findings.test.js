@@ -57,7 +57,7 @@ test('Scope validation rejects public, malformed and oversized ranges',()=>{
   assert.equal(isPrivateLlmUrl('https://example.com'),false);assert.equal(isPrivateLlmUrl('http://127.0.0.1:11434/v1'),true);assert.equal(isPrivateLlmUrl('http://user:pass@localhost'),false);
 });
 async function serve(t,options={}) {
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'iafinder-test-'));const file=path.join(dir,'findings.json');
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'yagura-test-'));const file=path.join(dir,'findings.json');
   const server=createServer({findingsFile:file,llmBase:'',llmModel:'',run:async()=>({ok:false,stdout:'',stderr:'test tool unavailable'}),...options});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));fs.rmSync(dir,{recursive:true,force:true});});

@@ -94,7 +94,7 @@ function createServer(options={}) {
       if(req.method==='GET'&&url.pathname==='/api/commands')return json(res,200,{commands:commandCatalog});
       if(req.method==='GET'&&url.pathname==='/api/export') {
         const doc=load(),asCsv=url.searchParams.get('format')==='csv';const body=asCsv?csv(doc):JSON.stringify(doc,null,2)+'\n';
-        res.writeHead(200,{'Content-Type':asCsv?'text/csv; charset=utf-8':'application/json; charset=utf-8','Content-Disposition':`attachment; filename="iafinder-findings.${asCsv?'csv':'json'}"`,'Cache-Control':'no-store'});return res.end(body);
+        res.writeHead(200,{'Content-Type':asCsv?'text/csv; charset=utf-8':'application/json; charset=utf-8','Content-Disposition':`attachment; filename="yagura-findings.${asCsv?'csv':'json'}"`,'Cache-Control':'no-store'});return res.end(body);
       }
       if(req.method==='POST'&&url.pathname==='/api/import/preview')return json(res,200,F.parseImport(await readBody(req)));
       if(req.method==='POST'&&url.pathname==='/api/import') {
@@ -177,5 +177,5 @@ function createServer(options={}) {
     }catch(e){return json(res,e.message.startsWith('Cannot read findings')?500:400,{error:e.message});}
   });
 }
-if(require.main===module){const host=process.env.APP_HOST||'127.0.0.1',port=Number(process.env.APP_PORT||8080);createServer().listen(port,host,()=>console.log(`IAFinder listening at http://${host}:${port}`));}
+if(require.main===module){const host=process.env.APP_HOST||'127.0.0.1',port=Number(process.env.APP_PORT||8080);createServer().listen(port,host,()=>console.log(`Yagura listening at http://${host}:${port}`));}
 module.exports={createServer,validCidr,isPrivateLlmUrl,csv};
