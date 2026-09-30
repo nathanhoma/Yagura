@@ -107,5 +107,98 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.calls, [('nmap', ['-n', '-Pn', '-O', '192.168.56.10'])])
 
 
+    def test_website_contacts_check_saves_linked_findings_and_sources(self):
+        output = 'Nmap scan report for www.lab.test (192.168.56.10)\nHost is up.\n80/tcp open http\nNmap done: 1 IP address (1 host up) scanned'
+        self.call('/api/import', 'POST', {'tool': 'nmap', 'output': output})
+        candidates = self.call('/api/workflow?cidr=192.168.56.10/32')[1]['candidates']
+        candidate = next(c for c in candidates if c['catalogId'] == 'web-contacts')
+        report = dict(count=1, contacts=[dict(address='ops@lab.test', sources=['http://www.lab.test:80/contact'])],
+                      pages=['http://www.lab.test:80/', 'http://www.lab.test:80/contact'], errors=[], coverage='Whole-site uniqueness is not established.')
+        calls = []
+        def runner(program, args, timeout):
+            calls.append((program, args))
+            return dict(ok=True, stdout=json.dumps(report), stderr='')
+        self.workspace.runner = runner
+        body = dict(candidateId=candidate['id'], authorized=True, authorizedCidr='192.168.56.11/32')
+        self.assertEqual(self.call('/api/checks/run', 'POST', body)[0], 400)
+        self.assertFalse(calls)
+        body['authorizedCidr'] = '192.168.56.10/32'
+        status, result = self.call('/api/checks/run', 'POST', body)
+        self.assertEqual(status, 200)
+        self.assertTrue(result['imported'])
+        self.assertIn('http://www.lab.test:80/', calls[0][1])
+        doc = self.call('/api/findings')[1]
+        finding = next(f for f in doc['findings'] if f.get('title') == 'Published website contacts')
+        self.assertEqual(finding['hostId'], candidate['hostId'])
+        self.assertEqual(finding['serviceId'], candidate['serviceIds'][0])
+        self.assertIn('ops@lab.test', finding['detail'])
+        self.assertIn('http://www.lab.test:80/contact', finding['detail'])
+        evidence = next(e for e in doc['evidence'] if e['id'] in finding['evidenceIds'])
+        self.assertEqual(json.loads(evidence['output']), report)
+
+
+    def test_contact_transport_with_local_virtual_host_fixture(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from backend.web_contacts import discover
+        seen = []
+        class Website(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append((self.path, self.headers.get('Host')))
+                page = b'<a href="/contact">Contact</a>' if self.path == '/' else b'<a href="mailto:ops@lab.test">Team</a>'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html')
+                self.send_header('Content-Length', str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+            def log_message(self, *args):
+                pass
+        website = ThreadingHTTPServer(('127.0.0.1', 0), Website)
+        self.addCleanup(website.server_close)
+        worker = threading.Thread(target=website.serve_forever, daemon=True)
+        worker.start()
+        self.addCleanup(worker.join)
+        self.addCleanup(website.shutdown)
+        hostname = f'www.nonexistent.test:{website.server_port}'
+        report = discover(f'http://{hostname}/', '127.0.0.1')
+        self.assertEqual(report['contacts'], [dict(address='ops@lab.test', sources=[f'http://{hostname}/contact'])])
+        self.assertEqual(seen, [('/', hostname), ('/contact', hostname)])
+        self.assertEqual(report['errors'], [])
+
+
+    def test_email_draft_api_lifecycle_and_export(self):
+        self.assertEqual(self.call('/api/email-drafts')[1]['drafts'], [])
+        status, response = self.call('/api/email-drafts', 'POST', {'to': 'contact@example.test', 'subject': 'Draft for review', 'body': 'Hello', 'notes': 'Internal context'})
+        self.assertEqual(status, 201)
+        draft = response['draft']
+        self.assertEqual(draft['sender'], '')
+        route = '/api/email-drafts/' + draft['id']
+        self.assertEqual(self.call(route, 'PATCH', {'subject': 'Stale', 'revision': 0})[0], 409)
+        self.assertEqual(self.call(route, 'PATCH', {'subject': 'Revised', 'revision': 1})[1]['draft']['body'], 'Hello')
+        with urllib.request.urlopen(self.base + route + '/export') as response:
+            self.assertEqual(response.headers.get_content_type(), 'message/rfc822')
+            eml = response.read().decode()
+        self.assertIn('X-Unsent: 1', eml)
+        self.assertIn('Subject: Revised', eml)
+        self.assertNotIn('From:', eml)
+        self.assertNotIn('Internal context', eml)
+        self.assertEqual(self.call('/api/email-drafts/send', 'POST', {})[0], 404)
+        self.assertEqual(self.call(route, 'DELETE', {'revision': 2})[0], 200)
+        self.assertEqual(self.call(route, 'PATCH', {'subject': 'Missing', 'revision': 2})[0], 404)
+        self.assertEqual(self.call('/api/email-drafts')[1]['drafts'], [])
+        self.assertEqual(self.calls, [])
+
+    def test_email_generation_does_not_persist_or_send(self):
+        class FakeModel:
+            def complete(self, messages, **kwargs):
+                return {'data': {'subject': 'Meeting request', 'body': 'Hello, please suggest a meeting time.'}}
+        self.workspace.llm = FakeModel()
+        status, draft = self.call('/api/email-drafts/generate', 'POST', {'brief': 'Request a meeting'})
+        self.assertEqual(status, 200)
+        self.assertEqual(draft['subject'], 'Meeting request')
+        self.assertEqual(self.call('/api/email-drafts')[1]['drafts'], [])
+        self.assertEqual(self.call('/api/email-drafts', 'POST', {'to': 'a@example.test\r\nBcc: b@example.test'})[0], 400)
+        self.assertEqual(self.calls, [])
+
+
 if __name__ == '__main__':
     unittest.main()

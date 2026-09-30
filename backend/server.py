@@ -7,14 +7,17 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs, unquote
 
 from . import findings as F
+from .email_drafts import DraftStore, DraftConflict, discovered_contacts, export_eml, generate_draft
 from .analysis import analyze, fingerprint, scoped_document
 from .llm import LlmService, private_url
 from .workflow import COMMAND_CATALOG, is_local_ip, workflow
+from .web_contacts import website_url
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -79,6 +82,8 @@ def invocation(candidate, doc):
         s = services[0]
         scheme = 'https' if s.get('tunnel') == 'ssl' or 'https' in s.get('name', '').lower() or s['port'] in (443, 8443) else 'http'
         return 'curl', ['-I', '--max-time', '5', f"{scheme}://{ip}:{s['port']}/"], None
+    if kind == 'web-contacts':
+        return sys.executable, [str(ROOT / 'backend/web_contacts.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-contacts'
     if kind == 'smb-shares':
         return 'smbclient', ['-L', f'//{ip}', '-N'], None
     raise ValueError('This check cannot be executed from a suggestion.')
@@ -104,6 +109,7 @@ class Workspace:
     def __init__(self, findings_file=None, analysis_file=None, llm=None, runner=None):
         self.findings_file = Path(findings_file or ROOT / 'data/findings.json')
         self.analysis_file = Path(analysis_file or self.findings_file.with_name('analysis.json'))
+        self.drafts = DraftStore(self.findings_file.with_name('email-drafts.json'))
         self.llm = llm or LlmService(os.getenv('LLM_BASE_URL', ''), os.getenv('LLM_MODEL', ''), os.getenv('LLM_API_KEY', ''), os.getenv('LLM_TIMEOUT_MS', '30000'))
         self.runner = runner or run_command
         self.lock = threading.RLock()
@@ -203,6 +209,49 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(403, {'error': 'Cross-origin requests are not allowed.'})
                 url = urlsplit(self.path)
                 path = url.path
+                if self.command == 'GET' and path == '/api/email-contacts':
+                    with workspace.lock:
+                        contacts = discovered_contacts(workspace.load())
+                    return self.send_json(200, dict(contacts=contacts))
+                if self.command == 'POST' and path == '/api/email-drafts/generate':
+                    return self.send_json(200, generate_draft(workspace.llm, self.body(120000)))
+                if path == '/api/email-drafts':
+                    if self.command == 'GET':
+                        with workspace.lock:
+                            data = workspace.drafts.load()
+                        return self.send_json(200, data)
+                    if self.command == 'POST':
+                        payload = self.body(120000)
+                        with workspace.lock:
+                            draft = workspace.drafts.put(payload, discovered_contacts(workspace.load()))
+                        return self.send_json(201, dict(draft=draft))
+                if path.startswith('/api/email-drafts/'):
+                    parts = path[len('/api/email-drafts/'):].split('/')
+                    draft_id = parts[0]
+                    try:
+                        if len(parts) == 2 and parts[1] == 'export' and self.command == 'GET':
+                            with workspace.lock:
+                                draft = next((d for d in workspace.drafts.load()['drafts'] if d['id'] == draft_id), None)
+                            if draft is None:
+                                raise KeyError()
+                            return self.send_bytes(200, export_eml(draft), 'message/rfc822', 'email-draft.eml')
+                        if len(parts) == 1 and self.command == 'PATCH':
+                            payload = self.body(120000)
+                            with workspace.lock:
+                                draft = workspace.drafts.put(payload, discovered_contacts(workspace.load()), draft_id)
+                            return self.send_json(200, dict(draft=draft))
+                        if len(parts) == 1 and self.command == 'DELETE':
+                            payload = self.body(1000)
+                            if not isinstance(payload, dict) or set(payload) != {'revision'}:
+                                raise ValueError('Supply the draft revision to remove it.')
+                            with workspace.lock:
+                                workspace.drafts.delete(draft_id, payload['revision'])
+                            return self.send_json(200, dict(deleted=True))
+                    except DraftConflict as exc:
+                        return self.send_json(409, dict(error=str(exc)))
+                    except KeyError:
+                        return self.send_json(404, dict(error='Draft not found.'))
+                    return self.send_json(404, dict(error='Draft endpoint not found.'))
                 if self.command == 'GET' and path == '/api/health':
                     result = workspace.runner('nmap', ['--version'], 2.5)
                     base = workspace.llm.base
@@ -386,9 +435,27 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         imported, warning = False, ''
                         if tool and output.strip():
                             try:
-                                parsed = F.parse_import(dict(tool=tool, output=output, command=candidate['command'], observedAt=F.now()))
+                                if tool == 'web-contacts':
+                                    report = json.loads(output)
+                                    if not isinstance(report, dict) or not isinstance(report.get('contacts'), list):
+                                        raise ValueError('Invalid website contacts report.')
+                                    time = F.now()
+                                    ev = dict(id=F.uid('evidence'), tool=tool, command=candidate['command'], output=output,
+                                              observedAt=time, importedAt=time, format='json')
+                                    detail = f"{report.get('count', 0)} distinct email address(es) found on {len(report.get('pages', []))} inspected page(s).\n"
+                                    detail += '\n'.join(f"{item['address']} — {', '.join(item['sources'])}" for item in report['contacts'])
+                                    detail += '\n' + report.get('coverage', '')
+                                    if report.get('errors'):
+                                        detail += '\nSome pages could not be inspected; see source evidence.'
+                                    finding = F.record('observation', dict(hostId=candidate['hostId'], serviceId=candidate['serviceIds'][0],
+                                                       title='Published website contacts', detail=detail[:4000]), ev['id'], time)
+                                    parsed = dict(findings=[finding], evidence=[ev])
+                                else:
+                                    parsed = F.parse_import(dict(tool=tool, output=output, command=candidate['command'], observedAt=F.now()))
                                 with workspace.lock:
                                     latest = workspace.load()
+                                    if tool == 'web-contacts' and not all(any(f['id'] == required for f in latest['findings']) for required in candidate['findingIds']):
+                                        raise ValueError('The website target was removed while the check ran.')
                                     F.merge_parsed(latest, parsed)
                                     workspace.save(latest)
                                 imported = True
@@ -447,7 +514,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 filename = files[path]
                 return self.send_bytes(200, (ROOT / filename).read_bytes(), 'text/javascript; charset=utf-8' if filename.endswith('.js') else 'text/html; charset=utf-8')
             except Exception as exc:
-                return self.send_json(500 if str(exc).startswith('Cannot read findings') else 400, {'error': str(exc)})
+                return self.send_json(500 if str(exc).startswith(('Cannot read findings', 'Cannot read email drafts')) else 400, {'error': str(exc)})
 
     return ThreadingHTTPServer((host, port), Handler)
 

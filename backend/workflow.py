@@ -1,6 +1,8 @@
 import ipaddress
 import re
 
+from .web_contacts import website_url
+
 
 def is_local_ip(value):
     try:
@@ -22,6 +24,7 @@ COMMAND_CATALOG = [
     dict(id='nmap-service', title='Identify service versions', command='nmap -n -Pn -sT -sV --version-light -p {ports} {host}', when='Identify versions on recorded open TCP ports using a TCP connect scan.'),
     dict(id='nmap-os', title='Guess host operating system', command='nmap -n -Pn -O {host}', when='Use Nmap OS fingerprinting on a recorded host with an open TCP port. May require elevated privileges.'),
     dict(id='http-headers', title='Inspect HTTP headers', command='curl -I --max-time 5 {scheme}://{host}:{port}/', when='Review headers for a recorded open web service.'),
+    dict(id='web-contacts', title='Inspect published website contacts', command='python3 -m backend.web_contacts --url {url} --ip {host}', when='Review email addresses in page text and mailto links on a recorded web service; inspect up to five same-origin pages.'),
     dict(id='smb-shares', title='List SMB shares', command='smbclient -L //{host} -N', when='Check advertised shares for a recorded open SMB service.'),
 ]
 
@@ -71,6 +74,7 @@ def workflow(doc, authorized_cidr=None):
                 port, name = s['port'], s.get('name', '')
                 if re.search('http|www', name, re.I) or port in (80, 443, 8000, 8080, 8443):
                     scheme = 'https' if s.get('tunnel') == 'ssl' or re.search('https', name, re.I) or port in (443, 8443) else 'http'
+                    add('web-contacts', host, [s], 'A recorded web service can be reviewed for published contact information.', url=website_url(host, s))
                     add('http-headers', host, [s], f"Recorded open {port}/tcp ({name or 'web-associated port'}) supports a web header check.", port=port, scheme=scheme)
                 if port == 445 or name in ('microsoft-ds', 'netbios-ssn', 'smb'):
                     add('smb-shares', host, [s], f"Recorded open {port}/tcp ({name or 'SMB-associated port'}) supports share enumeration.")

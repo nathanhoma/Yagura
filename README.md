@@ -43,6 +43,22 @@ LLM_API_KEY=
 
 Copy `.env.example` to `.env` and set the endpoint. The Analysis view lists models advertised by that endpoint; the selected model is used for analysis and suggestions. `LLM_MODEL` remains an optional server default. Only localhost or literal private/local IP endpoints are accepted; redirects are refused. Command ranking receives stored finding summaries, eligible checks, and the fixed command catalog. Findings analysis also receives bounded excerpts from linked raw evidence. It selects candidate IDs, while the server supplies verified commands, reasons, and evidence links. If `LLM_MODEL` is empty and `/models` advertises exactly one model, the service selects it automatically; with multiple models, choose one in the UI. Invented commands or unsupported targets cannot pass through. Built-in checks remain available if the model is missing, unreachable, or returns invalid results.
 
+## Published website contacts
+
+For a recorded open HTTP(S) service inside the authorized check range, **Next checks** can suggest **Inspect published website contacts**. Set the host record's **Hostname** to the exercise site's actual name (for example `www.exercise.test`) when it uses virtual hosting. The command keeps that name for HTTP Host and TLS SNI but pins the connection to the recorded, scoped IP. HTTPS certificate verification remains enabled.
+
+The executable command is `python3 -m backend.web_contacts --url <website-url> --ip <recorded-ip>`. The app constructs its arguments from the stored host and service; it does not accept arbitrary URLs or commands in the execution request. The standalone command also restricts its connection IP to private/local IPv4 addresses, matching the app's current scope.
+
+The check reads page text and `mailto:` recipients, deduplicates addresses, and follows up to five same-origin pages (contact/about links first). Other origins, ports, URL credentials, and external redirects are rejected; no JavaScript or forms are executed. Limits are 256 KB per page, 25 distinct addresses, and a bounded request duration. The report and source URLs are saved as linked findings/evidence. Zero, one, or multiple addresses refer only to inspected pages; this does not prove whole-site uniqueness. Fetch errors and incomplete coverage remain visible in the evidence.
+
+## Email drafts
+
+Open **Email drafts** to select a discovered contact or enter a recipient manually. The sender address and name are optional so you can prepare messages before exercise infrastructure is confirmed. Edit the subject and plain-text body, save and reopen drafts, preview them, or copy their text. **Export .eml** saves the current draft and downloads a MIME message with `X-Unsent: 1`; unknown sender details are omitted. Internal notes and source evidence are excluded from exported messages.
+
+**Suggest wording** uses the drafting brief and optional existing subject/body with your configured local model. It previews the suggestion and applies it only after **Use this wording**. Generation does not save the draft, send email, or configure sender infrastructure. Manual editing works without a model. This release has no SMTP transport or email delivery endpoint.
+
+Drafts are stored separately in `data/email-drafts.json` with recipient source references derived from saved contact findings. Conflicting edits from another browser tab are rejected rather than overwriting newer content. Drafts are not part of the findings JSON/CSV export; use `.eml` export for messages. The API provides `GET/POST /api/email-drafts`, `PATCH/DELETE /api/email-drafts/{id}`, `GET /api/email-drafts/{id}/export`, `GET /api/email-contacts`, and `POST /api/email-drafts/generate`.
+
 ## Local discovery scope
 
 - **Read local network state** runs `ip -j -4 addr` and `ip -j -4 neigh` and saves results as linked findings/evidence.
