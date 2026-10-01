@@ -48,7 +48,7 @@ class PageLinks(HTMLParser):
 def inventory(url, ip, fetch=fetch_page):
     address = ipaddress.ip_address(ip)
     if address.version != 4 or not any(address in ipaddress.ip_network(net) for net in
-                                       ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '169.254.0.0/16')):
+                                       ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16')):
         raise ValueError('Use the recorded private/local IPv4 target.')
     origin(url)
     site = urlsplit(url)

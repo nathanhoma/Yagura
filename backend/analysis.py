@@ -1,10 +1,10 @@
 import hashlib
-import ipaddress
 import json
 
 from .findings import now
 from .llm import LlmError
 from .workflow import workflow
+from .scope import host_allowed, normalize_scope
 
 
 MAX_FINDINGS, MAX_EVIDENCE, MAX_CONTEXT = 60, 12, 10000
@@ -45,15 +45,14 @@ def encoded(value):
 def scoped_document(doc, host_id=None, authorized_cidr=None):
     if host_id is not None and (not isinstance(host_id, str) or not any(f['kind'] == 'host' and f['id'] == host_id for f in doc['findings'])):
         raise ValueError('Choose an existing hostId.')
+    scope = normalize_scope(authorized_cidr)
+    ids = {f['id'] for f in doc['findings'] if f['kind'] == 'host' and not f.get('local') and
+           (not scope['cidrs'] or host_allowed(f, scope))}
+    if host_id and host_id not in ids:
+        raise ValueError('Selected host is outside the authorized scope.')
     if host_id:
-        findings = [f for f in doc['findings'] if f['id'] == host_id or f.get('hostId') == host_id]
-    elif authorized_cidr:
-        network = ipaddress.ip_network(authorized_cidr, strict=False)
-        ids = {f['id'] for f in doc['findings'] if f['kind'] == 'host' and not f.get('local') and
-               f.get('ip') and ipaddress.ip_address(f['ip']) in network}
-        findings = [f for f in doc['findings'] if f['id'] in ids or f.get('hostId') in ids]
-    else:
-        findings = doc['findings']
+        ids = {host_id}
+    findings = [f for f in doc['findings'] if f['id'] in ids or f.get('hostId') in ids]
     ids = {e for f in findings for e in f['evidenceIds']}
     return dict(schemaVersion=doc['schemaVersion'], findings=findings, evidence=[e for e in doc['evidence'] if e['id'] in ids])
 
@@ -283,13 +282,14 @@ def built_in(doc):
 
 
 def analyze(doc, scope, llm, model=''):
-    selected = scoped_document(doc, scope.get('hostId'), scope.get('authorizedCidr'))
-    context = build_context(selected, scope.get('authorizedCidr'))
+    authorized = scope.get('authorizedScope', scope.get('authorizedCidr'))
+    selected = scoped_document(doc, scope.get('hostId'), authorized)
+    context = build_context(selected, authorized)
     hosts = [f for f in selected['findings'] if f['kind'] == 'host']
     services = [f for f in selected['findings'] if f['kind'] == 'service']
     observations = [f for f in selected['findings'] if f['kind'] == 'observation']
     result = dict(schemaVersion=1, generatedAt=now(), snapshotId=fingerprint(selected),
-                  scope=dict(hostId=scope.get('hostId'), authorizedCidr=scope.get('authorizedCidr'), hostIds=[h['id'] for h in hosts], ips=[h['ip'] for h in hosts]),
+                  scope=dict(hostId=scope.get('hostId'), authorizedScope=normalize_scope(authorized), hostIds=[h['id'] for h in hosts], ips=[h['ip'] for h in hosts]),
                   counts=dict(hosts=len(hosts), services=len(services), observations=len(observations), evidence=len(selected['evidence'])),
                   summary=f'Recorded {len(hosts)} hosts, {len(services)} services, and {len(observations)} observations.',
                   context=dict(findingIds=[f['id'] for f in context['findings']], evidenceIds=[e['id'] for e in context['evidence']], truncated=context['truncated']),
@@ -305,4 +305,4 @@ def analyze(doc, scope, llm, model=''):
     except Exception as exc:
         return {**result, 'status': 'fallback', 'source': 'built-in', 'model': model or llm.configuration()['model'],
                 'error': dict(code=getattr(exc, 'code', 'model-error'), message=str(exc)), 'assessments': built_in(selected),
-                'suggestions': workflow(selected, scope.get('authorizedCidr'))['candidates'][:6], 'message': 'Local model analysis is unavailable. Showing recorded facts and built-in next checks.'}
+                'suggestions': workflow(selected, authorized)['candidates'][:6], 'message': 'Local model analysis is unavailable. Showing recorded facts and built-in next checks.'}

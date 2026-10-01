@@ -90,6 +90,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True, 'command': 'arbitrary'})[0], 400)
         self.assertEqual(self.calls, [])
         self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True})[0], 400)
+        self.call('/api/scope', 'PUT', {'cidr': '10.0.4.80/32'})
         self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True, 'authorizedCidr': '10.0.4.81/32'})[0], 400)
         status, result = self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True, 'authorizedCidr': '10.0.4.80/32'})
         self.assertEqual(status, 200)
@@ -105,7 +106,7 @@ class HttpTests(unittest.TestCase):
         edited = candidate['command'].replace('--max-time 5', '--max-time 8').replace(':80/', ':80/docs')
         body = {'candidateId': candidate['id'], 'authorized': True, 'editedCommand': edited}
         self.assertEqual(self.call('/api/checks/run', 'POST', body)[0], 200)
-        self.assertEqual(self.calls[-1], ('curl', ['-I', '--max-time', '8', 'http://192.168.56.10:80/docs']))
+        self.assertEqual(self.calls[-1], ('curl', ['-q', '--noproxy', '*', '--resolve', '192.168.56.10:80:192.168.56.10', '-I', '--max-time', '8', 'http://192.168.56.10:80/docs']))
         self.assertEqual(self.call('/api/checks/run', 'POST', {**body, 'editedCommand': edited.replace('192.168.56.10', '192.168.56.11')})[0], 400)
         self.assertEqual(self.call('/api/checks/run', 'POST', {**body, 'authorized': False})[0], 400)
         self.assertEqual(len(self.calls), 1)
@@ -118,19 +119,46 @@ class HttpTests(unittest.TestCase):
 
     def test_recon_scope_is_shared_and_persisted(self):
         self.call('/api/findings', 'POST', {'ip': '10.0.4.80', 'title': 'Target', 'detail': 'Lab target'})
-        self.assertEqual(self.call('/api/scope')[1], {'cidr': ''})
+        self.assertEqual(self.call('/api/scope')[1], {'cidrs': [], 'domains': []})
         self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': '8.8.8.8/32'})[0], 400)
-        self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': '10.0.4.80/32'}), (200, {'cidr': '10.0.4.80/32'}))
-        self.assertEqual(Workspace(findings_file=self.workspace.findings_file).load_scope(), '10.0.4.80/32')
+        self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': '10.0.4.80/32'}), (200, {'cidrs': ['10.0.4.80/32'], 'domains': []}))
+        self.assertEqual(Workspace(findings_file=self.workspace.findings_file).load_scope(), {'cidrs': ['10.0.4.80/32'], 'domains': []})
         candidates = self.call('/api/workflow')[1]['candidates']
         candidate = next(c for c in candidates if c['catalogId'] == 'nmap-ports')
         self.assertEqual(self.call('/api/workflow?cidr=10.0.4.81/32')[0], 400)
         self.assertFalse(self.call('/api/analysis', 'POST', {})[1]['stale'])
         self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True})[0], 200)
-        self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': ''}), (200, {'cidr': ''}))
+        self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': ''}), (200, {'cidrs': [], 'domains': []}))
         self.assertEqual(self.call('/api/workflow')[1]['candidates'], [])
         self.assertEqual(self.call('/api/workflow?cidr=10.0.4.80/32')[0], 400)
         self.assertTrue(self.call('/api/analysis/latest')[1]['analysis']['stale'])
+
+    def test_multiple_cidrs_and_domain_gate_all_execution_paths(self):
+        output = ('Nmap scan report for ca-website.cca.01.crimsonia.net (100.96.1.70)\n'
+                  'Host is up.\n80/tcp open http\n'
+                  'Nmap scan report for other.net (10.1.51.5)\nHost is up.\n80/tcp open http\n'
+                  'Nmap done: 2 IP addresses (2 hosts up) scanned')
+        self.assertEqual(self.call('/api/import', 'POST', {'tool': 'nmap', 'output': output})[0], 201)
+        scope = {'cidrs': ['100.96.1.0/24', '10.1.51.0/24'], 'domains': ['Crimsonia.NET']}
+        status, saved = self.call('/api/scope', 'PUT', scope)
+        self.assertEqual(status, 200)
+        self.assertEqual(saved, {'cidrs': ['10.1.51.0/24', '100.96.1.0/24'], 'domains': ['crimsonia.net']})
+        candidates = self.call('/api/workflow')[1]['candidates']
+        self.assertTrue(candidates)
+        self.assertTrue(all('10.1.51.5' not in c['command'] for c in candidates))
+        self.assertFalse(any(c['catalogId'] in ('dns-ptr', 'nuclei-git') for c in candidates))
+        headers = next(c for c in candidates if c['catalogId'] == 'http-headers')
+        self.assertIn('--resolve ca-website.cca.01.crimsonia.net:80:100.96.1.70', headers['command'])
+        self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': headers['id'], 'authorized': True,
+                                                              'authorizedScope': {'cidrs': ['10.1.51.0/24'], 'domains': ['crimsonia.net']}})[0], 400)
+        self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': headers['id'], 'authorized': True,
+                                                              'authorizedScope': saved})[0], 200)
+        self.assertEqual(self.calls[-1][0], 'curl')
+        self.assertEqual(self.calls[-1][1][0:5], ['-q', '--noproxy', '*', '--resolve', 'ca-website.cca.01.crimsonia.net:80:100.96.1.70'])
+        self.assertEqual(self.call('/api/discovery/scan', 'POST', {'cidr': '100.96.1.0/24', 'authorized': True})[0], 400)
+        self.assertEqual(self.call('/api/discovery/scan', 'POST', {'cidr': '100.96.1.70/32', 'authorized': True})[0], 503)
+        self.assertEqual(self.calls[-1], ('nmap', ['-n', '-sn', '-oX', '-', '100.96.1.70/32']))
+        self.assertEqual(self.call('/api/analysis', 'POST', {'authorizedScope': saved})[1]['counts']['hosts'], 1)
 
     def test_model_result_only_uses_server_candidates(self):
         class FakeModel:
@@ -155,6 +183,7 @@ class HttpTests(unittest.TestCase):
     def test_os_check_uses_fixed_scoped_nmap_arguments(self):
         output = (Path(__file__).parent / 'fixtures/nmap.xml').read_text()
         self.call('/api/import', 'POST', {'tool': 'nmap', 'output': output})
+        self.call('/api/scope', 'PUT', {'cidr': '192.168.56.10/32'})
         candidates = self.call('/api/workflow?cidr=192.168.56.10/32')[1]['candidates']
         candidate = next(c for c in candidates if c['catalogId'] == 'nmap-os')
         self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True, 'authorizedCidr': '192.168.56.11/32'})[0], 400)
@@ -167,6 +196,7 @@ class HttpTests(unittest.TestCase):
     def test_website_contacts_check_saves_linked_findings_and_sources(self):
         output = 'Nmap scan report for www.lab.test (192.168.56.10)\nHost is up.\n80/tcp open http\nNmap done: 1 IP address (1 host up) scanned'
         self.call('/api/import', 'POST', {'tool': 'nmap', 'output': output})
+        self.call('/api/scope', 'PUT', {'cidr': '192.168.56.10/32'})
         candidates = self.call('/api/workflow?cidr=192.168.56.10/32')[1]['candidates']
         candidate = next(c for c in candidates if c['catalogId'] == 'web-contacts')
         report = dict(count=1, contacts=[dict(address='ops@lab.test', sources=['http://www.lab.test:80/contact'])],

@@ -120,7 +120,7 @@ def fetch_page(url, ip, timeout):
 
 def discover(url, ip, fetcher=fetch_page):
     address = ipaddress.ip_address(ip)
-    local_ranges = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '169.254.0.0/16')
+    local_ranges = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16')
     if address.version != 4 or not any(address in ipaddress.ip_network(net) for net in local_ranges):
         raise ValueError('Use the recorded private/local IPv4 target.')
     site = origin(url)

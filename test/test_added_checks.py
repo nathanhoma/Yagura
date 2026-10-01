@@ -74,9 +74,9 @@ class AddedChecksTests(unittest.TestCase):
         headers = by_kind['http-headers']
         original = headers['command']
         changed = original.replace('--max-time 5', '--max-time 8').replace(':80/', ':80/docs')
-        self.assertEqual(edited_invocation(headers, self.doc, changed)[1][-1], 'http://192.168.56.10:80/docs')
+        self.assertEqual(edited_invocation(headers, self.doc, changed)[1][-1], 'http://www.lab.test:80/docs')
         for command in (changed.replace('192.168.56.10', '192.168.56.11'),
-                        changed.replace('curl -I', 'curl -k -I'),
+                        changed.replace('curl -q', 'curl -k -q'),
                         changed.replace('--max-time 8', '--max-time 100'),
                         changed + ' ; id'):
             with self.subTest(command=command), self.assertRaises(ValueError):
