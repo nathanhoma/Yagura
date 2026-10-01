@@ -7,13 +7,13 @@ let emailContacts=[],emailDrafts=[],activeDraft=null,draftDirty=false,draftBusy=
 const views={drafts:'Prepare, review, and save email drafts. Sender infrastructure can be configured later.',scope:'Define and save the authorized target range before working with evidence or checks.',review:'Import output, inspect linked evidence, and correct findings.',analysis:'Choose a local model and analyze stored evidence.',checks:'Review grounded checks, then run a check against an authorized local target.'};
 const viewTitles={scope:'Scope',review:'Findings',analysis:'Analysis',checks:'Next checks',drafts:'Email drafts'};
 let savedScope='',scopeLoaded=false,scopeLoadError='';
-function showView(){const hash=location.hash.slice(1);const view=hash==='recon'?'scope':hash;const selected=views[view]?view:'scope';document.body.dataset.view=selected;$('#viewTitle').textContent=viewTitles[selected];document.title=viewTitles[selected]+' · Yagura';$('#viewIntro').textContent=views[selected];document.querySelectorAll('.nav a,.mobile-nav a').forEach(a=>{const active=a.hash==='#'+selected;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});updateScopeGate();window.scrollTo(0,0);}
+function showView(){const hash=location.hash.slice(1);const view=hash==='recon'?'scope':hash;const selected=views[view]?view:'scope';document.body.dataset.view=selected;$('#viewTitle').textContent=viewTitles[selected];document.title=viewTitles[selected]+' · Yagura';$('#viewIntro').textContent=views[selected];document.querySelectorAll('.nav a,.mobile-nav a').forEach(a=>{const active=a.hash==='#'+selected&&!a.hasAttribute('data-nav-parent');a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});$('#actionsNav').classList.toggle('active-parent',['checks','drafts'].includes(selected));$('#checksSubnav').hidden=!['checks','drafts'].includes(selected);$('#checksSubnav').querySelectorAll('a').forEach(a=>{const active=a.hash==='#'+selected;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});updateScopeGate();window.scrollTo(0,0);}
 function updateScopeGate(){
   const ready=scopeLoaded&&!!savedScope;
   document.body.dataset.scopeState=ready?'ready':scopeLoaded?'required':scopeLoadError?'error':'loading';
   $('#scopeGate').hidden=document.body.dataset.view==='scope'||ready;
   $('#scopeGateTitle').textContent=scopeLoadError?'Target scope could not be loaded':!scopeLoaded?'Loading target scope…':'Define the target scope first';
-  $('#scopeGateMessage').textContent=scopeLoadError?'The saved scope could not be verified. Open Scope and refresh to retry. '+scopeLoadError:!scopeLoaded?'Checking the saved engagement scope.':'Findings, Analysis, Next checks, and Email drafts become available after saving an authorized target range. This server’s network is not the target network.';
+  $('#scopeGateMessage').textContent=scopeLoadError?'The saved scope could not be verified. Open Scope and refresh to retry. '+scopeLoadError:!scopeLoaded?'Checking the saved engagement scope.':'Save an authorized target range to continue to Next checks, then review Findings and Analysis. Next checks and Email drafts are available under Actions. This server’s network is not the target network.';
   $('#savedScopeDisplay').textContent=savedScope||'Not defined';
   $('#scanBtn').disabled=!ready;
   const scanState=$('#scanState');if(!ready||scanState.textContent.startsWith('Save the target scope')||scanState.textContent.startsWith('Saved scope:'))scanState.textContent=ready?'Saved scope: '+savedScope+'. Confirm authorization before discovery.':'Save the target scope before running discovery.';
@@ -48,6 +48,7 @@ async function saveScope(clear=false){
   $('#authorized').checked=false;$('#checksAuthorized').checked=false;$('#scanResults').innerHTML='';
   showScope();updateScopeGate();updatePrerequisites();
   $('#scopeState').textContent=savedScope?'Saved target scope: '+savedScope+'. Other workflow sections are now available.':'Scope cleared. Save a target range to continue.';
+  if(savedScope){location.hash='#checks';showView();}
   await refreshFindings();return result;
 }
 async function persistScope(clear=false){const button=$('#saveScope');button.disabled=true;$('#clearScope').disabled=true;try{await saveScope(clear);toast(clear?'Target scope cleared':'Target scope saved');}catch(e){$('#scopeState').textContent=e.message;}finally{button.disabled=false;$('#clearScope').disabled=false;}}
