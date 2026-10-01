@@ -19,7 +19,10 @@ from .analysis import analyze, fingerprint, scoped_document
 from .llm import LlmService, private_url
 from .workflow import COMMAND_CATALOG, is_local_ip, workflow
 from .web_contacts import website_url
-from .scope import discovery_allowed, normalize_scope, valid_cidr
+from .scope import normalize_scope, valid_cidr
+from .discovery import contained_range, dns_review, approval_name
+from .sensitive import redact, sanitize_document
+from .outbound import require_target, require_web_origin
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -163,6 +166,10 @@ def parse_check_result(candidate, tool, output):
             raise ValueError('No web pages were inspected.')
         detail = '\n'.join(f"{p.get('url', '')} · HTTP {p.get('status', '?')} · {p.get('title', '')} · {p.get('server', '')}" for p in report['pages'][:5])
         add('Web inventory', detail)
+        for redirect in report.get('redirects', [])[:12]:
+            add('Web redirect', json.dumps(redirect))
+        if report.get('notFoundBaseline'):
+            add('Web not-found baseline', json.dumps(report['notFoundBaseline']))
         for form in report.get('forms', [])[:20]:
             add('Web form metadata', json.dumps(form))
         if report.get('parameters'):
@@ -221,6 +228,7 @@ class Workspace:
     def __init__(self, findings_file=None, analysis_file=None, llm=None, runner=None):
         self.findings_file = Path(findings_file or ROOT / 'data/findings.json')
         self.scope_file = self.findings_file.with_name('scope.json')
+        self.discovery_file = self.findings_file.with_name('discovery.json')
         self.analysis_file = Path(analysis_file or self.findings_file.with_name('analysis.json'))
         self.drafts = DraftStore(self.findings_file.with_name('email-drafts.json'))
         self.llm = llm or LlmService(os.getenv('LLM_BASE_URL', ''), os.getenv('LLM_MODEL', ''), os.getenv('LLM_API_KEY', ''), os.getenv('LLM_TIMEOUT_MS', '30000'), os.getenv('LLM_TRUSTED_HTTPS_HOST', ''))
@@ -250,6 +258,24 @@ class Workspace:
         temp.replace(self.scope_file)
         return normalized
 
+    def load_discovery(self):
+        try:
+            data = json.loads(self.discovery_file.read_text())
+            if isinstance(data, dict) and isinstance(data.get('hosts'), list):
+                return data
+            raise ValueError('Invalid discovery records.')
+        except FileNotFoundError:
+            return {'hosts': []}
+
+    def save_discovery(self, data):
+        if len(data.get('hosts', [])) > 10000 or len(data.get('scans', [])) > 20:
+            raise ValueError('Discovery capacity reached; start a new workspace before scanning more.')
+        self.discovery_file.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.discovery_file.with_name(self.discovery_file.name + '.tmp')
+        temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+        temp.chmod(0o600)
+        temp.replace(self.discovery_file)
+
     def resolve_scope(self, requested=None):
         selected = self.load_scope()
         supplied = normalize_scope(requested) if requested is not None else None
@@ -275,6 +301,7 @@ class Workspace:
             raise RuntimeError(f'Cannot read findings: {exc}')
 
     def save(self, doc):
+        doc = sanitize_document(doc)
         if len(doc['findings']) > 10000 or len(doc['evidence']) > 2000:
             raise ValueError('Workspace capacity reached. Export findings before creating a new workspace.')
         self.findings_file.parent.mkdir(parents=True, exist_ok=True)
@@ -293,7 +320,8 @@ class Workspace:
     def stale(self, result):
         try:
             scope = result['scope'].get('authorizedScope', result['scope'].get('authorizedCidr'))
-            return (fingerprint(scoped_document(self.load(), result['scope'].get('hostId'), scope)) != result['snapshotId'] or
+            return (fingerprint(scoped_document(sanitize_document(self.load()), result['scope'].get('hostId'), scope,
+                                                result['scope'].get('selectedHostIds'))) != result['snapshotId'] or
                     self.scope_file.exists() and normalize_scope(scope) != self.load_scope())
         except (ValueError, KeyError):
             return True
@@ -428,13 +456,15 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(200, {'analysis': result})
                 if self.command == 'POST' and path == '/api/analysis':
                     body = self.body(4000)
-                    if not isinstance(body, dict) or any(k not in ('hostId', 'model', 'authorizedCidr', 'authorizedScope') for k in body) or ('hostId' in body and not isinstance(body['hostId'], str)) or ('model' in body and (not isinstance(body['model'], str) or len(body['model']) > 200)) or 'authorizedCidr' in body and 'authorizedScope' in body:
+                    if not isinstance(body, dict) or any(k not in ('hostId', 'hostIds', 'model', 'authorizedCidr', 'authorizedScope') for k in body) or ('hostId' in body and not isinstance(body['hostId'], str)) or ('model' in body and (not isinstance(body['model'], str) or len(body['model']) > 200)) or 'authorizedCidr' in body and 'authorizedScope' in body:
                         raise ValueError('Supply only an optional stored hostId, selected model, and authorized check range for analysis.')
                     scope = {'hostId': body['hostId']} if body.get('hostId') else {}
+                    if 'hostIds' in body:
+                        scope['hostIds'] = body['hostIds']
                     with workspace.lock:
                         scope['authorizedScope'] = workspace.resolve_scope(body.get('authorizedScope', body.get('authorizedCidr')))
                         doc = workspace.load()
-                        selected = scoped_document(doc, scope.get('hostId'), scope['authorizedScope'])
+                        selected = scoped_document(sanitize_document(doc), scope.get('hostId'), scope['authorizedScope'], scope.get('hostIds'))
                         key = fingerprint(selected) + ':' + body.get('model', '') + ':' + json.dumps(scope['authorizedScope'])
                         if key in workspace.active_analyses:
                             event = workspace.active_analyses[key]
@@ -445,7 +475,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             owner = True
                     if owner:
                         try:
-                            result = analyze(doc, scope, workspace.llm, body.get('model', ''))
+                            result = analyze(sanitize_document(doc), scope, workspace.llm, body.get('model', ''))
                             with workspace.lock:
                                 result['stale'] = workspace.stale(result)
                                 if result['stale']:
@@ -466,23 +496,23 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 if self.command == 'GET' and path in ('/api/findings', '/api/workflow', '/api/commands'):
                     with workspace.lock:
                         scope = workspace.resolve_scope(parse_qs(url.query).get('cidr', [None])[0]) if path == '/api/workflow' else None
-                        data = {'/api/findings': lambda: workspace.load(), '/api/workflow': lambda: workflow(workspace.load(), scope), '/api/commands': lambda: {'commands': COMMAND_CATALOG}}[path]()
+                        data = {'/api/findings': lambda: sanitize_document(workspace.load()), '/api/workflow': lambda: workflow(sanitize_document(workspace.load()), scope), '/api/commands': lambda: {'commands': COMMAND_CATALOG}}[path]()
                     return self.send_json(200, data)
                 if self.command == 'GET' and path == '/api/export':
                     with workspace.lock:
-                        doc = workspace.load()
+                        doc = sanitize_document(workspace.load())
                     as_csv = parse_qs(url.query).get('format') == ['csv']
                     data = csv_export(doc) if as_csv else json.dumps(doc, ensure_ascii=False, indent=2) + '\n'
                     return self.send_bytes(200, data.encode(), 'text/csv; charset=utf-8' if as_csv else 'application/json; charset=utf-8', f"yagura-findings.{'csv' if as_csv else 'json'}")
                 if self.command == 'POST' and path == '/api/import/preview':
-                    return self.send_json(200, F.parse_import(self.body()))
+                    return self.send_json(200, sanitize_document(F.parse_import(self.body())))
                 if self.command == 'POST' and path == '/api/import':
                     parsed = F.parse_import(self.body())
                     with workspace.lock:
                         doc = workspace.load()
                         summary = F.merge_parsed(doc, parsed)
                         workspace.save(doc)
-                    return self.send_json(201, {**doc, 'summary': summary, 'warnings': parsed['warnings']})
+                    return self.send_json(201, {**sanitize_document(doc), 'summary': summary, 'warnings': parsed['warnings']})
                 if self.command == 'POST' and path == '/api/discovery/local':
                     address = workspace.runner('ip', ['-j', '-4', 'addr'], 15)
                     neighbor = workspace.runner('ip', ['-j', '-4', 'neigh'], 15)
@@ -502,6 +532,11 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     interfaces = [dict(interface=h.get('interface'), ip=h['ip'], prefix=h.get('prefix'), cidr=f"{h['ip']}/{h.get('prefix')}") for h in doc['findings'] if h['kind'] == 'host' and h.get('local') and recent(h)]
                     hosts = [dict(ip=h['ip'], interface=h.get('interface'), state=h.get('neighborState'), mac=h.get('mac')) for h in doc['findings'] if h['kind'] == 'host' and not h.get('local') and recent(h)]
                     return self.send_json(200, dict(interfaces=interfaces, hosts=hosts, errors=errors))
+                if self.command == 'GET' and path == '/api/discovery/pending':
+                    with workspace.lock:
+                        scope = workspace.load_scope()
+                        rows = [h for h in workspace.load_discovery()['hosts'] if h.get('scope') == scope]
+                    return self.send_json(200, {'hosts': rows})
                 if self.command == 'POST' and path == '/api/discovery/scan':
                     body = self.body(4000)
                     if not isinstance(body, dict) or body.get('authorized') is not True:
@@ -509,22 +544,89 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     cidr = body.get('cidr')
                     with workspace.lock:
                         scope = workspace.load_scope()
-                        doc = workspace.load()
-                        if not discovery_allowed(cidr, scope, doc['findings']):
-                            raise ValueError('Discovery target must be inside a saved CIDR; with domain limits, use a recorded, matching hostname at one /32 IP.')
+                        if not contained_range(cidr, scope):
+                            raise ValueError('Discovery target must be contained in a saved CIDR.')
                     cidr = str(ipaddress.ip_network(cidr.strip(), strict=False))
-                    result = workspace.runner('nmap', ['-n', '-sn', '-oX', '-', cidr], 45)
+                    result = workspace.runner('nmap', ['-n', '-sn', '--max-rate', '5', '--max-retries', '1', '-oX', '-', cidr], 180)
                     if not result['ok']:
                         return self.send_json(503, {'error': result['stderr'] or 'Nmap discovery failed.'})
-                    parsed = F.parse_import(dict(tool='nmap', output=result['stdout'], command=f'nmap -n -sn -oX - {cidr}', observedAt=F.now()))
+                    observed = F.now()
+                    parsed = F.parse_import(dict(tool='nmap', output=result['stdout'], command=f'nmap -n -sn --max-rate 5 --max-retries 1 -oX - {cidr}', observedAt=observed))
+                    hosts = [dict(ip=h['ip'], status=h.get('state', 'unknown')) for h in parsed['findings']
+                             if h['kind'] == 'host' and h.get('state') == 'up' and
+                             ipaddress.ip_address(h['ip']) in ipaddress.ip_network(cidr)]
                     with workspace.lock:
                         if workspace.load_scope() != scope:
                             raise ValueError('Target scope changed during discovery. Results were not saved.')
+                        data = workspace.load_discovery()
+                        scan_id = F.uid('scan')
+                        data.setdefault('scans', []).append(dict(id=scan_id, cidr=cidr, observedAt=observed,
+                            command=parsed['evidence'][0]['command'], output=result['stdout'][:1000000], scope=scope))
+                        data['scans'] = data['scans'][-20:]
+                        for item in hosts:
+                            previous = next((h for h in data['hosts'] if h['ip'] == item['ip'] and h['scope'] == scope), None)
+                            if previous:
+                                previous.update(status=item['status'], lastSeen=observed, scanId=scan_id)
+                            else:
+                                data['hosts'].append(dict(ip=item['ip'], status=item['status'], firstSeen=observed,
+                                    lastSeen=observed, scanId=scan_id, scope=scope, dns=None, approved=False))
+                        workspace.save_discovery(data)
+                    return self.send_json(200, dict(cidr=cidr, hosts=hosts, count=len(hosts), quarantined=True))
+                if self.command == 'POST' and path == '/api/discovery/dns':
+                    body = self.body(4000)
+                    if not isinstance(body, dict) or set(body) != {'ip', 'resolvers', 'authorized'} or body['authorized'] is not True:
+                        raise ValueError('Choose a discovered IP and explicitly authorized internal resolvers.')
+                    with workspace.lock:
+                        scope = workspace.load_scope()
+                        row = next((h for h in workspace.load_discovery()['hosts'] if h.get('ip') == body['ip'] and h.get('scope') == scope), None)
+                        if row is None:
+                            raise ValueError('Discover this IP inside the saved scope first.')
+                    review = dns_review(body['ip'], body['resolvers'], scope, workspace.runner)
+                    with workspace.lock:
+                        if workspace.load_scope() != scope:
+                            raise ValueError('Scope changed during DNS review.')
+                        data = workspace.load_discovery()
+                        row = next(h for h in data['hosts'] if h['ip'] == body['ip'] and h['scope'] == scope)
+                        row['dns'] = review
+                        row['approved'] = False
                         doc = workspace.load()
-                        F.merge_parsed(doc, parsed)
+                        host = next((h for h in doc['findings'] if h['kind'] == 'host' and h['ip'] == body['ip']), None)
+                        if host and host.get('approval'):
+                            host.pop('approval')
+                            workspace.save(doc)
+                        workspace.save_discovery(data)
+                    return self.send_json(200, row)
+                if self.command == 'POST' and path == '/api/discovery/approve':
+                    body = self.body(4000)
+                    if not isinstance(body, dict) or set(body) - {'ip', 'name', 'reason', 'authorized'} or body.get('authorized') is not True:
+                        raise ValueError('Choose a DNS-reviewed host and confirm approval.')
+                    with workspace.lock:
+                        scope = workspace.load_scope()
+                        data = workspace.load_discovery()
+                        row = next((h for h in data['hosts'] if h.get('ip') == body.get('ip') and h.get('scope') == scope), None)
+                        if row is None:
+                            raise ValueError('Discovered host not found in the current scope.')
+                        name = approval_name(row, body.get('name'), scope, body.get('reason', ''))
+                        when = F.now()
+                        ev = dict(id=F.uid('evidence'), tool='dns-review', command='Explicit host approval',
+                                  output=json.dumps(dict(ip=row['ip'], name=name, scanId=row['scanId'], discoveredAt=row['firstSeen'],
+                                                         review=row['dns'], reason=str(body.get('reason', ''))[:500])),
+                                  observedAt=when, importedAt=when, format='json')
+                        doc = workspace.load()
+                        host = next((h for h in doc['findings'] if h['kind'] == 'host' and h['ip'] == row['ip']), None)
+                        if host is None:
+                            host = F.record('host', dict(ip=row['ip'], aliases=[], name=name, state=row['status'], local=False,
+                                title=row['ip'], detail='Approved after resolver-attributed DNS review.'), ev['id'], when)
+                            doc['findings'].append(host)
+                        else:
+                            host['name'] = name
+                            host['evidenceIds'] = list(dict.fromkeys(host['evidenceIds'] + [ev['id']]))
+                        host['approval'] = dict(ip=row['ip'], name=name, scope=scope, approvedAt=when)
+                        doc['evidence'].append(ev)
                         workspace.save(doc)
-                    hosts = [dict(ip=h['ip'], name=h.get('name'), status=h.get('state')) for h in parsed['findings'] if h['kind'] == 'host']
-                    return self.send_json(200, dict(cidr=cidr, hosts=hosts, count=len(hosts)))
+                        row.update(approved=True, approvedName=name, approvedAt=when)
+                        workspace.save_discovery(data)
+                    return self.send_json(200, dict(host=host, discovery=row))
                 if self.command == 'POST' and path == '/api/findings':
                     body = self.body(16000)
                     if not isinstance(body, dict) or not isinstance(body.get('title'), str) or not body['title'].strip() or not isinstance(body.get('detail'), str) or not body['detail'].strip():
@@ -555,14 +657,14 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         doc['findings'].append(finding)
                         doc['evidence'].append(ev)
                         workspace.save(doc)
-                    return self.send_json(201, {'finding': finding})
+                    return self.send_json(201, {'finding': sanitize_document({'findings': [finding], 'evidence': []})['findings'][0]})
                 if self.command == 'POST' and path == '/api/findings/merge':
                     body = self.body(4000)
                     with workspace.lock:
                         doc = workspace.load()
                         F.merge_findings(doc, body.get('targetId'), body.get('sourceId'))
                         workspace.save(doc)
-                    return self.send_json(200, doc)
+                    return self.send_json(200, sanitize_document(doc))
                 if self.command in ('PATCH', 'DELETE') and path.startswith('/api/findings/'):
                     finding_id = unquote(path[len('/api/findings/'):])
                     with workspace.lock:
@@ -575,7 +677,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         else:
                             F.remove_finding(doc, finding_id)
                         workspace.save(doc)
-                    return self.send_json(200, doc)
+                    return self.send_json(200, sanitize_document(doc))
                 if self.command == 'POST' and path == '/api/checks/run':
                     body = self.body(4000)
                     if not isinstance(body, dict) or set(body) - {'candidateId', 'authorized', 'authorizedCidr', 'authorizedScope', 'editedCommand'} or body.get('authorized') is not True or not isinstance(body.get('candidateId'), str) or ('editedCommand' in body and not isinstance(body['editedCommand'], str)) or 'authorizedCidr' in body and 'authorizedScope' in body:
@@ -590,6 +692,11 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         candidate = next((c for c in workflow(doc, scope)['candidates'] if c['id'] == body['candidateId']), None)
                         if not candidate:
                             raise ValueError('Suggestion is no longer available. Refresh the findings.')
+                        host = next(f for f in doc['findings'] if f['id'] == candidate['hostId'])
+                        require_target(host, scope)
+                        if candidate['catalogId'] in ('http-headers', 'web-contacts', 'web-exposure', 'web-inventory'):
+                            service = next(f for f in doc['findings'] if f['id'] == candidate['serviceIds'][0])
+                            require_web_origin(website_url(host, service), host, scope)
                         if candidate['id'] in workspace.active_checks:
                             return self.send_json(409, {'error': 'This check is already running.'})
                         if 'editedCommand' in body:
@@ -622,8 +729,8 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                                 warning = f'Output was not imported: {exc}'
                         outcome = ('no-response' if imported and no_response else
                                    'completed' if result['ok'] and imported and not warning else 'failed')
-                        return self.send_json(200, dict(candidateId=candidate['id'], command=command, ok=result['ok'], outcome=outcome,
-                                                        output=output, stderr=stderr, imported=imported, warning=warning))
+                        return self.send_json(200, dict(candidateId=candidate['id'], command=redact(command), ok=result['ok'], outcome=outcome,
+                                                        output=redact(output), stderr=redact(stderr), imported=imported, warning=warning))
                     finally:
                         with workspace.lock:
                             workspace.active_checks.discard(candidate['id'])
@@ -633,7 +740,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         raise ValueError('Use a valid selected model.')
                     with workspace.lock:
                         scope = workspace.resolve_scope(body.get('authorizedScope', body.get('authorizedCidr')))
-                        doc = workspace.load()
+                        doc = sanitize_document(workspace.load())
                         available = workflow(doc, scope)['candidates'][:100]
                     def fallback(message):
                         with workspace.lock:

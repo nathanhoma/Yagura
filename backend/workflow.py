@@ -4,7 +4,7 @@ from urllib.parse import urlsplit
 
 from .web_contacts import website_url
 from .investigation_catalog import REFERENCE_CHECKS
-from .scope import LOCAL_NETWORKS, host_allowed, normalize_scope
+from .scope import LOCAL_NETWORKS, approved_host, host_allowed, normalize_scope
 
 
 def is_local_ip(value):
@@ -64,11 +64,10 @@ def workflow(doc, authorized_scope=None):
         services = [s for s in rows if s['kind'] == 'service' and s.get('hostId') == host['id']]
         observations = [o for o in rows if o['kind'] == 'observation' and o.get('hostId') == host['id']]
         opened = [s for s in services if s.get('state') == 'open']
-        eligible = (is_local_ip(host['ip']) and host_allowed(host, scope) and
+        eligible = (is_local_ip(host['ip']) and approved_host(host, scope) and
                     not host.get('local') and host.get('state') != 'down')
         if eligible:
-            if not scope['domains'] and not any(o.get('title') == 'Reverse DNS name' for o in observations):
-                add('dns-ptr', host, [], f"Resolve a name for recorded host {host['ip']}.")
+            # DNS review uses explicit, in-scope resolver IPs in the quarantined discovery flow.
             if host.get('state') != 'up':
                 add('ping', host, [], f"Host {host['ip']} is recorded with reachability {host.get('state')}; verify ICMP response.")
             tcp = [s for s in opened if s.get('protocol') == 'tcp']
@@ -91,8 +90,7 @@ def workflow(doc, authorized_scope=None):
                     add('http-headers', host, [s], f"Recorded open {port}/tcp ({name or 'web-associated port'}) supports a web header check.", port=port, scheme=scheme, web_host=urlsplit(url).hostname, url=url)
                     if not any(o.get('title') == 'Web inventory' and o.get('serviceId') == s['id'] for o in observations):
                         add('web-inventory', host, [s], f"Inventory pages and routes on recorded web service {port}/tcp.", url=website_url(host, s))
-                    if not scope['domains'] and not any(o.get('title') == 'Curated Nuclei exposure check' and o.get('serviceId') == s['id'] for o in observations):
-                        add('nuclei-git', host, [s], f"Check a recorded web service for publicly exposed Git metadata with one bundled template.", port=port, scheme=scheme)
+                    # Do not execute extensible scanners until host-level egress isolation is installed.
                 if port == 445 or name in ('microsoft-ds', 'netbios-ssn', 'smb'):
                     add('smb-shares', host, [s], f"Recorded open {port}/tcp ({name or 'SMB-associated port'}) supports share enumeration.")
                     if not any(o.get('title') == 'smb2-security-mode' and o.get('serviceId') == s['id'] for o in observations):
@@ -109,6 +107,7 @@ def workflow(doc, authorized_scope=None):
                   'No authorized check range selected' if not scope['cidrs'] else
                   'Outside selected authorized check ranges' if not any(ipaddress.ip_address(host['ip']) in ipaddress.ip_network(cidr) for cidr in scope['cidrs']) else
                   'Hostname is outside the authorized domains' if not host_allowed(host, scope) else
+                  'Host identity needs DNS review and approval' if not approved_host(host, scope) else
                   'Last recorded host state is down')
         targets.append(dict(host=host, services=services, observations=observations, stage=stage, eligible=eligible, scopeReason=reason))
     return dict(targets=targets, candidates=candidates)

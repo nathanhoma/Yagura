@@ -32,12 +32,12 @@ class ScopeTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize_scope(value)
 
-    def test_domain_bound_discovery_requires_recorded_single_host(self):
+    def test_domain_bound_discovery_is_quarantined_without_a_recorded_name(self):
         rows = [{'kind': 'host', 'ip': '100.96.1.70', 'name': 'ca-website.cca.01.crimsonia.net'}]
         self.assertTrue(discovery_allowed('100.96.1.70/32', self.scope, rows))
-        self.assertFalse(discovery_allowed('100.96.1.0/24', self.scope, rows))
-        self.assertFalse(discovery_allowed('100.96.1.71/32', self.scope, rows))
-        self.assertFalse(discovery_allowed('100.96.1.70/32', self.scope, [{'kind': 'host', 'ip': '100.96.1.70', 'name': 'other.net'}]))
+        self.assertTrue(discovery_allowed('100.96.1.0/24', self.scope, rows))
+        self.assertTrue(discovery_allowed('100.96.1.71/32', self.scope, []))
+        self.assertFalse(discovery_allowed('100.96.2.0/24', self.scope, rows))
 
     def test_candidate_requires_both_ip_and_domain(self):
         doc = F.empty()
@@ -48,6 +48,8 @@ class ScopeTests(unittest.TestCase):
             doc['evidence'].append(ev)
             doc['findings'].append(F.record('host', {'ip': ip, 'name': name, 'aliases': [], 'state': 'up', 'local': False,
                                                      'title': ip, 'detail': ''}, ev['id'], F.now()))
+        self.assertEqual(workflow(doc, self.scope)['candidates'], [])
+        doc['findings'][0]['approval'] = dict(ip='100.96.1.70', name='ca-website.cca.01.crimsonia.net', scope=self.scope, approvedAt=F.now())
         candidates = workflow(doc, self.scope)['candidates']
         self.assertTrue(candidates)
         self.assertEqual({c['command'].split()[-1] for c in candidates if c['catalogId'] == 'nmap-ports'}, {'100.96.1.70'})

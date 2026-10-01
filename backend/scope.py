@@ -85,17 +85,25 @@ def host_allowed(host, scope):
     return ip_allowed(host.get('ip'), scope) and name_allowed(host.get('name'), scope)
 
 
+def approved_host(host, scope):
+    """A domain-bound check needs an explicit, current IP/name approval."""
+    selected = normalize_scope(scope)
+    if not host_allowed(host, selected):
+        return False
+    approval = host.get('approval')
+    if not selected['domains'] and not approval:
+        return True  # Preserve explicitly imported legacy IP-only workspaces.
+    return bool(approval and approval.get('ip') == host.get('ip') and
+                approval.get('name') == str(host.get('name', '')).lower().rstrip('.') and
+                approval.get('scope') == selected)
+
+
 def discovery_allowed(cidr, scope, findings):
-    """A domain-bound discovery must name one already recorded host."""
+    """Only CIDR containment is needed; discovered IPs stay quarantined."""
     if not valid_cidr(cidr):
         return False
     requested = ipaddress.ip_network(cidr.strip(), strict=False)
     saved = normalize_scope(scope)
     if not any(requested.subnet_of(ipaddress.ip_network(item)) for item in saved['cidrs']):
         return False
-    if not saved['domains']:
-        return True
-    return requested.prefixlen == 32 and any(
-        row.get('kind') == 'host' and row.get('ip') == str(requested.network_address) and host_allowed(row, saved)
-        for row in findings
-    )
+    return True

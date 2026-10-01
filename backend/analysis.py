@@ -4,7 +4,7 @@ import json
 from .findings import now
 from .llm import LlmError
 from .workflow import workflow
-from .scope import host_allowed, normalize_scope
+from .scope import approved_host, normalize_scope
 
 
 MAX_FINDINGS, MAX_EVIDENCE, MAX_CONTEXT = 60, 12, 10000
@@ -35,6 +35,9 @@ Use at most two steps and one investigation per hypothesis. Cite at most two fin
 two evidence IDs per item. Keep each text field under 100 characters. Do not repeat a fact in
 multiple fields. Omit a path if the supplied evidence does not suggest a concrete connection.
 Prefer one well-supported path to several speculative paths. Empty arrays are valid.
+For a selected group, cover evidence from more than one host when relevant. Separate
+what is established, what evidence is missing, and which safe next check would
+distinguish competing explanations. Never include credential values in your reply.
 """
 
 
@@ -42,16 +45,24 @@ def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
 
-def scoped_document(doc, host_id=None, authorized_cidr=None):
+def scoped_document(doc, host_id=None, authorized_cidr=None, host_ids=None):
     if host_id is not None and (not isinstance(host_id, str) or not any(f['kind'] == 'host' and f['id'] == host_id for f in doc['findings'])):
         raise ValueError('Choose an existing hostId.')
+    if host_ids is not None and (host_id is not None or not isinstance(host_ids, list) or
+                                 not 1 <= len(host_ids) <= 8 or len(host_ids) != len(set(host_ids)) or
+                                 any(not isinstance(item, str) for item in host_ids)):
+        raise ValueError('Choose one to eight distinct hostIds, or one hostId.')
     scope = normalize_scope(authorized_cidr)
     ids = {f['id'] for f in doc['findings'] if f['kind'] == 'host' and not f.get('local') and
-           (not scope['cidrs'] or host_allowed(f, scope))}
+           (not scope['cidrs'] or approved_host(f, scope))}
     if host_id and host_id not in ids:
         raise ValueError('Selected host is outside the authorized scope.')
+    if host_ids is not None and not set(host_ids) <= ids:
+        raise ValueError('A selected host is outside the authorized or approved scope.')
     if host_id:
         ids = {host_id}
+    elif host_ids is not None:
+        ids = set(host_ids)
     findings = [f for f in doc['findings'] if f['id'] in ids or f.get('hostId') in ids]
     ids = {e for f in findings for e in f['evidenceIds']}
     return dict(schemaVersion=doc['schemaVersion'], findings=findings, evidence=[e for e in doc['evidence'] if e['id'] in ids])
@@ -86,7 +97,19 @@ def build_context(doc, authorized_cidr=None):
     ranked = sorted((e for e in doc['evidence'] if e['id'] in scores),
                     key=lambda e: (evidence_priority(e), scores[e['id']], e.get('observedAt', '')), reverse=True)
     chosen, signatures = [], set()
+    host_for = {f['id']: (f['id'] if f['kind'] == 'host' else f.get('hostId')) for f in doc['findings']}
+    evidence_hosts = {}
+    for finding in doc['findings']:
+        for evidence_id in finding['evidenceIds']:
+            evidence_hosts.setdefault(evidence_id, set()).add(host_for.get(finding['id']))
+    selected_hosts = set()
+    balanced = []
     for ev in ranked:
+        host = next(iter(sorted(h for h in evidence_hosts.get(ev['id'], set()) - selected_hosts if h)), None)
+        if host:
+            balanced.append(ev)
+            selected_hosts.add(host)
+    for ev in balanced + ranked:
         signature = (ev['tool'], ev.get('command', ''), hashlib.sha256(ev['output'].encode()).hexdigest())
         if signature in signatures:
             continue
@@ -283,13 +306,13 @@ def built_in(doc):
 
 def analyze(doc, scope, llm, model=''):
     authorized = scope.get('authorizedScope', scope.get('authorizedCidr'))
-    selected = scoped_document(doc, scope.get('hostId'), authorized)
+    selected = scoped_document(doc, scope.get('hostId'), authorized, scope.get('hostIds'))
     context = build_context(selected, authorized)
     hosts = [f for f in selected['findings'] if f['kind'] == 'host']
     services = [f for f in selected['findings'] if f['kind'] == 'service']
     observations = [f for f in selected['findings'] if f['kind'] == 'observation']
     result = dict(schemaVersion=1, generatedAt=now(), snapshotId=fingerprint(selected),
-                  scope=dict(hostId=scope.get('hostId'), authorizedScope=normalize_scope(authorized), hostIds=[h['id'] for h in hosts], ips=[h['ip'] for h in hosts]),
+                  scope=dict(hostId=scope.get('hostId'), selectedHostIds=scope.get('hostIds'), authorizedScope=normalize_scope(authorized), hostIds=[h['id'] for h in hosts], ips=[h['ip'] for h in hosts]),
                   counts=dict(hosts=len(hosts), services=len(services), observations=len(observations), evidence=len(selected['evidence'])),
                   summary=f'Recorded {len(hosts)} hosts, {len(services)} services, and {len(observations)} observations.',
                   context=dict(findingIds=[f['id'] for f in context['findings']], evidenceIds=[e['id'] for e in context['evidence']], truncated=context['truncated']),

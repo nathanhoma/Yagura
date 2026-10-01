@@ -19,14 +19,10 @@ class AddedChecksTests(unittest.TestCase):
         self.assertEqual(workflow(self.doc)['candidates'], [])
         candidates = workflow(self.doc, '192.168.56.10/32')['candidates']
         kinds = {c['catalogId'] for c in candidates}
-        self.assertTrue({'dns-ptr', 'web-inventory', 'ssh-hostkey', 'smb-security', 'nfs-exports', 'nuclei-git'} <= kinds)
+        self.assertTrue({'web-inventory', 'ssh-hostkey', 'smb-security', 'nfs-exports'} <= kinds)
+        self.assertFalse({'dns-ptr', 'nuclei-git'} & kinds)
         ssh = next(c for c in candidates if c['catalogId'] == 'ssh-hostkey')
         self.assertEqual(invocation(ssh, self.doc), ('nmap', ['-n', '-Pn', '-sT', '-p', '22', '--script', 'ssh-hostkey', '-oX', '-', '192.168.56.10'], 'nmap'))
-        nuclei = next(c for c in candidates if c['catalogId'] == 'nuclei-git')
-        program, args, tool = invocation(nuclei, self.doc)
-        self.assertEqual((program, tool), ('nuclei', 'nuclei-git'))
-        self.assertEqual(args[:2], ['-u', 'http://192.168.56.10:80/'])
-        self.assertIn('-dr', args)
 
     def test_existing_check_results_become_evidence(self):
         candidates = workflow(self.doc, '192.168.56.10/32')['candidates']
@@ -46,7 +42,8 @@ class AddedChecksTests(unittest.TestCase):
             self.assertTrue(any(f['title'] == title for f in parsed['findings']))
 
     def test_curated_nuclei_output_is_linked_and_scoped(self):
-        candidate = next(c for c in workflow(self.doc, '192.168.56.10/32')['candidates'] if c['catalogId'] == 'nuclei-git')
+        inventory = next(c for c in workflow(self.doc, '192.168.56.10/32')['candidates'] if c['catalogId'] == 'web-inventory')
+        candidate = {**inventory, 'catalogId': 'nuclei-git', 'command': 'nuclei -u http://192.168.56.10:80/'}
         row = {'template-id': 'yagura-git-head-exposure', 'matched-at': 'http://192.168.56.10:80/.git/HEAD'}
         parsed = parse_check_result(candidate, 'nuclei-git', json.dumps(row))
         self.assertIn('matched', parsed['findings'][0]['detail'])
