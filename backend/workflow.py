@@ -2,6 +2,7 @@ import ipaddress
 import re
 
 from .web_contacts import website_url
+from .investigation_catalog import REFERENCE_CHECKS
 
 
 def is_local_ip(value):
@@ -33,6 +34,11 @@ COMMAND_CATALOG = [
     dict(id='nfs-exports', title='List NFS exports', command='nmap -n -Pn -sT -p {port} --script nfs-showmount -oX - {host}', when='List exports on a recorded open NFS service.'),
     dict(id='nuclei-git', title='Check exposed Git metadata', command='nuclei -u {scheme}://{host}:{port}/ -t backend/templates/git-head-exposure.yaml -j -silent -rl 1 -c 1 -dr -ni', when='Run one bundled read-only Nuclei template on a recorded web service.'),
 ]
+
+COMMAND_CATALOG.append(dict(id='web-exposure', title='Inspect web metadata exposure',
+    command='python3 -m backend.web_exposure --url {url} --ip {host}',
+    when='Read six fixed paths for Git metadata, application configuration, library listings and docs; compare a not-found response.', executable=True))
+COMMAND_CATALOG.extend(REFERENCE_CHECKS)
 
 
 def workflow(doc, authorized_cidr=None):
@@ -82,6 +88,8 @@ def workflow(doc, authorized_cidr=None):
                 port, name = s['port'], s.get('name', '')
                 if re.search('http|www', name, re.I) or port in (80, 443, 8000, 8080, 8443):
                     scheme = 'https' if s.get('tunnel') == 'ssl' or re.search('https', name, re.I) or port in (443, 8443) else 'http'
+                    if not any(o.get('title') == 'Web metadata probes' and o.get('serviceId') == s['id'] for o in observations):
+                        add('web-exposure', host, [s], 'Inspect fixed metadata paths and a not-found baseline on a recorded web service.', url=website_url(host, s))
                     add('web-contacts', host, [s], 'A recorded web service can be reviewed for published contact information.', url=website_url(host, s))
                     add('http-headers', host, [s], f"Recorded open {port}/tcp ({name or 'web-associated port'}) supports a web header check.", port=port, scheme=scheme)
                     if not any(o.get('title') == 'Web inventory' and o.get('serviceId') == s['id'] for o in observations):

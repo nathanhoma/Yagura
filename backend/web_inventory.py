@@ -5,7 +5,7 @@ import ipaddress
 import json
 from pathlib import Path
 import sys
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, parse_qsl
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -18,15 +18,25 @@ class PageLinks(HTMLParser):
         self.title = ''
         self.in_title = False
         self.links = []
+        self.forms = []
+        self.current_form = None
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        if tag == 'form' and len(self.forms) < 20:
+            self.current_form = dict(action=attrs.get('action', '')[:512], method=attrs.get('method', 'get')[:20],
+                                     enctype=attrs.get('enctype', '')[:100], fields=[])
+            self.forms.append(self.current_form)
+        if tag in ('input', 'textarea', 'select') and self.current_form is not None and len(self.current_form['fields']) < 50:
+            self.current_form['fields'].append(dict(name=attrs.get('name', '')[:160], type=attrs.get('type', tag)[:40]))
         if tag == 'title':
             self.in_title = True
         if tag == 'a' and attrs.get('href'):
             self.links.append(attrs['href'])
 
     def handle_endtag(self, tag):
+        if tag == 'form':
+            self.current_form = None
         if tag == 'title':
             self.in_title = False
 
@@ -43,7 +53,8 @@ def inventory(url, ip, fetch=fetch_page):
     origin(url)
     site = urlsplit(url)
     pending, seen, pages, routes, errors = [url], set(), [], set(), []
-    while pending and len(pages) < 5:
+    forms, parameters = [], []
+    while pending and len(seen) < 12 and len(pages) < 5:
         current = pending.pop(0)
         if current in seen:
             continue
@@ -63,10 +74,15 @@ def inventory(url, ip, fetch=fetch_page):
                 parser.feed(body)
             pages.append(dict(url=current, status=status, title=parser.title.strip()[:160],
                               server=headers.get('server', '')[:160], contentType=headers.get('content-type', '')[:160]))
+            for form in parser.forms:
+                if len(forms) < 20:
+                    forms.append({**form, 'page': current, 'action': urljoin(current, form['action'])})
             for href in parser.links:
                 dest = urlsplit(urljoin(current, href))
                 if (dest.scheme, dest.netloc) != (site.scheme, site.netloc):
                     continue
+                if dest.query and len(parameters) < 50:
+                    parameters.append(dict(url=dest._replace(fragment='').geturl()[:512], names=list(dict.fromkeys(name[:160] for name, _ in parse_qsl(dest.query, max_num_fields=100)))))
                 route = dest._replace(query='', fragment='').geturl()
                 if len(route) > 512:
                     continue
@@ -75,7 +91,7 @@ def inventory(url, ip, fetch=fetch_page):
                     pending.append(route)
         except Exception as exc:
             errors.append(f'{current}: {str(exc)[:160]}')
-    return dict(url=url, ip=ip, pages=pages, routes=sorted(routes)[:50], errors=errors,
+    return dict(url=url, ip=ip, pages=pages, routes=sorted(routes)[:50], forms=forms, parameters=parameters, errors=errors,
                 coverage='Up to five same-origin pages; linked routes are discovered, not all fetched.')
 
 

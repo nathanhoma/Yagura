@@ -2,7 +2,7 @@ import json
 import unittest
 
 from backend import findings as F
-from backend.server import invocation, parse_check_result
+from backend.server import edited_invocation, invocation, parse_check_result
 from backend.web_inventory import inventory
 from backend.workflow import workflow
 
@@ -62,6 +62,27 @@ class AddedChecksTests(unittest.TestCase):
         self.assertEqual(seen, ['http://www.lab.test:80/', 'http://www.lab.test:80/login'])
         self.assertEqual(len(report['pages']), 2)
         self.assertTrue(all('other.test' not in route for route in report['routes']))
+
+    def test_edited_invocation_keeps_program_target_and_required_options(self):
+        candidates = workflow(self.doc, '192.168.56.10/32')['candidates']
+        by_kind = {c['catalogId']: c for c in candidates}
+        ports = by_kind['nmap-ports'] if 'nmap-ports' in by_kind else None
+        service = by_kind['nmap-service']
+        edited = 'nmap -n -Pn -sT -sV --version-all -p 80,22 192.168.56.10'
+        self.assertEqual(edited_invocation(service, self.doc, edited)[1],
+                         ['-n', '-Pn', '-sT', '-sV', '--version-all', '-p', '80,22', '192.168.56.10'])
+        headers = by_kind['http-headers']
+        original = headers['command']
+        changed = original.replace('--max-time 5', '--max-time 8').replace(':80/', ':80/docs')
+        self.assertEqual(edited_invocation(headers, self.doc, changed)[1][-1], 'http://192.168.56.10:80/docs')
+        for command in (changed.replace('192.168.56.10', '192.168.56.11'),
+                        changed.replace('curl -I', 'curl -k -I'),
+                        changed.replace('--max-time 8', '--max-time 100'),
+                        changed + ' ; id'):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                edited_invocation(headers, self.doc, command)
+        if ports:
+            self.assertEqual(edited_invocation(ports, self.doc, ports['command'].replace('100', '200'))[1][-2], '200')
 
 
 if __name__ == '__main__':

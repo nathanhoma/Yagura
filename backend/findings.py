@@ -76,7 +76,7 @@ def parse_import(data):
     if not isinstance(data, dict):
         raise ValueError('Invalid import request.')
     tool, output = data.get('tool'), data.get('output')
-    if tool not in ('nmap', 'ip addr', 'ip neigh', 'ping', 'httpx', 'nuclei'):
+    if tool not in ('nmap', 'ip addr', 'ip neigh', 'ping', 'httpx', 'nuclei', 'evidence'):
         raise ValueError('Choose a supported parser.')
     if not isinstance(output, str) or not output.strip():
         raise ValueError('Command output is required.')
@@ -109,6 +109,18 @@ def parse_import(data):
         s = record('service', {**dict(hostId=h['id'], name='', product='', version='', tunnel='', state='unknown', title=f"{port}/{fields['protocol']}", detail=''), **fields}, ev['id'], time)
         findings.append(s)
         return s
+
+    if tool == 'evidence':
+        ip = data.get('ip') or ''
+        title = data.get('title') or 'Imported investigation evidence'
+        if not isinstance(ip, str) or (ip and not is_ip(ip)):
+            raise ValueError('Supply a numeric host IP or leave it empty.')
+        if not isinstance(title, str) or not title.strip() or len(title) > 160:
+            raise ValueError('Supply an evidence title up to 160 characters.')
+        h = host(ip) if ip else None
+        observe(h, title.strip(), output[:4000])
+        warnings.append('Unstructured evidence: content is retained without asserting vulnerabilities or access.')
+        return dict(schemaVersion=SCHEMA_VERSION, findings=findings, evidence=[ev], warnings=warnings)
 
     if tool in ('httpx', 'nuclei'):
         from urllib.parse import urlsplit

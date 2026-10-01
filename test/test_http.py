@@ -33,7 +33,8 @@ class HttpTests(unittest.TestCase):
             with urllib.request.urlopen(request) as response:
                 return response.status, json.load(response)
         except urllib.error.HTTPError as exc:
-            return exc.code, json.load(exc)
+            with exc:
+                return exc.code, json.load(exc)
 
     def test_import_review_analysis_and_export(self):
         output = (Path(__file__).parent / 'fixtures/nmap.xml').read_text()
@@ -90,6 +91,25 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.calls, [('nmap', ['-n', '-Pn', '-sT', '--top-ports', '100', '10.0.4.80'])])
         self.assertEqual(result['command'], candidate['command'])
         self.assertEqual(self.call('/api/analysis', 'POST', {'findings': []})[0], 400)
+
+    def test_edit_and_run_uses_validated_arguments_and_records_edited_command(self):
+        self.call('/api/import', 'POST', {'tool': 'nmap', 'output':
+            'Nmap scan report for 192.168.56.10\nHost is up.\n80/tcp open http\nNmap done: 1 IP address (1 host up) scanned'})
+        self.call('/api/scope', 'PUT', {'cidr': '192.168.56.10/32'})
+        candidate = next(c for c in self.call('/api/workflow')[1]['candidates'] if c['catalogId'] == 'http-headers')
+        edited = candidate['command'].replace('--max-time 5', '--max-time 8').replace(':80/', ':80/docs')
+        body = {'candidateId': candidate['id'], 'authorized': True, 'editedCommand': edited}
+        self.assertEqual(self.call('/api/checks/run', 'POST', body)[0], 200)
+        self.assertEqual(self.calls[-1], ('curl', ['-I', '--max-time', '8', 'http://192.168.56.10:80/docs']))
+        self.assertEqual(self.call('/api/checks/run', 'POST', {**body, 'editedCommand': edited.replace('192.168.56.10', '192.168.56.11')})[0], 400)
+        self.assertEqual(self.call('/api/checks/run', 'POST', {**body, 'authorized': False})[0], 400)
+        self.assertEqual(len(self.calls), 1)
+        self.workspace.runner = lambda program, args, timeout: {'ok': True, 'stdout': 'HTTP/1.1 200 OK\nServer: test\n', 'stderr': ''}
+        status, result = self.call('/api/checks/run', 'POST', body)
+        self.assertEqual(status, 200)
+        self.assertTrue(result['imported'])
+        self.assertEqual(result['command'], edited)
+        self.assertIn(edited, [e['command'] for e in self.call('/api/findings')[1]['evidence']])
 
     def test_recon_scope_is_shared_and_persisted(self):
         self.call('/api/findings', 'POST', {'ip': '10.0.4.80', 'title': 'Target', 'detail': 'Lab target'})

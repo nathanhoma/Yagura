@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -88,6 +89,8 @@ def invocation(candidate, doc):
         return 'smbclient', ['-L', f'//{ip}', '-N'], 'smb-shares'
     if kind == 'dns-ptr':
         return 'getent', ['hosts', ip], 'dns-ptr'
+    if kind == 'web-exposure':
+        return sys.executable, [str(ROOT / 'backend/web_exposure.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-exposure'
     if kind == 'web-inventory':
         return sys.executable, [str(ROOT / 'backend/web_inventory.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-inventory'
     if kind in ('ssh-hostkey', 'smb-security', 'nfs-exports'):
@@ -101,12 +104,48 @@ def invocation(candidate, doc):
     raise ValueError('This check cannot be executed from a suggestion.')
 
 
+def edited_invocation(candidate, doc, command):
+    """Allow bounded changes to a current check without accepting a new target or program."""
+    if not isinstance(command, str) or not command.strip() or len(command) > 2000 or '\n' in command or '\r' in command:
+        raise ValueError('Supply one edited command of at most 2,000 characters.')
+    program, original_args, tool = invocation(candidate, doc)
+    try:
+        entered = shlex.split(command)
+        original = shlex.split(candidate['command'])
+    except ValueError as exc:
+        raise ValueError('The edited command has invalid quoting.') from exc
+    if entered == original:
+        return program, original_args, tool, candidate['command']
+    kind = candidate['catalogId']
+    ip = next(f['ip'] for f in doc['findings'] if f['id'] == candidate['hostId'])
+    if kind == 'ping' and len(entered) == 4 and entered[:2] == ['ping', '-c'] and entered[-1] == ip:
+        if entered[2].isdigit() and 1 <= int(entered[2]) <= 5:
+            return program, ['-c', entered[2], ip], tool, shlex.join(entered)
+    if kind == 'nmap-ports' and len(entered) == 7 and entered[:5] == ['nmap', '-n', '-Pn', '-sT', '--top-ports'] and entered[-1] == ip:
+        if entered[5].isdigit() and 1 <= int(entered[5]) <= 1000:
+            return program, entered[1:], tool, shlex.join(entered)
+    if kind == 'nmap-service' and len(entered) == 9 and entered[:5] == ['nmap', '-n', '-Pn', '-sT', '-sV'] and entered[6] == '-p' and entered[-1] == ip:
+        allowed = {str(f['port']) for f in doc['findings'] if f['id'] in candidate['serviceIds']}
+        ports = entered[7].split(',')
+        if entered[5] in ('--version-light', '--version-all') and ports and len(ports) == len(set(ports)) and set(ports) <= allowed:
+            return program, entered[1:], tool, shlex.join(entered)
+    if kind == 'http-headers' and len(entered) == 5 and entered[:3] == ['curl', '-I', '--max-time']:
+        expected = urlsplit(original[-1])
+        edited = urlsplit(entered[4])
+        if (entered[3].isdigit() and 1 <= int(entered[3]) <= 20 and
+                (edited.scheme, edited.netloc) == (expected.scheme, expected.netloc) and
+                not edited.username and not edited.password and not edited.fragment and
+                edited.path.startswith('/') and not any(ord(ch) < 32 for ch in entered[4])):
+            return program, entered[1:], tool, shlex.join(entered)
+    raise ValueError('This edit is outside the supported parameters. Keep the program, target and fixed safety options; editable values are ping count (1–5), Nmap top ports (1–1000) or recorded service ports/version level, and HTTP header timeout (1–20 seconds) or same-origin path.')
+
+
 def parse_check_result(candidate, tool, output):
     if tool in ('nmap', 'ping'):
         return F.parse_import(dict(tool=tool, output=output, command=candidate['command'], observedAt=F.now()))
     time = F.now()
     ev = dict(id=F.uid('evidence'), tool=tool, command=candidate['command'], output=output,
-              observedAt=time, importedAt=time, format='json' if tool in ('web-contacts', 'web-inventory') else 'jsonl' if tool == 'nuclei-git' else 'text')
+              observedAt=time, importedAt=time, format='json' if tool in ('web-contacts', 'web-inventory', 'web-exposure') else 'jsonl' if tool == 'nuclei-git' else 'text')
     host_id = candidate['hostId']
     service_id = candidate['serviceIds'][0] if candidate['serviceIds'] else None
     observations = []
@@ -123,6 +162,16 @@ def parse_check_result(candidate, tool, output):
         if report.get('errors'):
             detail += '\nSome pages could not be inspected; see source evidence.'
         add('Published website contacts', detail)
+    elif tool == 'web-exposure':
+        report = json.loads(output)
+        if not isinstance(report, dict) or not isinstance(report.get('pages'), list):
+            raise ValueError('Invalid metadata probe report.')
+        add('Web metadata probes', report.get('coverage', ''))
+        for page in report['pages'][:6]:
+            add('Web metadata response: ' + urlsplit(page.get('url', '')).path,
+                f"{page.get('url', '')} · HTTP {page.get('status', '?')}\n{page.get('excerpt', '')}")
+        if report.get('errors'):
+            add('Web metadata probe errors', json.dumps(report['errors']))
     elif tool == 'web-inventory':
         report = json.loads(output)
         if not isinstance(report, dict) or not isinstance(report.get('pages'), list) or not isinstance(report.get('routes'), list):
@@ -131,6 +180,10 @@ def parse_check_result(candidate, tool, output):
             raise ValueError('No web pages were inspected.')
         detail = '\n'.join(f"{p.get('url', '')} · HTTP {p.get('status', '?')} · {p.get('title', '')} · {p.get('server', '')}" for p in report['pages'][:5])
         add('Web inventory', detail)
+        for form in report.get('forms', [])[:20]:
+            add('Web form metadata', json.dumps(form))
+        if report.get('parameters'):
+            add('Web query parameters', json.dumps(report['parameters']))
         if report['routes']:
             add('Web routes', '\n'.join(str(route) for route in report['routes'][:50]))
         if report.get('errors'):
@@ -255,7 +308,7 @@ class Workspace:
 
     def stale(self, result):
         try:
-            return (fingerprint(scoped_document(self.load(), result['scope'].get('hostId'))) != result['snapshotId'] or
+            return (fingerprint(scoped_document(self.load(), result['scope'].get('hostId'), result['scope'].get('authorizedCidr'))) != result['snapshotId'] or
                     self.scope_file.exists() and result['scope'].get('authorizedCidr') != self.load_scope())
         except (ValueError, KeyError):
             return True
@@ -398,7 +451,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     with workspace.lock:
                         scope['authorizedCidr'] = workspace.resolve_scope(body.get('authorizedCidr'))
                         doc = workspace.load()
-                        selected = scoped_document(doc, scope.get('hostId'))
+                        selected = scoped_document(doc, scope.get('hostId'), scope.get('authorizedCidr'))
                         key = fingerprint(selected) + ':' + body.get('model', '') + ':' + str(scope['authorizedCidr'])
                         if key in workspace.active_analyses:
                             event = workspace.active_analyses[key]
@@ -538,7 +591,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(200, doc)
                 if self.command == 'POST' and path == '/api/checks/run':
                     body = self.body(4000)
-                    if not isinstance(body, dict) or set(body) - {'candidateId', 'authorized', 'authorizedCidr'} or body.get('authorized') is not True or not isinstance(body.get('candidateId'), str):
+                    if not isinstance(body, dict) or set(body) - {'candidateId', 'authorized', 'authorizedCidr', 'editedCommand'} or body.get('authorized') is not True or not isinstance(body.get('candidateId'), str) or ('editedCommand' in body and not isinstance(body['editedCommand'], str)):
                         raise ValueError('Choose a current suggested check and confirm authorization.')
                     with workspace.lock:
                         cidr = workspace.resolve_scope(body.get('authorizedCidr'))
@@ -550,7 +603,11 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             raise ValueError('Suggestion is no longer available. Refresh the findings.')
                         if candidate['id'] in workspace.active_checks:
                             return self.send_json(409, {'error': 'This check is already running.'})
-                        program, args, tool = invocation(candidate, doc)
+                        if 'editedCommand' in body:
+                            program, args, tool, command = edited_invocation(candidate, doc, body['editedCommand'])
+                        else:
+                            program, args, tool = invocation(candidate, doc)
+                            command = candidate['command']
                         workspace.active_checks.add(candidate['id'])
                     try:
                         result = workspace.runner(program, args, 45)
@@ -558,7 +615,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         imported, warning = False, ''
                         if tool and (output.strip() or tool == 'nuclei-git' and result['ok']):
                             try:
-                                parsed = parse_check_result(candidate, tool, output)
+                                parsed = parse_check_result({**candidate, 'command': command}, tool, output)
                                 with workspace.lock:
                                     latest = workspace.load()
                                     if not all(any(f['id'] == required for f in latest['findings']) for required in candidate['findingIds']):
@@ -568,7 +625,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                                 imported = True
                             except ValueError as exc:
                                 warning = f'Output was not imported: {exc}'
-                        return self.send_json(200, dict(candidateId=candidate['id'], command=candidate['command'], ok=result['ok'], output=output, stderr=stderr, imported=imported, warning=warning))
+                        return self.send_json(200, dict(candidateId=candidate['id'], command=command, ok=result['ok'], output=output, stderr=stderr, imported=imported, warning=warning))
                     finally:
                         with workspace.lock:
                             workspace.active_checks.discard(candidate['id'])

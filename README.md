@@ -39,6 +39,8 @@ The workspace is split into Scope → Actions → Findings → Analysis. Actions
 
 The web inventory check pins each connection to the recorded IP while preserving the configured hostname for virtual hosting. It reads up to five same-origin pages and records response status, title, server header, and up to 50 linked routes. It does not submit forms or execute JavaScript. Reverse DNS reports the local resolver's answer, which should be reviewed before treating it as a host identity.
 
+In **Next checks**, **Edit & run** opens the suggested command for review. The server accepts bounded changes to ping count (1–5), Nmap top-port count (1–1,000), recorded service ports or version level, and HTTP header timeout (1–20 seconds) or same-origin path. Other commands can be rerun unchanged. The program, target, and required options cannot be changed in this editor. The edited command is checked against the current candidate and saved scope, executed without a shell, and recorded as the evidence source command. The same authorization checkbox is required for Run and Edit & run.
+
 The optional Nuclei check runs only the bundled `backend/templates/git-head-exposure.yaml` template against a recorded IP and web port, with one request per second, one template worker, and redirects disabled. Install Nuclei separately to run it. A match is a finding to review, not proof of access. Other Nuclei templates can be imported as JSONL but are not executable from Yagura.
 
 Optional local LLM configuration uses an OpenAI-compatible endpoint:
@@ -96,6 +98,50 @@ Use **Findings analysis** in the UI to analyze all recorded findings or one host
 
 Responses contain `status`, `source`, `model`, `scope`, `counts`, `summary`, `assessments`, `suggestions`, `snapshotId`, `generatedAt`, `stale`, and `warnings`. Assessments have `findingIds`, `evidenceIds`, `interpretation`, and `uncertainties`. References must point to evidence supplied to the model and linked to each cited finding. Suggestions resolve only to server-generated eligible commands. Citation validation checks references, not the factual correctness of model prose.
 
-Analysis uses a bounded context (up to 100 findings, 40 evidence excerpts, and about 24,000 characters) without modifying raw evidence. Output errors, connection failures, timeout, and authentication errors return `status: "fallback"`, `source: "built-in"`, and an explicit error code. Concurrent requests for the same snapshot share the in-flight model request. `LLM_TIMEOUT_MS` defaults to 30,000 and is capped at 60,000.
+Analysis uses a bounded context (up to 60 findings, 12 deduplicated evidence excerpts, and 10,000 characters) without modifying raw evidence. An all-host analysis includes only nonlocal hosts in the saved IPv4 scope. Evidence selection favors distinct service, web-response, and counterevidence records. Unsupported model items are rejected individually when other grounded items remain. Output errors, connection failures, timeout, and authentication errors return `status: "fallback"`, `source: "built-in"`, and an explicit error code. Concurrent requests for the same snapshot share the in-flight model request. `LLM_TIMEOUT_MS` defaults to 30,000 and is capped at 60,000.
 
 For a live local model check, use **Test model connection** in the Analysis view.
+
+## Evidence-driven path hypotheses
+
+Findings analysis now asks the local model to infer possible paths from collected evidence,
+including relationships across hosts when **All stored findings** is selected. No exercise-specific
+paths are embedded in the analysis rules. Each hypothesis contains ordered, cited steps,
+prerequisites, missing evidence, counterevidence, and proposed investigations with expected
+results and their impact on the hypothesis. Step status is the model's assessment, not a
+server-verified exploitation result. The server validates the shape and supplied references.
+Hypotheses are saved with the existing analysis snapshot and become stale when findings change.
+Reanalyze after importing new evidence; this version recomputes hypotheses rather than maintaining
+a longitudinal hypothesis history. A model outage shows recorded facts and existing checks,
+without synthesizing attack paths.
+
+Use **General investigation evidence** in Import command output for transcripts, configuration
+excerpts, authentication results, or other text without a dedicated parser. Supply an evidence
+title, optional numeric host IP, source command and observation time. The original output is
+retained up to the existing 800 KB limit; no source command is executed. General imports do not
+assert access or vulnerabilities. Review sensitive content before importing: raw evidence is
+stored and exported as supplied and excerpts may be sent to the configured local model.
+
+Proposed investigations can describe checks beyond the executable catalog. They are displayed
+for manual review and have no Run button. Executable suggestions still resolve to server-generated
+candidates and use the existing scope and execution checks. Analysis context remains bounded;
+truncation is reported, and long evidence excerpts include the beginning and end. Detailed evidence
+selection, automatic collection for new investigation types, and hypothesis history remain future work.
+
+## Investigation catalog additions
+
+The reference catalog now includes bounded route discovery, exposed configuration and Git-source
+review, backup comparison, single known-credential SSH verification, process and KeePass inspection,
+Windows identity, JEA connection and command discovery, routine metadata and existing output,
+PFX metadata, signature status, MySQL grants/file policy, web process ownership, document response
+comparison, and read-only SQLite inspection. These are reference templates requiring manual
+execution and General investigation evidence import. They do not encode an expected attack path.
+
+A new executable **Inspect web metadata exposure** check uses the existing IP-pinned transport and
+verified TLS to issue six fixed GET requests (Git HEAD, WEB-INF configuration, library listing,
+docs, and a missing-page baseline). Responses and errors become evidence, without an automatic
+vulnerability verdict. Web inventory also records form actions, methods, encoding and field names,
+and query parameter names without submitting forms or retaining field values. Existing scope and
+per-check authorization apply. No new third-party dependencies are installed by the application.
+Credential guessing, memory dumping/recovery, password cracking, payload execution and signed-job
+submission have not been added as executable checks in this increment.
