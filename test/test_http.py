@@ -117,6 +117,37 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(result['command'], edited)
         self.assertIn(edited, [e['command'] for e in self.call('/api/findings')[1]['evidence']])
 
+    def test_ping_no_response_is_distinct_from_check_failure(self):
+        self.call('/api/findings', 'POST', {'ip': '10.0.4.80', 'title': 'Target', 'detail': 'Authorized lab target'})
+        self.call('/api/scope', 'PUT', {'cidr': '10.0.4.80/32'})
+        candidate = next(c for c in self.call('/api/workflow')[1]['candidates'] if c['catalogId'] == 'ping')
+        body = {'candidateId': candidate['id'], 'authorized': True, 'authorizedCidr': '10.0.4.80/32'}
+
+        no_reply = ('PING 10.0.4.80 (10.0.4.80) 56(84) bytes of data.\n'
+                    '3 packets transmitted, 0 received, 100% packet loss')
+        self.workspace.runner = lambda program, args, timeout: {'ok': False, 'stdout': no_reply, 'stderr': ''}
+        status, result = self.call('/api/checks/run', 'POST', body)
+        self.assertEqual(status, 200)
+        self.assertFalse(result['ok'])
+        self.assertTrue(result['imported'])
+        self.assertEqual(result['outcome'], 'no-response')
+        hosts = [f for f in self.call('/api/findings')[1]['findings'] if f['kind'] == 'host']
+        self.assertEqual(hosts[0]['state'], 'no-response')
+
+        self.workspace.runner = lambda program, args, timeout: {'ok': False, 'stdout': '', 'stderr': 'ping unavailable'}
+        status, result = self.call('/api/checks/run', 'POST', body)
+        self.assertEqual(status, 200)
+        self.assertFalse(result['imported'])
+        self.assertEqual(result['outcome'], 'failed')
+
+        reply = ('PING 10.0.4.80 (10.0.4.80) 56(84) bytes of data.\n'
+                 '1 packets transmitted, 1 received, 0% packet loss')
+        self.workspace.runner = lambda program, args, timeout: {'ok': True, 'stdout': reply, 'stderr': ''}
+        status, result = self.call('/api/checks/run', 'POST', body)
+        self.assertEqual(status, 200)
+        self.assertTrue(result['imported'])
+        self.assertEqual(result['outcome'], 'completed')
+
     def test_recon_scope_is_shared_and_persisted(self):
         self.call('/api/findings', 'POST', {'ip': '10.0.4.80', 'title': 'Target', 'detail': 'Lab target'})
         self.assertEqual(self.call('/api/scope')[1], {'cidrs': [], 'domains': []})

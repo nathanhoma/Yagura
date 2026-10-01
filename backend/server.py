@@ -601,10 +601,14 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     try:
                         result = workspace.runner(program, args, 45)
                         output, stderr = str(result.get('stdout') or '')[:100000], str(result.get('stderr') or '')[:3000]
-                        imported, warning = False, ''
+                        imported, warning, no_response = False, '', False
                         if tool and (output.strip() or tool == 'nuclei-git' and result['ok']):
                             try:
                                 parsed = parse_check_result({**candidate, 'command': command}, tool, output)
+                                if tool == 'ping':
+                                    target_ip = next(f['ip'] for f in doc['findings'] if f['id'] == candidate['hostId'])
+                                    no_response = any(f['kind'] == 'host' and f.get('ip') == target_ip and
+                                                      f.get('state') == 'no-response' for f in parsed['findings'])
                                 with workspace.lock:
                                     if workspace.load_scope() != scope:
                                         raise ValueError('Target scope changed while the check ran.')
@@ -616,7 +620,10 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                                 imported = True
                             except ValueError as exc:
                                 warning = f'Output was not imported: {exc}'
-                        return self.send_json(200, dict(candidateId=candidate['id'], command=command, ok=result['ok'], output=output, stderr=stderr, imported=imported, warning=warning))
+                        outcome = ('no-response' if imported and no_response else
+                                   'completed' if result['ok'] and imported and not warning else 'failed')
+                        return self.send_json(200, dict(candidateId=candidate['id'], command=command, ok=result['ok'], outcome=outcome,
+                                                        output=output, stderr=stderr, imported=imported, warning=warning))
                     finally:
                         with workspace.lock:
                             workspace.active_checks.discard(candidate['id'])
