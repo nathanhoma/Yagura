@@ -6,6 +6,7 @@ import unittest
 import urllib.error
 import urllib.request
 
+from backend.llm import LlmService
 from backend.server import Workspace, create_server
 
 
@@ -35,6 +36,10 @@ class HttpTests(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             with exc:
                 return exc.code, json.load(exc)
+
+    def test_health_accepts_explicit_https_gateway(self):
+        self.workspace.llm = LlmService('https://llm-gateway.xs.network/v1', trusted_https_host='llm-gateway.xs.network')
+        self.assertEqual(self.call('/api/health')[1]['llm'], 'configured')
 
     def test_import_review_analysis_and_export(self):
         output = (Path(__file__).parent / 'fixtures/nmap.xml').read_text()
