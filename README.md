@@ -35,7 +35,7 @@ See [the common findings format](docs/findings-format.md) for fields, identity r
 
 ## Workflow and suggestions
 
-The workspace is split into Recon, Findings, Analysis, and Next checks views. The target map shows recon, service identification, and access triage stages. Set the authorized IPv4 CIDR once in Recon; it is saved in `data/scope.json` and used for discovery, analysis suggestions, and Next checks. Leaving it empty produces no target commands. Use a `/32` for one host. Changing the range clears check authorization, and each scan or executable check still requires its own confirmation. Built-in rules then propose checks only for recorded hosts inside that range: ICMP reachability, common TCP ports, version probes, OS fingerprinting for recorded open TCP services, reverse DNS, web headers, bounded web inventory, SMB shares, specific Nmap scripts for observed SSH, SMB, and NFS services, and one curated Nuclei exposure check. TCP port discovery and service version checks explicitly use Nmap TCP connect mode (`-sT`) for networks where SYN scans are filtered. OS detection uses `nmap -n -Pn -O` and may require elevated privileges. Commands have concrete target/port values and links to their supporting findings and evidence. The full command catalog remains available as reference templates. Each concrete suggestion has a Run button. The server checks that the current stored candidate is inside the saved scope and runs fixed arguments without a shell. Parseable check output is saved as linked evidence and observations. `httpx` and Nuclei JSONL can also be imported for review.
+The workspace is split into Scope, Findings, Analysis, Next checks, and Email drafts views. The target map shows recon, service identification, and access triage stages. Confirm and save the authorized target IPv4 CIDR in Scope before using the other views; it is saved in `data/scope.json` and used for discovery, analysis suggestions, and Next checks. Without a saved scope, the other views show guidance to define it first. Saving the scope does not run discovery. This server is outside the target network; its own interfaces and neighbors do not define the target scope. Use a `/32` for one host. Changing the range clears check authorization, and each scan or executable check still requires its own confirmation. Built-in rules then propose checks only for recorded hosts inside that range: ICMP reachability, common TCP ports, version probes, OS fingerprinting for recorded open TCP services, reverse DNS, web headers, bounded web inventory, SMB shares, specific Nmap scripts for observed SSH, SMB, and NFS services, and one curated Nuclei exposure check. TCP port discovery and service version checks explicitly use Nmap TCP connect mode (`-sT`) for networks where SYN scans are filtered. OS detection uses `nmap -n -Pn -O` and may require elevated privileges. Commands have concrete target/port values and links to their supporting findings and evidence. The full command catalog remains available as reference templates. Each concrete suggestion has a Run button. The server checks that the current stored candidate is inside the saved scope and runs fixed arguments without a shell. Parseable check output is saved as linked evidence and observations. `httpx` and Nuclei JSONL can also be imported for review.
 
 The web inventory check pins each connection to the recorded IP while preserving the configured hostname for virtual hosting. It reads up to five same-origin pages and records response status, title, server header, and up to 50 linked routes. It does not submit forms or execute JavaScript. Reverse DNS reports the local resolver's answer, which should be reviewed before treating it as a host identity.
 
@@ -67,9 +67,9 @@ Open **Email drafts** to select a discovered contact or enter a recipient manual
 
 Drafts are stored separately in `data/email-drafts.json` with recipient source references derived from saved contact findings. Conflicting edits from another browser tab are rejected rather than overwriting newer content. Drafts are not part of the findings JSON/CSV export; use `.eml` export for messages. The API provides `GET/POST /api/email-drafts`, `PATCH/DELETE /api/email-drafts/{id}`, `GET /api/email-drafts/{id}/export`, `GET /api/email-contacts`, and `POST /api/email-drafts/generate`.
 
-## Local discovery scope
+## Target scope and server diagnostics
 
-- **Read local network state** runs `ip -j -4 addr` and `ip -j -4 neigh` and saves results as linked findings/evidence.
+- Optional **Yagura server network** diagnostics run `ip -j -4 addr` and `ip -j -4 neigh` and save results as linked findings/evidence for server context without changing the target scope.
 - Nmap discovery runs `nmap -n -sn -oX - <CIDR>` after authorization is checked. Only RFC1918, loopback, or link-local IPv4 CIDRs with up to 1,024 addresses (`/22` through `/32`) are accepted.
 - Passive imports may contain other addresses. Automated suggestion generation requires an explicitly supplied authorized CIDR and is limited to recorded non-interface private/local IPv4 targets inside it. A private address or neighbor entry alone does not establish authorization.
 - Keep the app bound to localhost unless you add access controls. Public asset serving excludes configuration, source modules, and the data directory.
@@ -80,7 +80,7 @@ Drafts are stored separately in `data/email-drafts.json` with recipient source r
 python3 -m unittest discover -s test -p 'test_*.py'
 ```
 
-Python tests cover the parser, record merging, API persistence, scope limits, and analysis fallback. No real scans or model are required. The former Node implementation and its tests remain in the repository for reference; `npm start` and `npm test` now run the Python app and tests.
+Python tests cover the parser, record merging, API persistence, scope limits, and analysis fallback. No real scans or model are required. The Python backend is the only server implementation. `npm start` and `npm test` are optional shortcuts for the Python commands above; Node.js is not required when running Python directly.
 
 ## Findings analysis backend
 
@@ -98,10 +98,4 @@ Responses contain `status`, `source`, `model`, `scope`, `counts`, `summary`, `as
 
 Analysis uses a bounded context (up to 100 findings, 40 evidence excerpts, and about 24,000 characters) without modifying raw evidence. Output errors, connection failures, timeout, and authentication errors return `status: "fallback"`, `source: "built-in"`, and an explicit error code. Concurrent requests for the same snapshot share the in-flight model request. `LLM_TIMEOUT_MS` defaults to 30,000 and is capped at 60,000.
 
-### Live LLM smoke test
-
-```sh
-npm run test:llm
-```
-
-This legacy Node script checks the former backend. The Python backend is covered by the tests above; a live Python model check can be made from the Analysis view. The script runs only a three-request ping against **10.0.4.80** and writes a report to `/tmp/yagura-llm-live-test.json`.
+For a live local model check, use **Test model connection** in the Analysis view.

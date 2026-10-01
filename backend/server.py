@@ -217,9 +217,9 @@ class Workspace:
         selected = self.load_scope()
         supplied = check_scope_cidr(requested) if requested else None
         if self.scope_file.exists() and not selected and supplied:
-            raise ValueError('Set the authorized scope in Recon before proposing checks.')
+            raise ValueError('Set the authorized scope in Scope before proposing checks.')
         if selected and supplied and supplied != selected:
-            raise ValueError('The requested range differs from the Recon scope. Refresh and use the saved scope.')
+            raise ValueError('The requested range differs from the saved target scope. Refresh and use the saved scope.')
         return selected or supplied
 
     def load(self):
