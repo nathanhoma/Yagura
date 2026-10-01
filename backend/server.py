@@ -240,7 +240,7 @@ class Workspace:
         self.scope_file = self.findings_file.with_name('scope.json')
         self.analysis_file = Path(analysis_file or self.findings_file.with_name('analysis.json'))
         self.drafts = DraftStore(self.findings_file.with_name('email-drafts.json'))
-        self.llm = llm or LlmService(os.getenv('LLM_BASE_URL', ''), os.getenv('LLM_MODEL', ''), os.getenv('LLM_API_KEY', ''), os.getenv('LLM_TIMEOUT_MS', '30000'))
+        self.llm = llm or LlmService(os.getenv('LLM_BASE_URL', ''), os.getenv('LLM_MODEL', ''), os.getenv('LLM_API_KEY', ''), os.getenv('LLM_TIMEOUT_MS', '30000'), os.getenv('LLM_TRUSTED_HTTPS_HOST', ''))
         self.runner = runner or run_command
         self.lock = threading.RLock()
         self.active_checks = set()
@@ -419,7 +419,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     result = workspace.runner('nmap', ['--version'], 2.5)
                     base = workspace.llm.base
                     return self.send_json(200, dict(ready=True, nmap=result['ok'], nuclei=bool(shutil.which('nuclei')),
-                                                    llm='configured' if base and private_url(base) else 'blocked: URL must point to localhost or a private IP' if base else 'not configured'))
+                                                    llm='configured' if base and private_url(base, getattr(workspace.llm, 'trusted_https_host', '')) else 'blocked: URL must point to localhost, a private IP, or the trusted HTTPS host' if base else 'not configured'))
                 if self.command == 'GET' and path == '/api/scope':
                     with workspace.lock:
                         cidr = workspace.load_scope()
@@ -645,7 +645,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         return fallback('No targets in the selected authorized range. Enter a range and review recorded hosts.')
                     if not workspace.llm.base:
                         return fallback('Built-in checks grounded in recorded findings. Local model is not configured.')
-                    if not private_url(workspace.llm.base):
+                    if not private_url(workspace.llm.base, getattr(workspace.llm, 'trusted_https_host', '')):
                         return fallback('Local model URL blocked. Built-in checks remain available.')
                     try:
                         ids = {x for c in available for x in c['findingIds']}
