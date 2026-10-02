@@ -76,11 +76,55 @@ function showRecord(id){
   showDialog(recordLabel(f),`<p class="notice">${esc(f.kind)} · ${esc(f.reviewStatus)} · First seen ${esc(date(f.firstSeen))} · Last seen ${esc(date(f.lastSeen))}</p><pre>${esc(f.detail||JSON.stringify(Object.fromEntries(Object.entries(f).filter(([k])=>!['id','evidenceIds','createdAt','updatedAt'].includes(k))),null,2))}</pre><p>${f.hostId?ref(f.hostId,'Linked host'):''} ${f.serviceId?ref(f.serviceId,'Linked service'):''}</p><p>${evidenceLinks(f.evidenceIds)}</p><button class="btn" id="detailEdit">Edit / mark reviewed</button>`);
   $('#detailEdit').onclick=()=>editRecord(f.id);
 }
+const findingTreeOpen=new Set();
+let findingTreeInitialized=false;
+function rememberFindingTree(){
+  $('#findingList').querySelectorAll('details[data-tree-id]').forEach(node=>{
+    if(node.open)findingTreeOpen.add(node.dataset.treeId);
+    else findingTreeOpen.delete(node.dataset.treeId);
+  });
+}
+function findingRecord(f,showLabel=true){
+  const summary=f.kind==='service'?`${f.state||'unknown'} · ${f.product||''} ${f.version||''}`:f.kind==='host'?`${f.state||'unknown'}${f.local?' · local interface':''}`:(f.detail||'').slice(0,180);
+  return `<div class="finding-record"><div class="item-left">${showLabel?`<strong>${ref(f.id,recordLabel(f))}</strong>`:`<strong>${ref(f.id,'View details & evidence')}</strong>`}<small>${esc(summary)}</small><small>${esc(date(f.lastSeen))} · <span class="${f.reviewStatus==='reviewed'?'reviewed':''}">${esc(f.reviewStatus||'unreviewed')}</span> · ${(f.evidenceIds||[]).length} source(s)</small></div><span class="kind">${esc(f.kind)}</span><div class="item-actions"><button class="btn" data-edit="${esc(f.id)}">Edit</button><button class="btn" data-merge="${esc(f.id)}">Merge</button><button class="btn" data-delete="${esc(f.id)}">Delete</button></div></div>`;
+}
 function renderFindings(){
-  $('#findingCount').textContent=`${findings.length} records · ${findings.filter(f=>f.reviewStatus!=='reviewed').length} need review`;
-  const filter=$('#findingFilter').value,rows=findings.filter(f=>filter==='all'||filter==='unreviewed'&&f.reviewStatus!=='reviewed'||f.kind===filter);
-  const box=$('#findingList');
-  box.innerHTML=rows.length?rows.map(f=>`<div class="item"><div class="item-left"><strong>${ref(f.id,recordLabel(f))}</strong><small>${esc(f.kind==='service'?`${f.state} · ${f.product||''} ${f.version||''}`:f.kind==='host'?`${f.state}${f.local?' · local interface':''}`:f.detail.slice(0,180))}</small><small>${esc(date(f.lastSeen))} · <span class="${f.reviewStatus==='reviewed'?'reviewed':''}">${esc(f.reviewStatus)}</span> · ${f.evidenceIds.length} source(s)</small></div><span class="kind">${esc(f.kind)}</span><div class="item-actions"><button class="btn" data-edit="${esc(f.id)}">Edit</button><button class="btn" data-merge="${esc(f.id)}">Merge</button><button class="btn" data-delete="${esc(f.id)}">Delete</button></div></div>`).join(''):'<div class="empty">No matching findings. <button class="ref" data-open-import>Import command output</button>, add an observation above, or change the filter.</div>';
+  rememberFindingTree();
+  const box=$('#findingList'),filter=$('#findingFilter').value,query=$('#findingSearch').value.trim().toLocaleLowerCase();
+  const byId=new Map(findings.map(f=>[f.id,f]));
+  const hosts=findings.filter(f=>f.kind==='host').sort((a,b)=>String(a.ip||a.name||'').localeCompare(String(b.ip||b.name||''),undefined,{numeric:true}));
+  const services=findings.filter(f=>f.kind==='service').sort((a,b)=>Number(a.port||0)-Number(b.port||0)||String(a.protocol||'').localeCompare(String(b.protocol||'')));
+  const observations=findings.filter(f=>f.kind==='observation').sort((a,b)=>String(b.lastSeen||'').localeCompare(String(a.lastSeen||'')));
+  const textMatch=f=>[f.ip,f.name,f.port,f.protocol,f.product,f.version,f.title,f.detail,f.state].some(v=>String(v??'').toLocaleLowerCase().includes(query));
+  const parentOf=f=>{
+    const service=byId.get(f.serviceId),host=byId.get(f.hostId);
+    return f.kind==='observation'?(service?.kind==='service'?service:host?.kind==='host'?host:null):f.kind==='service'&&host?.kind==='host'?host:null;
+  };
+  const matches=f=>{
+    if(filter==='unreviewed'&&f.reviewStatus==='reviewed')return false;
+    if(filter!=='all'&&filter!=='unreviewed'&&f.kind!==filter)return false;
+    if(!query)return true;
+    const seen=new Set();
+    for(let node=f;node&&!seen.has(node.id);node=parentOf(node)){if(textMatch(node))return true;seen.add(node.id);}
+    return false;
+  };
+  const selected=findings.filter(matches),visible=new Set(selected.map(f=>f.id));
+  for(const f of selected){const seen=new Set([f.id]);for(let parent=parentOf(f);parent&&!seen.has(parent.id);parent=parentOf(parent)){visible.add(parent.id);seen.add(parent.id);}}
+  if(!findingTreeInitialized&&findings.length){
+    const first=hosts.find(h=>visible.has(h.id));
+    if(first){findingTreeOpen.add(`host:${first.id}`);const service=services.find(s=>s.hostId===first.id&&visible.has(s.id));if(service)findingTreeOpen.add(`service:${service.id}`);}
+    findingTreeInitialized=true;
+  }
+  const expanded=Boolean(query)||filter==='observation'||filter==='service'||filter==='unreviewed';
+  const branch=(key,title,count,content)=>`<details class="finding-branch" data-tree-id="${esc(key)}" ${expanded||findingTreeOpen.has(key)?'open':''}><summary><span class="finding-name">${esc(title)}</span><span class="finding-summary-count">${esc(count)}</span></summary><div class="finding-children">${content}</div></details>`;
+  const observationRows=parent=>observations.filter(o=>visible.has(o.id)&&(o.serviceId&&byId.get(o.serviceId)?.kind==='service'?o.serviceId===parent.id:parent.kind==='host'&&o.hostId===parent.id));
+  const serviceTree=s=>{const obs=observationRows(s);return branch(`service:${s.id}`,`${s.port}/${s.protocol} · ${s.name||'unknown'}`,`${obs.length} observation${obs.length===1?'':'s'}`,findingRecord(s,false)+obs.map(o=>findingRecord(o)).join(''));};
+  const hostTree=h=>{const childServices=services.filter(s=>visible.has(s.id)&&s.hostId===h.id),obs=observationRows(h);return branch(`host:${h.id}`,recordLabel(h),`${childServices.length} services · ${obs.length+childServices.reduce((n,s)=>n+observationRows(s).length,0)} observations`,findingRecord(h,false)+childServices.map(serviceTree).join('')+obs.map(o=>findingRecord(o)).join(''));};
+  const linkedServices=new Set(services.filter(s=>byId.get(s.hostId)?.kind==='host').map(s=>s.id));
+  const orphans=[...services.filter(s=>visible.has(s.id)&&!linkedServices.has(s.id)),...observations.filter(o=>visible.has(o.id)&&!parentOf(o))];
+  const orphanTree=orphans.length?branch('unlinked','Unlinked records',`${orphans.length} records`,orphans.map(f=>f.kind==='service'?serviceTree(f):findingRecord(f)).join('')):'';
+  $('#findingCount').textContent=`${selected.length} shown / ${findings.length} records · ${findings.filter(f=>f.reviewStatus!=='reviewed').length} need review`;
+  box.innerHTML=selected.length?hosts.filter(h=>visible.has(h.id)).map(hostTree).join('')+orphanTree:findings.length?'<div class="empty">No matching findings. Change the search or filter.</div>':'<div class="empty">No findings yet. Add an observation above, <button class="ref" data-open-import>import command output</button>, or <a href="#scope">discover hosts in Scope</a>.</div>';
   wireRefs(box);box.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>editRecord(b.dataset.edit));box.querySelectorAll('[data-merge]').forEach(b=>b.onclick=()=>mergeRecord(b.dataset.merge));box.querySelectorAll('[data-delete]').forEach(b=>b.onclick=()=>deleteRecord(b.dataset.delete));
 }
 function renderMap(){
@@ -164,6 +208,9 @@ function mergeRecord(id){
 }
 function deleteRecord(id){const f=findings.find(x=>x.id===id);showDialog('Delete finding',`<p>Delete ${esc(recordLabel(f))}?</p><p class="notice">${f.kind==='host'?'Its linked services and observations will also be removed.':f.kind==='service'?'Its linked observations will also be removed.':''} Raw source evidence remains available in the JSON export.</p><button class="btn" id="confirmDelete">Delete finding</button>`);$('#confirmDelete').onclick=async()=>{try{await api('/api/findings/'+encodeURIComponent(id),{method:'DELETE'});$('#reviewDialog').close();await refreshFindings();}catch(e){toast(e.message);}};}
 $('#findingFilter').onchange=renderFindings;
+$('#findingSearch').oninput=renderFindings;
+$('#expandFindings').onclick=()=>{$('#findingList').querySelectorAll('details[data-tree-id]').forEach(node=>{node.open=true;findingTreeOpen.add(node.dataset.treeId);});};
+$('#collapseFindings').onclick=()=>{$('#findingList').querySelectorAll('details[data-tree-id]').forEach(node=>{node.open=false;findingTreeOpen.delete(node.dataset.treeId);});};
 function invalidatePreview(){previewPayload=null;$('#saveImport').disabled=true;$('#importPreview').innerHTML='';$('#importState').textContent='Preview the updated output before saving.';}
 for(const id of ['importTool','importCommand','importOutput','importTime','importEvidenceTitle','importEvidenceIp','importSensitive'])$('#'+id).addEventListener('input',invalidatePreview);
 $('#importFile').onchange=async()=>{const file=$('#importFile').files[0];if(!file)return;if(file.size>800000){toast('File exceeds the 800 KB limit.');return;}$('#importOutput').value=await file.text();invalidatePreview();};
