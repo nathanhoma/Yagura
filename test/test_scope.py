@@ -1,6 +1,6 @@
 import unittest
 
-from backend.scope import discovery_allowed, host_allowed, normalize_scope
+from backend.scope import approved_host, discovery_allowed, host_allowed, normalize_scope
 from backend.workflow import workflow
 from backend import findings as F
 
@@ -15,6 +15,7 @@ class ScopeTests(unittest.TestCase):
     def test_shared_space_and_multiple_ranges(self):
         self.assertEqual(self.scope['cidrs'], ['10.1.51.0/24', '100.96.1.0/24', '100.101.5.0/24'])
         self.assertEqual(self.scope['domains'], ['crimsonia.net'])
+        self.assertEqual(self.scope['matchMode'], 'and')
         self.assertTrue(host_allowed({'ip': '100.96.1.70', 'name': 'ca-website.cca.01.crimsonia.net'}, self.scope))
         self.assertTrue(host_allowed({'ip': '10.1.51.5', 'name': 'crimsonia.net'}, self.scope))
         self.assertFalse(host_allowed({'ip': '100.96.1.70', 'name': 'fakecrimsonia.net'}, self.scope))
@@ -28,6 +29,7 @@ class ScopeTests(unittest.TestCase):
             {'cidrs': [], 'domains': ['crimsonia.net']},
             {'cidrs': ['10.1.51.0/24'], 'domains': ['*.crimsonia.net']},
             {'cidr': '10.1.51.0/24', 'domains': []},
+            {'cidrs': ['10.1.51.0/24'], 'domains': [], 'matchMode': 'xor'},
         ):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize_scope(value)
@@ -53,3 +55,25 @@ class ScopeTests(unittest.TestCase):
         candidates = workflow(doc, self.scope)['candidates']
         self.assertTrue(candidates)
         self.assertEqual({c['command'].split()[-1] for c in candidates if c['catalogId'] == 'nmap-ports'}, {'100.96.1.70'})
+
+    def test_or_allows_either_match_but_never_public_ipv4(self):
+        scope = normalize_scope({'cidrs': ['100.96.1.0/24'], 'domains': ['03.crimsonia.net'], 'matchMode': 'or'})
+        self.assertTrue(host_allowed({'ip': '100.96.1.70', 'name': 'other.example'}, scope))
+        self.assertTrue(host_allowed({'ip': '100.96.3.70', 'name': 'ca-website.cca.03.crimsonia.net'}, scope))
+        self.assertFalse(host_allowed({'ip': '100.96.3.70', 'name': 'other.example'}, scope))
+        self.assertFalse(host_allowed({'ip': '8.8.8.8', 'name': 'ca-website.cca.03.crimsonia.net'}, scope))
+        self.assertFalse(host_allowed({'ip': '127.0.0.1', 'name': 'ca-website.cca.03.crimsonia.net'}, scope))
+        self.assertFalse(discovery_allowed('100.96.3.70/32', scope, []))
+        self.assertFalse(host_allowed({'ip': '100.96.3.70', 'name': 'ca-website.cca.03.crimsonia.net'},
+                                      {**scope, 'matchMode': 'and'}))
+        in_range = {'ip': '100.96.1.70', 'name': 'other.example'}
+        self.assertFalse(approved_host(in_range, scope))
+        in_range['approval'] = {'ip': in_range['ip'], 'name': in_range['name'], 'scope': scope}
+        self.assertTrue(approved_host(in_range, scope))
+        self.assertFalse(approved_host(in_range, {**scope, 'matchMode': 'and'}))
+
+    def test_old_and_approval_remains_valid(self):
+        host = {'ip': '100.96.1.70', 'name': 'ca-website.cca.01.crimsonia.net',
+                'approval': {'ip': '100.96.1.70', 'name': 'ca-website.cca.01.crimsonia.net',
+                             'scope': {'cidrs': self.scope['cidrs'], 'domains': self.scope['domains']}}}
+        self.assertTrue(approved_host(host, self.scope))

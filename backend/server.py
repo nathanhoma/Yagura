@@ -20,7 +20,7 @@ from .llm import LlmService, private_url
 from .workflow import COMMAND_CATALOG, is_local_ip, workflow
 from .web_contacts import website_url
 from .scope import normalize_scope, valid_cidr
-from .discovery import contained_range, discovery_chunks, discovery_progress, dns_review, approval_name
+from .discovery import contained_range, discovery_chunks, discovery_progress, dns_review, name_discovery, approval_name
 from .sensitive import redact, sanitize_document
 from .outbound import require_target, require_web_origin
 
@@ -537,9 +537,36 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     with workspace.lock:
                         scope = workspace.load_scope()
                         saved = workspace.load_discovery()
-                        rows = [h for h in saved['hosts'] if h.get('scope') == scope]
-                        runs = [discovery_progress(run) for run in saved.get('runs', []) if run.get('scope') == scope]
+                        rows = [h for h in saved['hosts'] if normalize_scope(h.get('scope')) == scope]
+                        runs = [discovery_progress(run) for run in saved.get('runs', []) if normalize_scope(run.get('scope')) == scope]
                     return self.send_json(200, {'hosts': rows, 'runs': runs})
+                if self.command == 'POST' and path == '/api/discovery/name':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) != {'name', 'resolvers', 'authorized'} or
+                            body['authorized'] is not True):
+                        raise ValueError('Choose an authorized domain name and internal resolvers.')
+                    with workspace.lock:
+                        scope = workspace.load_scope()
+                    seed = name_discovery(body['name'], body['resolvers'], scope, workspace.runner)
+                    with workspace.lock:
+                        if workspace.load_scope() != scope:
+                            raise ValueError('Scope changed during name discovery. Results were not saved.')
+                        data = workspace.load_discovery()
+                        for ip in seed['addresses']:
+                            row = next((h for h in data['hosts'] if h['ip'] == ip and normalize_scope(h.get('scope')) == scope), None)
+                            if row is None:
+                                row = dict(ip=ip, status='unknown', firstSeen=seed['reviewedAt'],
+                                           lastSeen=seed['reviewedAt'], scope=scope, dns=None, approved=False)
+                                data['hosts'].append(row)
+                            row.update(seedName=seed['name'], seedQueries=seed['queries'],
+                                       lastSeen=seed['reviewedAt'], approved=False, dns=None, scope=scope)
+                            doc = workspace.load()
+                            host = next((h for h in doc['findings'] if h['kind'] == 'host' and h['ip'] == ip), None)
+                            if host and host.get('approval'):
+                                host.pop('approval')
+                                workspace.save(doc)
+                        workspace.save_discovery(data)
+                    return self.send_json(200, {'seed': seed, 'quarantined': True})
                 if self.command == 'POST' and path == '/api/discovery/scan':
                     body = self.body(4000)
                     if (not isinstance(body, dict) or not {'cidr', 'authorized'} <= set(body) or
@@ -557,7 +584,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         if workspace.active_discoveries:
                             raise ValueError('A discovery segment is already running; wait before starting another range.')
                         data = workspace.load_discovery()
-                        run = next((item for item in data.get('runs', []) if item.get('cidr') == cidr and item.get('scope') == scope), None)
+                        run = next((item for item in data.get('runs', []) if item.get('cidr') == cidr and normalize_scope(item.get('scope')) == scope), None)
                         if run is None:
                             run = dict(cidr=cidr, scope=scope, chunks=[dict(cidr=part, state='pending') for part in discovery_chunks(cidr)])
                             data.setdefault('runs', []).append(run)
@@ -585,14 +612,14 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             if workspace.load_scope() != scope:
                                 raise ValueError('Target scope changed during discovery. Results were not saved.')
                             data = workspace.load_discovery()
-                            run = next(item for item in data['runs'] if item['cidr'] == cidr and item['scope'] == scope)
+                            run = next(item for item in data['runs'] if item['cidr'] == cidr and normalize_scope(item.get('scope')) == scope)
                             part = next(item for item in run['chunks'] if item['cidr'] == chunk)
                             scan_id = F.uid('scan')
                             data.setdefault('scans', []).append(dict(id=scan_id, cidr=chunk, requestedCidr=cidr, observedAt=observed,
                                 command=parsed['evidence'][0]['command'], output=result['stdout'][:100000], scope=scope))
                             data['scans'] = data['scans'][-128:]
                             for item in hosts:
-                                previous = next((h for h in data['hosts'] if h['ip'] == item['ip'] and h['scope'] == scope), None)
+                                previous = next((h for h in data['hosts'] if h['ip'] == item['ip'] and normalize_scope(h.get('scope')) == scope), None)
                                 if previous:
                                     previous.update(status=item['status'], lastSeen=observed, scanId=scan_id)
                                 else:
@@ -607,7 +634,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             if workspace.load_scope() != scope:
                                 raise ValueError('Target scope changed during discovery. Results were not saved.')
                             data = workspace.load_discovery()
-                            run = next(item for item in data['runs'] if item['cidr'] == cidr and item['scope'] == scope)
+                            run = next(item for item in data['runs'] if item['cidr'] == cidr and normalize_scope(item.get('scope')) == scope)
                             part = next(item for item in run['chunks'] if item['cidr'] == chunk)
                             part.update(state='failed', error=str(exc)[:300], updatedAt=F.now())
                             workspace.save_discovery(data)
@@ -623,15 +650,15 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         raise ValueError('Choose a discovered IP and explicitly authorized internal resolvers.')
                     with workspace.lock:
                         scope = workspace.load_scope()
-                        row = next((h for h in workspace.load_discovery()['hosts'] if h.get('ip') == body['ip'] and h.get('scope') == scope), None)
+                        row = next((h for h in workspace.load_discovery()['hosts'] if h.get('ip') == body['ip'] and normalize_scope(h.get('scope')) == scope), None)
                         if row is None:
                             raise ValueError('Discover this IP inside the saved scope first.')
-                    review = dns_review(body['ip'], body['resolvers'], scope, workspace.runner)
+                    review = dns_review(body['ip'], body['resolvers'], scope, workspace.runner, row.get('seedName'))
                     with workspace.lock:
                         if workspace.load_scope() != scope:
                             raise ValueError('Scope changed during DNS review.')
                         data = workspace.load_discovery()
-                        row = next(h for h in data['hosts'] if h['ip'] == body['ip'] and h['scope'] == scope)
+                        row = next(h for h in data['hosts'] if h['ip'] == body['ip'] and normalize_scope(h.get('scope')) == scope)
                         row['dns'] = review
                         row['approved'] = False
                         doc = workspace.load()
@@ -648,14 +675,14 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     with workspace.lock:
                         scope = workspace.load_scope()
                         data = workspace.load_discovery()
-                        row = next((h for h in data['hosts'] if h.get('ip') == body.get('ip') and h.get('scope') == scope), None)
+                        row = next((h for h in data['hosts'] if h.get('ip') == body.get('ip') and normalize_scope(h.get('scope')) == scope), None)
                         if row is None:
                             raise ValueError('Discovered host not found in the current scope.')
                         name = approval_name(row, body.get('name'), scope, body.get('reason', ''))
                         when = F.now()
                         ev = dict(id=F.uid('evidence'), tool='dns-review', command='Explicit host approval',
-                                  output=json.dumps(dict(ip=row['ip'], name=name, scanId=row['scanId'], discoveredAt=row['firstSeen'],
-                                                         review=row['dns'], reason=str(body.get('reason', ''))[:500])),
+                                  output=json.dumps(dict(ip=row['ip'], name=name, scanId=row.get('scanId'), discoveredAt=row['firstSeen'],
+                                                         seedQueries=row.get('seedQueries', []), review=row['dns'], reason=str(body.get('reason', ''))[:500])),
                                   observedAt=when, importedAt=when, format='json')
                         doc = workspace.load()
                         host = next((h for h in doc['findings'] if h['kind'] == 'host' and h['ip'] == row['ip']), None)

@@ -150,16 +150,16 @@ class HttpTests(unittest.TestCase):
 
     def test_recon_scope_is_shared_and_persisted(self):
         self.call('/api/findings', 'POST', {'ip': '10.0.4.80', 'title': 'Target', 'detail': 'Lab target'})
-        self.assertEqual(self.call('/api/scope')[1], {'cidrs': [], 'domains': []})
+        self.assertEqual(self.call('/api/scope')[1], {'cidrs': [], 'domains': [], 'matchMode': 'and'})
         self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': '8.8.8.8/32'})[0], 400)
-        self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': '10.0.4.80/32'}), (200, {'cidrs': ['10.0.4.80/32'], 'domains': []}))
-        self.assertEqual(Workspace(findings_file=self.workspace.findings_file).load_scope(), {'cidrs': ['10.0.4.80/32'], 'domains': []})
+        self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': '10.0.4.80/32'}), (200, {'cidrs': ['10.0.4.80/32'], 'domains': [], 'matchMode': 'and'}))
+        self.assertEqual(Workspace(findings_file=self.workspace.findings_file).load_scope(), {'cidrs': ['10.0.4.80/32'], 'domains': [], 'matchMode': 'and'})
         candidates = self.call('/api/workflow')[1]['candidates']
         candidate = next(c for c in candidates if c['catalogId'] == 'nmap-ports')
         self.assertEqual(self.call('/api/workflow?cidr=10.0.4.81/32')[0], 400)
         self.assertFalse(self.call('/api/analysis', 'POST', {})[1]['stale'])
         self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True})[0], 200)
-        self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': ''}), (200, {'cidrs': [], 'domains': []}))
+        self.assertEqual(self.call('/api/scope', 'PUT', {'cidr': ''}), (200, {'cidrs': [], 'domains': [], 'matchMode': 'and'}))
         self.assertEqual(self.call('/api/workflow')[1]['candidates'], [])
         self.assertEqual(self.call('/api/workflow?cidr=10.0.4.80/32')[0], 400)
         self.assertTrue(self.call('/api/analysis/latest')[1]['analysis']['stale'])
@@ -173,7 +173,7 @@ class HttpTests(unittest.TestCase):
         scope = {'cidrs': ['100.96.1.0/24', '10.1.51.0/24'], 'domains': ['Crimsonia.NET']}
         status, saved = self.call('/api/scope', 'PUT', scope)
         self.assertEqual(status, 200)
-        self.assertEqual(saved, {'cidrs': ['10.1.51.0/24', '100.96.1.0/24'], 'domains': ['crimsonia.net']})
+        self.assertEqual(saved, {'cidrs': ['10.1.51.0/24', '100.96.1.0/24'], 'domains': ['crimsonia.net'], 'matchMode': 'and'})
         self.assertEqual(self.call('/api/workflow')[1]['candidates'], [])
         doc = self.workspace.load()
         host = next(h for h in doc['findings'] if h['kind'] == 'host' and h['ip'] == '100.96.1.70')
@@ -235,6 +235,42 @@ class HttpTests(unittest.TestCase):
         self.assertTrue(self.workspace.discovery_file.exists())
         self.assertEqual(self.workspace.discovery_file.stat().st_mode & 0o777, 0o600)
         self.call('/api/discovery/dns', 'POST', {'ip': '100.96.1.21', 'resolvers': ['100.96.1.2'], 'authorized': True})
+        self.assertFalse(any(c['hostId'] == approved['host']['id'] for c in self.call('/api/workflow')[1]['candidates']))
+
+    def test_or_name_seed_requires_private_ip_internal_dns_and_approval(self):
+        name = 'ca-website.cca.03.crimsonia.net'
+        scope = {'cidrs': ['100.95.95.0/24'], 'domains': ['03.crimsonia.net'], 'matchMode': 'or'}
+        self.assertEqual(self.call('/api/scope', 'PUT', scope)[0], 200)
+        def runner(program, args, timeout):
+            self.assertEqual(program, 'dig')
+            self.assertEqual(args[0], '@100.95.95.2')
+            if '-x' in args:
+                answer = f'70.3.96.100.in-addr.arpa. 60 IN PTR {name}.\n'
+            else:
+                answer = (f'{name}. 60 IN A 100.96.3.70\n'
+                          f'{name}. 60 IN A 8.8.8.8\n'
+                          'unrelated.example. 60 IN A 100.96.3.71\n')
+            return {'ok': True, 'stdout': answer, 'stderr': ''}
+        self.workspace.runner = runner
+        payload = {'name': name, 'resolvers': ['100.95.95.2'], 'authorized': True}
+        self.assertEqual(self.call('/api/discovery/name', 'POST', payload | {'resolvers': ['8.8.8.8']})[0], 400)
+        self.assertEqual(self.call('/api/discovery/name', 'POST', payload | {'name': 'outside.example'})[0], 400)
+        status, result = self.call('/api/discovery/name', 'POST', payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(result['seed']['addresses'], ['100.96.3.70'])
+        self.assertEqual(len(self.call('/api/discovery/pending')[1]['hosts']), 1)
+        self.assertEqual(self.call('/api/findings')[1]['findings'], [])
+        self.assertEqual(self.call('/api/workflow')[1]['candidates'], [])
+        self.assertEqual(self.call('/api/discovery/dns', 'POST', {'ip': '100.96.3.70', 'resolvers': ['8.8.8.8'], 'authorized': True})[0], 400)
+        status, reviewed = self.call('/api/discovery/dns', 'POST', {'ip': '100.96.3.70', 'resolvers': ['100.95.95.2'], 'authorized': True})
+        self.assertEqual(status, 200)
+        self.assertEqual(reviewed['dns']['candidates'], [name])
+        self.assertEqual(self.call('/api/discovery/approve', 'POST', {'ip': '100.96.3.70', 'name': 'other.example', 'authorized': True})[0], 400)
+        status, approved = self.call('/api/discovery/approve', 'POST', {'ip': '100.96.3.70', 'name': name, 'authorized': True})
+        self.assertEqual(status, 200)
+        self.assertTrue(any(c['hostId'] == approved['host']['id'] for c in self.call('/api/workflow')[1]['candidates']))
+        self.assertEqual(self.call('/api/discovery/scan', 'POST', {'cidr': '100.96.3.70/32', 'authorized': True})[0], 400)
+        self.call('/api/scope', 'PUT', {**scope, 'matchMode': 'and'})
         self.assertFalse(any(c['hostId'] == approved['host']['id'] for c in self.call('/api/workflow')[1]['candidates']))
 
     def test_discovery_saves_each_chunk_and_resumes_after_failure(self):

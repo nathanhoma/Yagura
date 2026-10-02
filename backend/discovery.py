@@ -4,7 +4,7 @@ import json
 import re
 
 from .findings import now
-from .scope import ip_allowed, name_allowed, normalize_scope, valid_cidr
+from .scope import domain_target_ip, host_allowed, ip_allowed, name_allowed, normalize_scope, valid_cidr
 
 
 def contained_range(cidr, scope):
@@ -38,6 +38,13 @@ def resolver_allowed(ip, scope):
     return ip_allowed(ip, scope)
 
 
+def validate_resolvers(resolvers, scope):
+    if not isinstance(resolvers, list) or not 1 <= len(resolvers) <= 4 or len(resolvers) != len(set(resolvers)):
+        raise ValueError('Choose one to four distinct internal resolver IPs.')
+    if not all(resolver_allowed(item, scope) for item in resolvers):
+        raise ValueError('Each resolver must be an IP inside the saved CIDRs; public DNS is not allowed.')
+
+
 def parse_dns_answer(output, expected_type):
     records = []
     for line in output.splitlines():
@@ -62,13 +69,31 @@ def parse_dns_answer(output, expected_type):
     return records[:20]
 
 
-def dns_review(ip, resolvers, scope, runner):
-    if not ip_allowed(ip, scope):
-        raise ValueError('DNS target must be inside the saved CIDRs.')
-    if not isinstance(resolvers, list) or not 1 <= len(resolvers) <= 4 or len(resolvers) != len(set(resolvers)):
-        raise ValueError('Choose one to four distinct internal resolver IPs.')
-    if not all(resolver_allowed(item, scope) for item in resolvers):
-        raise ValueError('Each resolver must be an IP inside the saved CIDRs; public DNS is not allowed.')
+def name_discovery(name, resolvers, scope, runner):
+    selected = normalize_scope(scope)
+    name = str(name).strip().lower().rstrip('.')
+    if selected['matchMode'] != 'or' or not selected['domains'] or not name_allowed(name, selected):
+        raise ValueError('Name discovery requires OR mode and a name inside an authorized domain.')
+    validate_resolvers(resolvers, selected)
+    queries, addresses = [], set()
+    for resolver in resolvers:
+        result = runner('dig', ['@' + resolver, '+time=2', '+tries=1', '+noall', '+answer', '+ttlid', name, 'A'], 5)
+        records = parse_dns_answer(result.get('stdout', ''), 'A') if result.get('ok') else []
+        queries.append(dict(resolver=resolver, queriedAt=now(), qtype='A', question=name,
+                            records=records, error=str(result.get('stderr', ''))[:200] if not result.get('ok') else ''))
+        addresses.update(record['value'] for record in records if record['name'] == name and domain_target_ip(record['value']))
+    if len(addresses) > 16:
+        raise ValueError('Name discovery returned too many private addresses; review the DNS answers first.')
+    return dict(name=name, queries=queries, addresses=sorted(addresses, key=lambda item: int(ipaddress.ip_address(item))),
+                reviewedAt=now(), scope=selected)
+
+
+def dns_review(ip, resolvers, scope, runner, seed_name=None):
+    selected = normalize_scope(scope)
+    if not ip_allowed(ip, selected):
+        if not (selected['matchMode'] == 'or' and seed_name and name_allowed(seed_name, selected) and domain_target_ip(ip)):
+            raise ValueError('DNS target must be inside a saved CIDR or be an authorized domain seed in OR mode.')
+    validate_resolvers(resolvers, selected)
     queries, names = [], set()
     for resolver in resolvers:
         args = ['@' + resolver, '+time=2', '+tries=1', '+noall', '+answer', '+ttlid', '-x', ip]
@@ -76,7 +101,8 @@ def dns_review(ip, resolvers, scope, runner):
         records = parse_dns_answer(result.get('stdout', ''), 'PTR') if result.get('ok') else []
         queries.append(dict(resolver=resolver, queriedAt=now(), qtype='PTR', question=ip,
                             records=records, error=str(result.get('stderr', ''))[:200] if not result.get('ok') else ''))
-        names.update(r['value'] for r in records if name_allowed(r['value'], scope))
+        names.update(r['value'] for r in records if host_allowed({'ip': ip, 'name': r['value']}, selected)
+                     and (not seed_name or ip_allowed(ip, selected) or r['value'] == seed_name))
     for name in sorted(names)[:8]:
         for resolver in resolvers:
             args = ['@' + resolver, '+time=2', '+tries=1', '+noall', '+answer', '+ttlid', name, 'A']
@@ -86,7 +112,7 @@ def dns_review(ip, resolvers, scope, runner):
                                          parse_dns_answer(result.get('stdout', ''), 'A')) if result.get('ok') else [],
                                 error=str(result.get('stderr', ''))[:200] if not result.get('ok') else ''))
     candidates = sorted(name for name in names if any(q['qtype'] == 'A' and q['question'] == name and
-                        any(record['type'] == 'A' and record['value'] == ip for record in q['records']) for q in queries))
+                        any(record['type'] == 'A' and record['name'] == name and record['value'] == ip for record in q['records']) for q in queries))
     signatures = {(q['resolver'], q['qtype'], q['question']): tuple(sorted(r['value'] for r in q['records'])) for q in queries}
     conflicting = any(len({values for (resolver, kind, question), values in signatures.items()
                         if kind == qtype and question == queried}) > 1
@@ -97,8 +123,10 @@ def dns_review(ip, resolvers, scope, runner):
 
 def approval_name(record, name, scope, reason=''):
     name = str(name).strip().lower().rstrip('.')
-    if record.get('scope') != normalize_scope(scope) or not name_allowed(name, scope):
+    if normalize_scope(record.get('scope')) != normalize_scope(scope) or not host_allowed({'ip': record.get('ip'), 'name': name}, scope):
         raise ValueError('Discovery scope or host name is no longer authorized.')
+    if not ip_allowed(record.get('ip'), scope) and name != record.get('seedName'):
+        raise ValueError('An out-of-CIDR host must match its authorized DNS seed.')
     review = record.get('dns') or {}
     if name not in review.get('candidates', []):
         raise ValueError('Approve only a PTR name whose A answer included this IP.')

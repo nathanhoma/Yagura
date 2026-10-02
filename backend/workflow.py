@@ -105,7 +105,8 @@ def workflow(doc, authorized_scope=None):
         reason = ('' if eligible else 'Local interface address' if host.get('local') else
                   'Imported target outside local IPv4 suggestion scope' if not is_local_ip(host['ip']) else
                   'No authorized check range selected' if not scope['cidrs'] else
-                  'Outside selected authorized check ranges' if not any(ipaddress.ip_address(host['ip']) in ipaddress.ip_network(cidr) for cidr in scope['cidrs']) else
+                  'Outside both authorized CIDRs and domains' if scope['matchMode'] == 'or' and not host_allowed(host, scope) else
+                  'Outside selected authorized check ranges' if scope['matchMode'] == 'and' and not any(ipaddress.ip_address(host['ip']) in ipaddress.ip_network(cidr) for cidr in scope['cidrs']) else
                   'Hostname is outside the authorized domains' if not host_allowed(host, scope) else
                   'Host identity needs DNS review and approval' if not approved_host(host, scope) else
                   'Last recorded host state is down')

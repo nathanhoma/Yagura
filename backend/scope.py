@@ -7,6 +7,7 @@ LOCAL_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
     '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
     '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
 ))
+DOMAIN_TARGET_NETWORKS = LOCAL_NETWORKS[:4]  # Exclude loopback and link-local from domain-only OR grants.
 DOMAIN_LABEL = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z')
 MAX_CIDRS, MAX_DOMAINS, MAX_ADDRESSES = 16, 16, 4096
 
@@ -32,8 +33,11 @@ def normalize_scope(value):
         if set(value) != {'cidr'} or not isinstance(value['cidr'], str):
             raise ValueError('Supply only cidr, or cidrs and domains lists.')
         value = {'cidrs': [value['cidr']] if value['cidr'] else [], 'domains': []}
-    if set(value) != {'cidrs', 'domains'} or not isinstance(value['cidrs'], list) or not isinstance(value['domains'], list):
-        raise ValueError('Supply only cidrs and domains lists.')
+    if not {'cidrs', 'domains'} <= set(value) or set(value) - {'cidrs', 'domains', 'matchMode'} or not isinstance(value['cidrs'], list) or not isinstance(value['domains'], list):
+        raise ValueError('Supply cidrs, domains, and an optional matchMode.')
+    mode = value.get('matchMode', 'and')
+    if mode not in ('and', 'or'):
+        raise ValueError('matchMode must be and or or.')
     if len(value['cidrs']) > MAX_CIDRS or len(value['domains']) > MAX_DOMAINS:
         raise ValueError('Scope supports at most 16 CIDRs and 16 domains.')
     cidrs = []
@@ -58,7 +62,23 @@ def normalize_scope(value):
     if domains and not cidrs:
         raise ValueError('Add at least one CIDR when restricting by domain.')
     return {'cidrs': sorted(cidrs, key=lambda item: (int(ipaddress.ip_network(item).network_address), ipaddress.ip_network(item).prefixlen)),
-            'domains': sorted(domains)}
+            'domains': sorted(domains), 'matchMode': mode}
+
+
+def local_ip(value):
+    try:
+        address = ipaddress.ip_address(value)
+        return address.version == 4 and any(address in network for network in LOCAL_NETWORKS)
+    except ValueError:
+        return False
+
+
+def domain_target_ip(value):
+    try:
+        address = ipaddress.ip_address(value)
+        return address.version == 4 and any(address in network for network in DOMAIN_TARGET_NETWORKS)
+    except ValueError:
+        return False
 
 
 def ip_allowed(value, scope):
@@ -82,7 +102,14 @@ def name_allowed(name, scope):
 
 
 def host_allowed(host, scope):
-    return ip_allowed(host.get('ip'), scope) and name_allowed(host.get('name'), scope)
+    selected = normalize_scope(scope)
+    ip = host.get('ip')
+    if not local_ip(ip):
+        return False
+    in_cidr = ip_allowed(ip, selected)
+    if selected['matchMode'] == 'or' and selected['domains']:
+        return in_cidr or (domain_target_ip(ip) and name_allowed(host.get('name'), selected))
+    return in_cidr and name_allowed(host.get('name'), selected)
 
 
 def approved_host(host, scope):
@@ -93,9 +120,12 @@ def approved_host(host, scope):
     approval = host.get('approval')
     if not selected['domains'] and not approval:
         return True  # Preserve explicitly imported legacy IP-only workspaces.
-    return bool(approval and approval.get('ip') == host.get('ip') and
-                approval.get('name') == str(host.get('name', '')).lower().rstrip('.') and
-                approval.get('scope') == selected)
+    if not approval or approval.get('ip') != host.get('ip') or approval.get('name') != str(host.get('name', '')).lower().rstrip('.'):
+        return False
+    try:
+        return normalize_scope(approval.get('scope')) == selected
+    except ValueError:
+        return False
 
 
 def discovery_allowed(cidr, scope, findings):

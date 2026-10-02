@@ -85,7 +85,8 @@ Drafts are stored separately in `data/email-drafts.json` with recipient source r
 
 - Optional **Yagura server network** diagnostics run `ip -j -4 addr` and `ip -j -4 neigh` and save results as linked findings/evidence for server context without changing the target scope.
 - Nmap discovery runs with `-n -sn --max-rate 5 --max-retries 1` after authorization is checked. The target must be contained in a saved CIDR. Results stay quarantined until DNS review and approval; discovery never changes the saved scope.
-- Passive imports may contain other addresses. The saved-scope workflow proposes executable checks only for recorded non-interface hosts matching both its IP ranges and, when configured, domain suffixes. A private address or neighbor entry alone does not establish authorization.
+- Passive imports may contain other addresses. Scope matching defaults to **AND**: a host must match a saved CIDR and, when configured, a domain suffix. **OR** permits a private/shared IPv4 host matching either one; public IPv4 is never executable. With domains configured, DNS review and explicit IP/name approval are still required in either mode. A private address or neighbor entry alone does not establish authorization.
+- In OR mode, `POST /api/discovery/name` looks up one authorized hostname using only resolver IPs inside saved CIDRs. It quarantines private/shared A results without connecting to them. Review PTR and A records via `POST /api/discovery/dns`, then approve the host before running checks. Raw range discovery remains CIDR-contained.
 - Keep the app bound to localhost unless you add access controls. Public asset serving excludes configuration, source modules, and the data directory.
 
 ## Validate
@@ -103,8 +104,9 @@ Use **Findings analysis** in the UI to analyze all recorded findings or one host
 | API | Purpose |
 | --- | --- |
 | `GET /api/llm/health` | Check model discovery, authentication, endpoint reachability, and model selection. Credentials are never returned. |
-| `GET/PUT /api/scope` | Read or save `{"cidrs":["100.96.1.0/24","10.1.51.0/24"],"domains":["crimsonia.net"]}`. Empty lists clear it. Legacy `{"cidr":"192.168.1.0/24"}` writes are accepted and migrated. |
+| `GET/PUT /api/scope` | Read or save `{"cidrs":["100.96.1.0/24"],"domains":["03.crimsonia.net"],"matchMode":"or"}`. `matchMode` defaults to `and` for existing scopes. Empty lists clear it. Legacy `{"cidr":"192.168.1.0/24"}` writes are accepted and migrated. |
 | `POST /api/discovery/scan` | Body `{"cidr":"100.96.1.0/24","authorized":true}` runs the next unfinished `/28` segment and returns `completed`, `total`, `nextCidr`, `complete`, `count`, and `outcome`. Repeat until complete; stop and retry after `outcome:"failed"`. |
+| `POST /api/discovery/name` | Body `{"name":"www.03.crimsonia.net","resolvers":["100.95.95.2"],"authorized":true}` records internal-DNS A answers as unverified private IPs in OR mode. It makes no target connection. |
 | `GET /api/discovery/pending` | Return quarantined hosts and saved discovery progress for the current scope. |
 | `POST /api/analysis` | Analyze persisted findings; body `{}` selects all or `{"hostId":"stored-host-id","model":"advertised-model"}` selects a host and model. Client-supplied findings/commands are rejected. |
 | `GET /api/analysis/latest` | Return the saved analysis and current `stale` flag, or `{"analysis":null}`. |
