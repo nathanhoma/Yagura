@@ -85,7 +85,8 @@ def parse_import(data):
     time = timestamp(data.get('observedAt'))
     fmt = 'jsonl' if tool in ('httpx', 'nuclei') else 'json' if output.lstrip().startswith('[') else 'xml' if '<nmaprun' in output else 'text'
     command = data.get('command') or (re.search(r'<nmaprun\b[^>]*\bargs=["\']([^"\']+)', output).group(1) if tool == 'nmap' and re.search(r'<nmaprun\b[^>]*\bargs=["\']([^"\']+)', output) else tool)
-    ev = dict(id=uid('evidence'), tool=tool, command=str(command).strip()[:2000], output=output, observedAt=time, importedAt=now(), format=fmt)
+    ev = dict(id=uid('evidence'), tool=tool, command=str(command).strip()[:2000], output=output, observedAt=time, importedAt=now(), format=fmt,
+              sensitive=bool(data.get('sensitive')) if tool == 'evidence' else False)
     findings, warnings = [], []
 
     def host(ip, **fields):

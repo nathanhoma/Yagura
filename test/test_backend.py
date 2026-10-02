@@ -85,6 +85,18 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(private_url('http://127.0.0.1:11434/v1'))
         self.assertFalse(private_url('http://user:password@localhost/v1'))
 
+    def test_explicit_https_gateway_url(self):
+        host = 'llm-gateway.xs.network'
+        base = f'https://{host}/v1'
+        self.assertFalse(private_url(base))
+        self.assertTrue(private_url(base, host))
+        self.assertTrue(LlmService(base, trusted_https_host=host).configuration()['allowed'])
+        for url in (f'http://{host}/v1', f'https://other.{host}/v1',
+                    f'https://{host}.example/v1', f'https://user:pass@{host}/v1',
+                    f'https://{host}/v1?x=1', f'https://{host}/v1#fragment'):
+            with self.subTest(url=url):
+                self.assertFalse(private_url(url, host))
+
     def test_ping_no_reply_and_xml_reject(self):
         result = F.parse_import({'tool': 'ping', 'output': 'PING 192.168.56.10 (192.168.56.10) 56(84) bytes of data.\n3 packets transmitted, 0 received, 100% packet loss'})
         self.assertEqual(result['findings'][0]['state'], 'no-response')

@@ -71,6 +71,19 @@ class WebsiteContactsTests(unittest.TestCase):
         self.assertIn('ops@lab.test', body)
         response.close.assert_called_once()
 
+    def test_inventory_transport_preserves_forbidden_response(self):
+        response = Mock(status=403)
+        response.isclosed.return_value = False
+        response.getheaders.return_value = [('Content-Type', 'text/html')]
+        response.headers.get_content_charset.return_value = 'utf-8'
+        response.read1.side_effect = [b'<title>Forbidden</title>', b'']
+        conn = Mock()
+        conn.getresponse.return_value = response
+        with patch('backend.web_contacts.socket.create_connection'), patch('backend.web_contacts.http.client.HTTPConnection', return_value=conn):
+            status, _, body = fetch_page('http://www.lab.test:8080/', '10.1.1.1', 5, accept_error=True)
+        self.assertEqual(status, 403)
+        self.assertIn('Forbidden', body)
+
     def test_web_candidate_uses_recorded_hostname_and_service(self):
         doc = F.empty()
         F.merge_parsed(doc, F.parse_import({'tool': 'nmap', 'output': 'Nmap scan report for www.lab.test (192.168.56.10)\nHost is up.\n80/tcp open http\nNmap done: 1 IP address (1 host up) scanned'}))

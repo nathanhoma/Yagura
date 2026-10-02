@@ -1,17 +1,16 @@
 import ipaddress
 import re
+from urllib.parse import urlsplit
 
 from .web_contacts import website_url
 from .investigation_catalog import REFERENCE_CHECKS
+from .scope import LOCAL_NETWORKS, approved_host, host_allowed, normalize_scope
 
 
 def is_local_ip(value):
     try:
         ip = ipaddress.ip_address(value)
-        if ip.version != 4:
-            return False
-        a, b = ip.packed[:2]
-        return a == 10 or a == 172 and 16 <= b <= 31 or a == 192 and b == 168 or a == 127 or a == 169 and b == 254
+        return ip.version == 4 and any(ip in network for network in LOCAL_NETWORKS)
     except ValueError:
         return False
 
@@ -24,7 +23,7 @@ COMMAND_CATALOG = [
     dict(id='nmap-ports', title='Check common TCP ports', command='nmap -n -Pn -sT --top-ports 100 {host}', when='Discover common services when a target has no recorded open TCP ports using a TCP connect scan.'),
     dict(id='nmap-service', title='Identify service versions', command='nmap -n -Pn -sT -sV --version-light -p {ports} {host}', when='Identify versions on recorded open TCP ports using a TCP connect scan.'),
     dict(id='nmap-os', title='Guess host operating system', command='nmap -n -Pn -O {host}', when='Use Nmap OS fingerprinting on a recorded host with an open TCP port. May require elevated privileges.'),
-    dict(id='http-headers', title='Inspect HTTP headers', command='curl -I --max-time 5 {scheme}://{host}:{port}/', when='Review headers for a recorded open web service.'),
+    dict(id='http-headers', title='Inspect HTTP headers', command="curl -q --noproxy '*' --resolve {web_host}:{port}:{host} -I --max-time 5 {url}", when='Review headers for a recorded open web service, pinned to its recorded IP.'),
     dict(id='web-contacts', title='Inspect published website contacts', command='python3 -m backend.web_contacts --url {url} --ip {host}', when='Review email addresses in page text and mailto links on a recorded web service; inspect up to five same-origin pages.'),
     dict(id='smb-shares', title='List SMB shares', command='smbclient -L //{host} -N', when='Check advertised shares for a recorded open SMB service.'),
     dict(id='dns-ptr', title='Resolve host PTR name', command='getent hosts {host}', when='Record the locally resolved reverse DNS name for a scoped host.'),
@@ -41,14 +40,12 @@ COMMAND_CATALOG.append(dict(id='web-exposure', title='Inspect web metadata expos
 COMMAND_CATALOG.extend(REFERENCE_CHECKS)
 
 
-def workflow(doc, authorized_cidr=None):
+def workflow(doc, authorized_scope=None):
     candidates, targets = [], []
     try:
-        authorized_network = ipaddress.ip_network(authorized_cidr, strict=False) if authorized_cidr else None
-        if authorized_network and authorized_network.version != 4:
-            authorized_network = None
+        scope = normalize_scope(authorized_scope)
     except ValueError:
-        authorized_network = None
+        scope = normalize_scope(None)
     catalog = {c['id']: c for c in COMMAND_CATALOG}
     rows = doc['findings']
 
@@ -67,12 +64,10 @@ def workflow(doc, authorized_cidr=None):
         services = [s for s in rows if s['kind'] == 'service' and s.get('hostId') == host['id']]
         observations = [o for o in rows if o['kind'] == 'observation' and o.get('hostId') == host['id']]
         opened = [s for s in services if s.get('state') == 'open']
-        eligible = (is_local_ip(host['ip']) and authorized_network is not None and
-                    ipaddress.ip_address(host['ip']) in authorized_network and
+        eligible = (is_local_ip(host['ip']) and approved_host(host, scope) and
                     not host.get('local') and host.get('state') != 'down')
         if eligible:
-            if not any(o.get('title') == 'Reverse DNS name' for o in observations):
-                add('dns-ptr', host, [], f"Resolve a name for recorded host {host['ip']}.")
+            # DNS review uses explicit, in-scope resolver IPs in the quarantined discovery flow.
             if host.get('state') != 'up':
                 add('ping', host, [], f"Host {host['ip']} is recorded with reachability {host.get('state')}; verify ICMP response.")
             tcp = [s for s in opened if s.get('protocol') == 'tcp']
@@ -91,11 +86,11 @@ def workflow(doc, authorized_cidr=None):
                     if not any(o.get('title') == 'Web metadata probes' and o.get('serviceId') == s['id'] for o in observations):
                         add('web-exposure', host, [s], 'Inspect fixed metadata paths and a not-found baseline on a recorded web service.', url=website_url(host, s))
                     add('web-contacts', host, [s], 'A recorded web service can be reviewed for published contact information.', url=website_url(host, s))
-                    add('http-headers', host, [s], f"Recorded open {port}/tcp ({name or 'web-associated port'}) supports a web header check.", port=port, scheme=scheme)
+                    url = website_url(host, s)
+                    add('http-headers', host, [s], f"Recorded open {port}/tcp ({name or 'web-associated port'}) supports a web header check.", port=port, scheme=scheme, web_host=urlsplit(url).hostname, url=url)
                     if not any(o.get('title') == 'Web inventory' and o.get('serviceId') == s['id'] for o in observations):
                         add('web-inventory', host, [s], f"Inventory pages and routes on recorded web service {port}/tcp.", url=website_url(host, s))
-                    if not any(o.get('title') == 'Curated Nuclei exposure check' and o.get('serviceId') == s['id'] for o in observations):
-                        add('nuclei-git', host, [s], f"Check a recorded web service for publicly exposed Git metadata with one bundled template.", port=port, scheme=scheme)
+                    # Do not execute extensible scanners until host-level egress isolation is installed.
                 if port == 445 or name in ('microsoft-ds', 'netbios-ssn', 'smb'):
                     add('smb-shares', host, [s], f"Recorded open {port}/tcp ({name or 'SMB-associated port'}) supports share enumeration.")
                     if not any(o.get('title') == 'smb2-security-mode' and o.get('serviceId') == s['id'] for o in observations):
@@ -109,8 +104,11 @@ def workflow(doc, authorized_cidr=None):
         stage = 'local context' if host.get('local') else 'recon' if not opened else 'service identification' if any(not s.get('product') and not s.get('version') for s in opened) else 'access triage'
         reason = ('' if eligible else 'Local interface address' if host.get('local') else
                   'Imported target outside local IPv4 suggestion scope' if not is_local_ip(host['ip']) else
-                  'No authorized check range selected' if authorized_network is None else
-                  'Outside selected authorized check range' if ipaddress.ip_address(host['ip']) not in authorized_network else
+                  'No authorized check range selected' if not scope['cidrs'] else
+                  'Outside both authorized CIDRs and domains' if scope['matchMode'] == 'or' and not host_allowed(host, scope) else
+                  'Outside selected authorized check ranges' if scope['matchMode'] == 'and' and not any(ipaddress.ip_address(host['ip']) in ipaddress.ip_network(cidr) for cidr in scope['cidrs']) else
+                  'Hostname is outside the authorized domains' if not host_allowed(host, scope) else
+                  'Host identity needs DNS review and approval' if not approved_host(host, scope) else
                   'Last recorded host state is down')
         targets.append(dict(host=host, services=services, observations=observations, stage=stage, eligible=eligible, scopeReason=reason))
     return dict(targets=targets, candidates=candidates)
