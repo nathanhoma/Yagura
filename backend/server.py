@@ -20,7 +20,7 @@ from .llm import LlmService, private_url
 from .workflow import COMMAND_CATALOG, is_local_ip, workflow
 from .web_contacts import website_url
 from .scope import normalize_scope, valid_cidr
-from .discovery import contained_range, dns_review, approval_name
+from .discovery import contained_range, discovery_chunks, discovery_progress, dns_review, approval_name
 from .sensitive import redact, sanitize_document
 from .outbound import require_target, require_web_origin
 
@@ -236,6 +236,7 @@ class Workspace:
         self.lock = threading.RLock()
         self.active_checks = set()
         self.active_analyses = {}
+        self.active_discoveries = set()
 
     def load_scope(self):
         try:
@@ -268,7 +269,7 @@ class Workspace:
             return {'hosts': []}
 
     def save_discovery(self, data):
-        if len(data.get('hosts', [])) > 10000 or len(data.get('scans', [])) > 20:
+        if len(data.get('hosts', [])) > 10000 or len(data.get('scans', [])) > 128 or len(data.get('runs', [])) > 20:
             raise ValueError('Discovery capacity reached; start a new workspace before scanning more.')
         self.discovery_file.parent.mkdir(parents=True, exist_ok=True)
         temp = self.discovery_file.with_name(self.discovery_file.name + '.tmp')
@@ -535,43 +536,87 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 if self.command == 'GET' and path == '/api/discovery/pending':
                     with workspace.lock:
                         scope = workspace.load_scope()
-                        rows = [h for h in workspace.load_discovery()['hosts'] if h.get('scope') == scope]
-                    return self.send_json(200, {'hosts': rows})
+                        saved = workspace.load_discovery()
+                        rows = [h for h in saved['hosts'] if h.get('scope') == scope]
+                        runs = [discovery_progress(run) for run in saved.get('runs', []) if run.get('scope') == scope]
+                    return self.send_json(200, {'hosts': rows, 'runs': runs})
                 if self.command == 'POST' and path == '/api/discovery/scan':
                     body = self.body(4000)
-                    if not isinstance(body, dict) or body.get('authorized') is not True:
+                    if (not isinstance(body, dict) or not {'cidr', 'authorized'} <= set(body) or
+                            set(body) - {'cidr', 'authorized', 'authorizedScope'} or body.get('authorized') is not True):
                         raise ValueError('Confirm that this target is authorized for your lab.')
                     cidr = body.get('cidr')
                     with workspace.lock:
                         scope = workspace.load_scope()
+                        if 'authorizedScope' in body and normalize_scope(body['authorizedScope']) != scope:
+                            raise ValueError('Target scope changed during discovery. Review authorization again.')
                         if not contained_range(cidr, scope):
                             raise ValueError('Discovery target must be contained in a saved CIDR.')
-                    cidr = str(ipaddress.ip_network(cidr.strip(), strict=False))
-                    result = workspace.runner('nmap', ['-n', '-sn', '--max-rate', '5', '--max-retries', '1', '-oX', '-', cidr], 180)
-                    if not result['ok']:
-                        return self.send_json(503, {'error': result['stderr'] or 'Nmap discovery failed.'})
-                    observed = F.now()
-                    parsed = F.parse_import(dict(tool='nmap', output=result['stdout'], command=f'nmap -n -sn --max-rate 5 --max-retries 1 -oX - {cidr}', observedAt=observed))
-                    hosts = [dict(ip=h['ip'], status=h.get('state', 'unknown')) for h in parsed['findings']
-                             if h['kind'] == 'host' and h.get('state') == 'up' and
-                             ipaddress.ip_address(h['ip']) in ipaddress.ip_network(cidr)]
-                    with workspace.lock:
-                        if workspace.load_scope() != scope:
-                            raise ValueError('Target scope changed during discovery. Results were not saved.')
+                        cidr = str(ipaddress.ip_network(cidr.strip(), strict=False))
+                        key = (json.dumps(scope, sort_keys=True), cidr)
+                        if workspace.active_discoveries:
+                            raise ValueError('A discovery segment is already running; wait before starting another range.')
                         data = workspace.load_discovery()
-                        scan_id = F.uid('scan')
-                        data.setdefault('scans', []).append(dict(id=scan_id, cidr=cidr, observedAt=observed,
-                            command=parsed['evidence'][0]['command'], output=result['stdout'][:1000000], scope=scope))
-                        data['scans'] = data['scans'][-20:]
-                        for item in hosts:
-                            previous = next((h for h in data['hosts'] if h['ip'] == item['ip'] and h['scope'] == scope), None)
-                            if previous:
-                                previous.update(status=item['status'], lastSeen=observed, scanId=scan_id)
-                            else:
-                                data['hosts'].append(dict(ip=item['ip'], status=item['status'], firstSeen=observed,
-                                    lastSeen=observed, scanId=scan_id, scope=scope, dns=None, approved=False))
+                        run = next((item for item in data.get('runs', []) if item.get('cidr') == cidr and item.get('scope') == scope), None)
+                        if run is None:
+                            run = dict(cidr=cidr, scope=scope, chunks=[dict(cidr=part, state='pending') for part in discovery_chunks(cidr)])
+                            data.setdefault('runs', []).append(run)
+                            data['runs'] = data['runs'][-20:]
+                        part = next((item for item in run['chunks'] if item['state'] != 'completed'), None)
+                        if part is None:
+                            return self.send_json(200, {**discovery_progress(run), 'hosts': [], 'quarantined': True, 'outcome': 'completed'})
+                        part['state'] = 'running'
+                        part.pop('error', None)
                         workspace.save_discovery(data)
-                    return self.send_json(200, dict(cidr=cidr, hosts=hosts, count=len(hosts), quarantined=True))
+                        workspace.active_discoveries.add(key)
+                        chunk = part['cidr']
+                    try:
+                        args = ['-n', '-sn', '--max-rate', '5', '--max-retries', '1', '-oX', '-', chunk]
+                        result = workspace.runner('nmap', args, 90)
+                        if not result['ok']:
+                            raise ValueError(result.get('stderr') or 'Nmap discovery failed.')
+                        observed = F.now()
+                        parsed = F.parse_import(dict(tool='nmap', output=result['stdout'],
+                            command=f'nmap -n -sn --max-rate 5 --max-retries 1 -oX - {chunk}', observedAt=observed))
+                        hosts = [dict(ip=h['ip'], status=h.get('state', 'unknown')) for h in parsed['findings']
+                                 if h['kind'] == 'host' and h.get('state') == 'up' and
+                                 ipaddress.ip_address(h['ip']) in ipaddress.ip_network(chunk)]
+                        with workspace.lock:
+                            if workspace.load_scope() != scope:
+                                raise ValueError('Target scope changed during discovery. Results were not saved.')
+                            data = workspace.load_discovery()
+                            run = next(item for item in data['runs'] if item['cidr'] == cidr and item['scope'] == scope)
+                            part = next(item for item in run['chunks'] if item['cidr'] == chunk)
+                            scan_id = F.uid('scan')
+                            data.setdefault('scans', []).append(dict(id=scan_id, cidr=chunk, requestedCidr=cidr, observedAt=observed,
+                                command=parsed['evidence'][0]['command'], output=result['stdout'][:100000], scope=scope))
+                            data['scans'] = data['scans'][-128:]
+                            for item in hosts:
+                                previous = next((h for h in data['hosts'] if h['ip'] == item['ip'] and h['scope'] == scope), None)
+                                if previous:
+                                    previous.update(status=item['status'], lastSeen=observed, scanId=scan_id)
+                                else:
+                                    data['hosts'].append(dict(ip=item['ip'], status=item['status'], firstSeen=observed,
+                                        lastSeen=observed, scanId=scan_id, scope=scope, dns=None, approved=False))
+                            part.update(state='completed', count=len(hosts), scanId=scan_id, updatedAt=observed)
+                            workspace.save_discovery(data)
+                            progress = discovery_progress(run)
+                        response = {**progress, 'hosts': hosts, 'chunk': chunk, 'quarantined': True, 'outcome': 'completed'}
+                    except (ValueError, OSError) as exc:
+                        with workspace.lock:
+                            if workspace.load_scope() != scope:
+                                raise ValueError('Target scope changed during discovery. Results were not saved.')
+                            data = workspace.load_discovery()
+                            run = next(item for item in data['runs'] if item['cidr'] == cidr and item['scope'] == scope)
+                            part = next(item for item in run['chunks'] if item['cidr'] == chunk)
+                            part.update(state='failed', error=str(exc)[:300], updatedAt=F.now())
+                            workspace.save_discovery(data)
+                            progress = discovery_progress(run)
+                        response = {**progress, 'hosts': [], 'quarantined': True, 'outcome': 'failed'}
+                    finally:
+                        with workspace.lock:
+                            workspace.active_discoveries.discard(key)
+                    return self.send_json(200, response)
                 if self.command == 'POST' and path == '/api/discovery/dns':
                     body = self.body(4000)
                     if not isinstance(body, dict) or set(body) != {'ip', 'resolvers', 'authorized'} or body['authorized'] is not True:

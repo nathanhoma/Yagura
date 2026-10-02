@@ -14,6 +14,25 @@ def contained_range(cidr, scope):
     return any(requested.subnet_of(ipaddress.ip_network(item)) for item in normalize_scope(scope)['cidrs'])
 
 
+def discovery_chunks(cidr):
+    """Keep each low-rate Nmap invocation to at most sixteen addresses."""
+    network = ipaddress.ip_network(cidr, strict=False)
+    if network.version != 4:
+        raise ValueError('Discovery requires an IPv4 CIDR.')
+    return [str(part) for part in network.subnets(new_prefix=28)] if network.prefixlen < 28 else [str(network)]
+
+
+def discovery_progress(run):
+    chunks = run['chunks']
+    completed = sum(part['state'] == 'completed' for part in chunks)
+    remaining = next((part for part in chunks if part['state'] != 'completed'), None)
+    return dict(cidr=run['cidr'], total=len(chunks), completed=completed,
+                count=sum(part.get('count', 0) for part in chunks if part['state'] == 'completed'),
+                complete=remaining is None, nextCidr=remaining['cidr'] if remaining else None,
+                failed=bool(remaining and remaining['state'] == 'failed'),
+                error=remaining.get('error', '') if remaining else '')
+
+
 def resolver_allowed(ip, scope):
     """DNS queries never use system fallback or a public resolver."""
     return ip_allowed(ip, scope)

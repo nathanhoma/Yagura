@@ -3,13 +3,20 @@ import unittest
 
 from backend import findings as F
 from backend.analysis import scoped_document
-from backend.discovery import dns_review, parse_dns_answer
+from backend.discovery import discovery_chunks, dns_review, parse_dns_answer
 from backend.outbound import require_private_pin, require_web_origin
 from backend.sensitive import redact, sanitize_document
 from backend.web_inventory import inventory
 
 
 class SafetyReviewTests(unittest.TestCase):
+    def test_discovery_chunks_never_expand_requested_range(self):
+        parts = discovery_chunks('100.96.1.0/24')
+        self.assertEqual(len(parts), 16)
+        self.assertEqual((parts[0], parts[-1]), ('100.96.1.0/28', '100.96.1.240/28'))
+        self.assertEqual(discovery_chunks('100.96.1.21/32'), ['100.96.1.21/32'])
+        self.assertEqual(discovery_chunks('100.96.1.16/28'), ['100.96.1.16/28'])
+
     def test_secret_values_are_removed_from_output_and_marked_evidence(self):
         self.assertNotIn('abc123', redact('password=abc123 Authorization: Bearer abc123 {"access_token":"abc123"}'))
         parsed = F.parse_import(dict(tool='evidence', ip='10.1.51.5', title='Credential found',
