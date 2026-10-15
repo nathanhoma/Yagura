@@ -8,7 +8,7 @@ from urllib.parse import urljoin
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from backend.web_contacts import fetch_page, origin
+from backend.web_contacts import fetch_page, origin, evidence_url
 from backend.workflow import is_local_ip
 
 PATHS = ('/.git/HEAD', '/WEB-INF/web.xml', '/WEB-INF/classes/struts.xml', '/WEB-INF/lib/', '/docs', '/yagura-not-found-baseline')
@@ -22,12 +22,12 @@ def inspect(url, ip):
     for path in PATHS:
         target = urljoin(url, path)
         try:
-            status, headers, body = fetch_page(target, ip, 4)
-            pages.append(dict(url=target, status=status, contentType=headers.get('content-type', ''),
-                              location=headers.get('location', ''), excerpt=body[:3000], truncated=len(body) > 3000))
+            status, headers, body = fetch_page(target, ip, 4, accept_error=True)
+            pages.append(dict(url=evidence_url(target), status=status, contentType=headers.get('content-type', ''),
+                              location=evidence_url(headers.get('location', '')), excerpt=body[:3000], truncated=len(body) > 3000))
         except Exception as exc:
-            errors.append(dict(url=target, error=str(exc)[:200]))
-    return dict(url=url, ip=ip, pages=pages, errors=errors,
+            errors.append(dict(url=evidence_url(target), error=str(exc)[:200]))
+    return dict(url=evidence_url(url), ip=ip, pages=pages, errors=errors,
                 coverage='Six fixed GET probes including a not-found comparison. No redirects followed. Responses require interpretation; status alone is not exposure proof.')
 
 

@@ -9,11 +9,15 @@ import urllib.request
 from .workflow import is_local_ip
 
 
-def private_url(value):
+def private_url(value, trusted_https_host=''):
     try:
         url = urllib.parse.urlsplit(value)
         host = (url.hostname or '').lower()
-        return url.scheme in ('http', 'https') and bool(url.netloc) and not url.username and not url.password and not url.query and not url.fragment and (host == 'localhost' or host.endswith('.localhost') or host == '::1' or is_local_ip(host))
+        if url.scheme not in ('http', 'https') or not url.netloc or url.username or url.password or url.query or url.fragment:
+            return False
+        if host == 'localhost' or host.endswith('.localhost') or host == '::1' or is_local_ip(host):
+            return True
+        return url.scheme == 'https' and bool(trusted_https_host) and host == trusted_https_host.lower()
     except ValueError:
         return False
 
@@ -30,8 +34,9 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class LlmService:
-    def __init__(self, base='', model='', key='', timeout_ms=30000):
+    def __init__(self, base='', model='', key='', timeout_ms=30000, trusted_https_host=''):
         self.base, self.model, self.key = base.rstrip('/'), model, key
+        self.trusted_https_host = trusted_https_host
         self.resolved_model = ''
         try:
             self.timeout = max(.1, min(60, int(timeout_ms) / 1000))
@@ -40,13 +45,13 @@ class LlmService:
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
 
     def configuration(self):
-        return dict(configured=bool(self.base), allowed=bool(self.base) and private_url(self.base), model=self.model or self.resolved_model or None, autoSelect=not bool(self.model))
+        return dict(configured=bool(self.base), allowed=bool(self.base) and private_url(self.base, self.trusted_https_host), model=self.model or self.resolved_model or None, autoSelect=not bool(self.model))
 
     def assert_configuration(self):
         if not self.base:
             raise LlmError('not-configured', 'Configure LLM_BASE_URL to enable the local model.')
-        if not private_url(self.base):
-            raise LlmError('blocked', 'LLM_BASE_URL must use localhost or a private IP without credentials, query strings, or fragments.')
+        if not private_url(self.base, self.trusted_https_host):
+            raise LlmError('blocked', 'LLM_BASE_URL must use localhost, a private IP, or the explicitly trusted HTTPS host, without credentials, query strings, or fragments.')
 
     def call(self, route, body=None):
         self.assert_configuration()

@@ -19,14 +19,10 @@ class AddedChecksTests(unittest.TestCase):
         self.assertEqual(workflow(self.doc)['candidates'], [])
         candidates = workflow(self.doc, '192.168.56.10/32')['candidates']
         kinds = {c['catalogId'] for c in candidates}
-        self.assertTrue({'dns-ptr', 'web-inventory', 'ssh-hostkey', 'smb-security', 'nfs-exports', 'nuclei-git'} <= kinds)
+        self.assertTrue({'web-inventory', 'ssh-hostkey', 'smb-security', 'nfs-exports'} <= kinds)
+        self.assertFalse({'dns-ptr', 'nuclei-git'} & kinds)
         ssh = next(c for c in candidates if c['catalogId'] == 'ssh-hostkey')
         self.assertEqual(invocation(ssh, self.doc), ('nmap', ['-n', '-Pn', '-sT', '-p', '22', '--script', 'ssh-hostkey', '-oX', '-', '192.168.56.10'], 'nmap'))
-        nuclei = next(c for c in candidates if c['catalogId'] == 'nuclei-git')
-        program, args, tool = invocation(nuclei, self.doc)
-        self.assertEqual((program, tool), ('nuclei', 'nuclei-git'))
-        self.assertEqual(args[:2], ['-u', 'http://192.168.56.10:80/'])
-        self.assertIn('-dr', args)
 
     def test_existing_check_results_become_evidence(self):
         candidates = workflow(self.doc, '192.168.56.10/32')['candidates']
@@ -35,6 +31,26 @@ class AddedChecksTests(unittest.TestCase):
         F.merge_parsed(self.doc, parsed)
         self.assertTrue(any(f['title'] == 'HTTP response headers' and f['serviceId'] == headers['serviceIds'][0] for f in self.doc['findings']))
         self.assertEqual(self.doc['evidence'][-1]['output'], 'HTTP/1.1 200 OK\nServer: lab\n')
+
+    def test_nxc_smb_is_fixed_to_recorded_445_and_links_evidence(self):
+        candidates = workflow(self.doc, '192.168.56.10/32')['candidates']
+        checks = {c['catalogId']: c for c in candidates if c['catalogId'].startswith('nxc-')}
+        self.assertEqual(set(checks), {'nxc-smb', 'nxc-smb-shares'})
+        self.assertEqual(invocation(checks['nxc-smb'], self.doc),
+                         ('nxc', ['smb', '192.168.56.10', '--port', '445'], 'nxc-smb'))
+        self.assertEqual(invocation(checks['nxc-smb-shares'], self.doc),
+                         ('nxc', ['smb', '192.168.56.10', '--port', '445', '-u', '', '-p', '', '--shares'], 'nxc-smb-shares'))
+        with self.assertRaises(ValueError):
+            edited_invocation(checks['nxc-smb'], self.doc, checks['nxc-smb']['command'] + ' -x whoami')
+        output = 'SMB 192.168.56.10 445 LAB [*] Windows (signing:True)\n'
+        parsed = parse_check_result(checks['nxc-smb'], 'nxc-smb', output)
+        F.merge_parsed(self.doc, parsed)
+        self.assertEqual(parsed['findings'][0]['title'], 'NetExec SMB host')
+        self.assertEqual(parsed['findings'][0]['serviceId'], checks['nxc-smb']['serviceIds'][0])
+        self.assertEqual(parsed['evidence'][0]['output'], output)
+        self.assertFalse(any(c['catalogId'] == 'nxc-smb' for c in workflow(self.doc, '192.168.56.10/32')['candidates']))
+        with self.assertRaises(ValueError):
+            parse_check_result(checks['nxc-smb'], 'nxc-smb', output.replace('192.168.56.10', '192.168.56.11'))
 
     def test_httpx_and_nuclei_jsonl_import(self):
         ip = '192.168.56.10'
@@ -46,7 +62,8 @@ class AddedChecksTests(unittest.TestCase):
             self.assertTrue(any(f['title'] == title for f in parsed['findings']))
 
     def test_curated_nuclei_output_is_linked_and_scoped(self):
-        candidate = next(c for c in workflow(self.doc, '192.168.56.10/32')['candidates'] if c['catalogId'] == 'nuclei-git')
+        inventory = next(c for c in workflow(self.doc, '192.168.56.10/32')['candidates'] if c['catalogId'] == 'web-inventory')
+        candidate = {**inventory, 'catalogId': 'nuclei-git', 'command': 'nuclei -u http://192.168.56.10:80/'}
         row = {'template-id': 'yagura-git-head-exposure', 'matched-at': 'http://192.168.56.10:80/.git/HEAD'}
         parsed = parse_check_result(candidate, 'nuclei-git', json.dumps(row))
         self.assertIn('matched', parsed['findings'][0]['detail'])
@@ -74,9 +91,9 @@ class AddedChecksTests(unittest.TestCase):
         headers = by_kind['http-headers']
         original = headers['command']
         changed = original.replace('--max-time 5', '--max-time 8').replace(':80/', ':80/docs')
-        self.assertEqual(edited_invocation(headers, self.doc, changed)[1][-1], 'http://192.168.56.10:80/docs')
+        self.assertEqual(edited_invocation(headers, self.doc, changed)[1][-1], 'http://www.lab.test:80/docs')
         for command in (changed.replace('192.168.56.10', '192.168.56.11'),
-                        changed.replace('curl -I', 'curl -k -I'),
+                        changed.replace('curl -q', 'curl -k -q'),
                         changed.replace('--max-time 8', '--max-time 100'),
                         changed + ' ; id'):
             with self.subTest(command=command), self.assertRaises(ValueError):

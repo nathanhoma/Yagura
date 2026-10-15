@@ -105,6 +105,63 @@ class PathAnalysisTests(unittest.TestCase):
         self.assertEqual(validated['hypotheses'], [])
         self.assertEqual(validated['rejected'], 1)
 
+    def test_format_error_identifies_fields_without_echoing_values(self):
+        with self.assertRaises(LlmError) as caught:
+            validate_result({'assessments': 'private-value', 'suggestions': {}}, self.context)
+        self.assertEqual(caught.exception.code, 'invalid-response')
+        self.assertIn('assessments (str)', str(caught.exception))
+        self.assertIn('suggestions (dict)', str(caught.exception))
+        self.assertNotIn('private-value', str(caught.exception))
+        with self.assertRaises(LlmError) as missing:
+            validate_result({'analysis': {'assessments': [], 'suggestions': []}}, self.context)
+        self.assertIn('assessments (missing)', str(missing.exception))
+        self.assertIn('suggestions (missing)', str(missing.exception))
+        with self.assertRaises(LlmError) as malformed:
+            validate_result({'assessments': [{'findingIds': [{}], 'evidenceIds': [[]],
+                                              'interpretation': 'bad', 'uncertainties': []}],
+                             'suggestions': [{'candidateId': []}]}, self.context)
+        self.assertEqual(malformed.exception.code, 'ungrounded-response')
+
+    def test_analysis_retries_format_once_and_keeps_evidence_validation(self):
+        anchor = next(f for f in self.context['findings'] if f['kind'] == 'host')
+        valid = dict(assessments=[dict(findingIds=[anchor['id']], evidenceIds=anchor['evidenceIds'],
+                                        interpretation='Recorded host responds', uncertainties=[])], suggestions=[])
+        llm = Mock()
+        llm.complete.side_effect = [dict(model='mock-model', data={'analysis': valid}),
+                                    dict(model='mock-model', data=valid)]
+        result = analyze(self.doc, {'authorizedCidr': '192.168.56.0/24'}, llm)
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(len(result['assessments']), 1)
+        self.assertEqual(llm.complete.call_count, 2)
+        retry_messages = llm.complete.call_args_list[1].args[0]
+        self.assertEqual(len(retry_messages), 3)
+        self.assertIn('top-level arrays', retry_messages[-1]['content'])
+        self.assertTrue(any('retried' in warning for warning in result['warnings']))
+
+    def test_analysis_falls_back_after_two_format_errors_and_never_retries_transport(self):
+        llm = Mock()
+        llm.configuration.return_value = {'model': 'mock-model'}
+        llm.complete.return_value = dict(model='mock-model', data={'analysis': {}})
+        result = analyze(self.doc, {'authorizedCidr': '192.168.56.0/24'}, llm)
+        self.assertEqual(result['status'], 'fallback')
+        self.assertEqual(result['error']['code'], 'invalid-response')
+        self.assertIn('assessments (missing)', result['error']['message'])
+        self.assertEqual(llm.complete.call_count, 2)
+        llm.reset_mock()
+        llm.complete.return_value = dict(model='mock-model', data={
+            'assessments': [{'findingIds': ['invented'], 'evidenceIds': ['invented'],
+                             'interpretation': 'Unsupported claim', 'uncertainties': []}],
+            'suggestions': []})
+        result = analyze(self.doc, {'authorizedCidr': '192.168.56.0/24'}, llm)
+        self.assertEqual(result['status'], 'fallback')
+        self.assertEqual(result['error']['code'], 'ungrounded-response')
+        self.assertEqual(llm.complete.call_count, 2)
+        llm.reset_mock()
+        llm.complete.side_effect = LlmError('unreachable', 'Model endpoint unavailable.')
+        result = analyze(self.doc, {'authorizedCidr': '192.168.56.0/24'}, llm)
+        self.assertEqual(result['status'], 'fallback')
+        self.assertEqual(llm.complete.call_count, 1)
+
     def test_speculative_step_requires_a_cited_anchor_and_named_gap(self):
         path = copy.deepcopy(self.path)
         path['steps'][1]['findingIds'] = []
@@ -209,5 +266,6 @@ class InvestigationChecksTests(unittest.TestCase):
     def test_redirect_loop_is_bounded(self):
         fetch = Mock(side_effect=lambda url, *_: (302, {'location':url + 'x'}, ''))
         report = inventory('http://lab.test/', '192.168.56.10', fetch)
-        self.assertEqual(fetch.call_count, 12)
-        self.assertEqual(report['pages'], [])
+        self.assertEqual(fetch.call_count, 5)
+        self.assertEqual(len(report['pages']), 5)
+        self.assertEqual(len(report['redirects']), 5)

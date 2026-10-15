@@ -18,6 +18,10 @@ EMAIL = re.compile(r"(?<![\w.+%-])[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0
 DNS_NAME = re.compile(r'(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*', re.I)
 
 
+def evidence_url(url):
+    return urlsplit(url)._replace(query='', fragment='').geturl()[:512]
+
+
 def website_url(host, service):
     name = str(host.get('name') or '').rstrip('.')
     name = name.lower() if DNS_NAME.fullmatch(name) else host['ip']
@@ -65,8 +69,15 @@ class PageParser(HTMLParser):
         return list(dict.fromkeys(a for value in [''.join(self.text), *self.mailto] for a in EMAIL.findall(value) if len(a) <= 254))
 
 
-def fetch_page(url, ip, timeout):
+def fetch_page(url, ip, timeout, accept_error=False):
     """Connect to the scoped IP while retaining the site's Host header and TLS SNI."""
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError as exc:
+        raise ValueError('A literal local IPv4 pin is required.') from exc
+    local_ranges = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16')
+    if address.version != 4 or not any(address in ipaddress.ip_network(net) for net in local_ranges):
+        raise ValueError('Public web destinations are blocked.')
     scheme, hostname, port = origin(url)
     connection = http.client.HTTPConnection(hostname, port, timeout=timeout)
     response = None
@@ -84,10 +95,12 @@ def fetch_page(url, ip, timeout):
         headers = {key.lower(): value for key, value in headers.items()}
         if status in (301, 302, 303, 307, 308):
             return status, headers, ''
-        if status != 200:
+        if status != 200 and not accept_error:
             raise ValueError(f'HTTP {status}')
         mime = headers.get('content-type', '').split(';')[0].strip().lower()
         if mime not in ('text/html', 'application/xhtml+xml', 'text/plain'):
+            if accept_error:
+                return status, headers, ''
             raise ValueError('Page is not HTML or plain text.')
         if headers.get('content-encoding', 'identity').lower() != 'identity':
             raise ValueError('Compressed responses are not supported.')
@@ -120,7 +133,7 @@ def fetch_page(url, ip, timeout):
 
 def discover(url, ip, fetcher=fetch_page):
     address = ipaddress.ip_address(ip)
-    local_ranges = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '169.254.0.0/16')
+    local_ranges = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16')
     if address.version != 4 or not any(address in ipaddress.ip_network(net) for net in local_ranges):
         raise ValueError('Use the recorded private/local IPv4 target.')
     site = origin(url)
@@ -133,7 +146,7 @@ def discover(url, ip, fetcher=fetch_page):
         seen.add(current)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            errors.append(dict(url=current, error='Overall time limit reached.'))
+            errors.append(dict(url=evidence_url(current), error='Overall time limit reached.'))
             break
         try:
             status, headers, text = fetcher(current, str(address), min(5, remaining))
@@ -148,15 +161,15 @@ def discover(url, ip, fetcher=fetch_page):
                 parser.text.append(text)
             else:
                 parser.feed(text)
-            visited.append(current)
+            visited.append(evidence_url(current))
             for email in parser.addresses():
                 key = email.casefold()
                 if key not in contacts:
                     if len(contacts) >= MAX_CONTACTS:
                         break
                     contacts[key] = dict(address=email, sources=[])
-                if current not in contacts[key]['sources']:
-                    contacts[key]['sources'].append(current)
+                if evidence_url(current) not in contacts[key]['sources']:
+                    contacts[key]['sources'].append(evidence_url(current))
             # Breadth-first crawl, contact/about links first, within the same origin.
             for href in sorted(parser.links, key=lambda h: not re.search(r'contact|about', h, re.I)):
                 try:
@@ -167,9 +180,9 @@ def discover(url, ip, fetcher=fetch_page):
                 except ValueError:
                     continue
         except (OSError, ValueError, http.client.HTTPException) as exc:
-            errors.append(dict(url=current, error=str(exc)[:200]))
+            errors.append(dict(url=evidence_url(current), error=str(exc)[:200]))
     count = len(contacts)
-    return dict(url=url, connectedIp=str(address), contacts=list(contacts.values()), count=count,
+    return dict(url=evidence_url(url), connectedIp=str(address), contacts=list(contacts.values()), count=count,
                 status='exactly_one' if count == 1 else 'multiple' if count else 'none', pages=visited, errors=errors,
                 coverage='At most 5 same-origin pages, 256 KB each, 25 distinct addresses. No JavaScript execution. Counts apply only to inspected pages; whole-site uniqueness is not established.')
 

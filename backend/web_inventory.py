@@ -1,10 +1,12 @@
 """Bounded, IP-pinned inventory of a recorded web service."""
 import argparse
+import hashlib
 from html.parser import HTMLParser
 import ipaddress
 import json
 from pathlib import Path
 import sys
+import uuid
 from urllib.parse import urljoin, urlsplit, parse_qsl
 
 if __package__ in (None, ''):
@@ -45,15 +47,23 @@ class PageLinks(HTMLParser):
             self.title += data
 
 
-def inventory(url, ip, fetch=fetch_page):
+def evidence_url(url):
+    """Keep route context but never persist query values from auth redirects."""
+    return urlsplit(url)._replace(query='', fragment='').geturl()[:512]
+
+
+def inventory(url, ip, fetch=None):
     address = ipaddress.ip_address(ip)
     if address.version != 4 or not any(address in ipaddress.ip_network(net) for net in
-                                       ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '169.254.0.0/16')):
+                                       ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16')):
         raise ValueError('Use the recorded private/local IPv4 target.')
     origin(url)
+    native_fetch = fetch is None
+    if fetch is None:
+        fetch = lambda address, pinned_ip, timeout: fetch_page(address, pinned_ip, timeout, accept_error=True)
     site = urlsplit(url)
     pending, seen, pages, routes, errors = [url], set(), [], set(), []
-    forms, parameters = [], []
+    forms, parameters, redirects = [], [], []
     while pending and len(seen) < 12 and len(pages) < 5:
         current = pending.pop(0)
         if current in seen:
@@ -62,27 +72,36 @@ def inventory(url, ip, fetch=fetch_page):
         try:
             status, headers, body = fetch(current, ip, 5)
             location = headers.get('location', '')
-            if 300 <= status < 400 and location:
-                dest = urlsplit(urljoin(current, location))
-                if (dest.scheme, dest.netloc) == (site.scheme, site.netloc):
-                    pending.append(dest._replace(fragment='').geturl())
-                else:
-                    errors.append(f'External redirect skipped: {current}')
-                continue
             parser = PageLinks()
             if 'html' in headers.get('content-type', '').lower():
                 parser.feed(body)
-            pages.append(dict(url=current, status=status, title=parser.title.strip()[:160],
-                              server=headers.get('server', '')[:160], contentType=headers.get('content-type', '')[:160]))
+            page = dict(url=evidence_url(current), status=status, title=parser.title.strip()[:160],
+                        server=headers.get('server', '')[:160], contentType=headers.get('content-type', '')[:160],
+                        bytes=len(body.encode()), bodyHash=hashlib.sha256(body.encode()).hexdigest() if body else '')
+            pages.append(page)
+            if 300 <= status < 400 and location:
+                dest = urlsplit(urljoin(current, location))
+                same_site = (dest.scheme, dest.netloc) == (site.scheme, site.netloc)
+                # Never retain token-bearing query values in redirect evidence.
+                clean = dest._replace(query='', fragment='').geturl()
+                redirects.append(dict(fromUrl=evidence_url(current), toUrl=clean[:512], status=status,
+                                      queryNames=list(dict.fromkeys(name[:160] for name, _ in parse_qsl(dest.query, max_num_fields=100))),
+                                      followed=same_site))
+                if same_site:
+                    pending.append(dest._replace(fragment='').geturl())
+                continue
             for form in parser.forms:
                 if len(forms) < 20:
-                    forms.append({**form, 'page': current, 'action': urljoin(current, form['action'])})
+                    action = urlsplit(urljoin(current, form['action']))
+                    forms.append({**form, 'page': evidence_url(current), 'action': action._replace(query='', fragment='').geturl()[:512],
+                                  'actionQueryNames': list(dict.fromkeys(name[:160] for name, _ in parse_qsl(action.query, max_num_fields=100))),
+                                  'sameOrigin': (action.scheme, action.netloc) == (site.scheme, site.netloc)})
             for href in parser.links:
                 dest = urlsplit(urljoin(current, href))
                 if (dest.scheme, dest.netloc) != (site.scheme, site.netloc):
                     continue
                 if dest.query and len(parameters) < 50:
-                    parameters.append(dict(url=dest._replace(fragment='').geturl()[:512], names=list(dict.fromkeys(name[:160] for name, _ in parse_qsl(dest.query, max_num_fields=100)))))
+                    parameters.append(dict(url=dest._replace(query='', fragment='').geturl()[:512], names=list(dict.fromkeys(name[:160] for name, _ in parse_qsl(dest.query, max_num_fields=100)))))
                 route = dest._replace(query='', fragment='').geturl()
                 if len(route) > 512:
                     continue
@@ -90,9 +109,26 @@ def inventory(url, ip, fetch=fetch_page):
                 if len(pending) < 12 and route not in seen and any(word in dest.path.lower() for word in ('login', 'sign', 'auth', 'api', 'contact', 'about')):
                     pending.append(route)
         except Exception as exc:
-            errors.append(f'{current}: {str(exc)[:160]}')
-    return dict(url=url, ip=ip, pages=pages, routes=sorted(routes)[:50], forms=forms, parameters=parameters, errors=errors,
-                coverage='Up to five same-origin pages; linked routes are discovered, not all fetched.')
+            errors.append(f'{evidence_url(current)}: {str(exc)[:160]}')
+    baseline = None
+    if native_fetch:
+        marker = 'yagura-missing-' + uuid.uuid4().hex
+        probe = f'{site.scheme}://{site.netloc}/{marker}'
+        try:
+            status, headers, body = fetch(probe, ip, 5)
+            parser = PageLinks()
+            if 'html' in headers.get('content-type', '').lower():
+                parser.feed(body)
+            baseline = dict(status=status, title=parser.title.strip()[:160], bytes=len(body.encode()),
+                            bodyHash=hashlib.sha256(body.encode()).hexdigest() if body else '')
+            for page in pages:
+                page['looksLikeNotFound'] = bool(page['status'] == baseline['status'] and
+                    page['title'] == baseline['title'] and abs(page['bytes'] - baseline['bytes']) <= max(100, baseline['bytes'] // 10))
+        except Exception as exc:
+            errors.append(f'Not-found baseline: {str(exc)[:160]}')
+    return dict(url=url, ip=ip, pages=pages, routes=sorted(routes)[:50], forms=forms, parameters=parameters,
+                redirects=redirects, notFoundBaseline=baseline, errors=errors,
+                coverage='Up to five same-origin pages plus one not-found baseline. Redirects to other origins are recorded but never followed; forms are not submitted.')
 
 
 if __name__ == '__main__':

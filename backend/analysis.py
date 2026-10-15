@@ -1,10 +1,10 @@
 import hashlib
-import ipaddress
 import json
 
 from .findings import now
 from .llm import LlmError
 from .workflow import workflow
+from .scope import approved_host, normalize_scope
 
 
 MAX_FINDINGS, MAX_EVIDENCE, MAX_CONTEXT = 60, 12, 10000
@@ -23,7 +23,7 @@ explanations visible; do not force an end-to-end chain when evidence is missing.
 Propose investigations that would support or refute each path. Investigations may go beyond the
 executable candidate catalog, but describe an objective and expected evidence, not shell commands.
 Use only supplied hostIds. Unknown destinations belong in missingEvidence, not invented hosts.
-Select at most three executable suggestions by exact candidateId. Do not execute anything.
+Select at most one executable suggestion by exact candidateId. Do not execute anything.
 Return very short JSON with assessments (at most two), suggestions (at most one), and hypotheses (at most one):
 {"assessments":[{"findingIds":["id"],"evidenceIds":["id"],"interpretation":"text","uncertainties":["text"]}],
 "suggestions":[{"candidateId":"id"}],
@@ -35,25 +35,42 @@ Use at most two steps and one investigation per hypothesis. Cite at most two fin
 two evidence IDs per item. Keep each text field under 100 characters. Do not repeat a fact in
 multiple fields. Omit a path if the supplied evidence does not suggest a concrete connection.
 Prefer one well-supported path to several speculative paths. Empty arrays are valid.
+The top-level JSON object must contain assessments and suggestions arrays. Do not wrap
+the result in an analysis, result, or data object, and do not replace arrays with text.
+For a selected group, cover evidence from more than one host when relevant. Separate
+what is established, what evidence is missing, and which safe next check would
+distinguish competing explanations. Never include credential values in your reply.
 """
+
+RETRY_PROMPT = """Return only one JSON object with top-level arrays named assessments,
+suggestions, and hypotheses. Empty arrays are valid. Do not wrap the object or use prose.
+Use only the findingIds, evidenceIds, candidateIds, and hostIds supplied in the context.
+Every nonempty item must follow the required structure and cite its supporting evidence."""
 
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
 
-def scoped_document(doc, host_id=None, authorized_cidr=None):
+def scoped_document(doc, host_id=None, authorized_cidr=None, host_ids=None):
     if host_id is not None and (not isinstance(host_id, str) or not any(f['kind'] == 'host' and f['id'] == host_id for f in doc['findings'])):
         raise ValueError('Choose an existing hostId.')
+    if host_ids is not None and (host_id is not None or not isinstance(host_ids, list) or
+                                 not 1 <= len(host_ids) <= 8 or len(host_ids) != len(set(host_ids)) or
+                                 any(not isinstance(item, str) for item in host_ids)):
+        raise ValueError('Choose one to eight distinct hostIds, or one hostId.')
+    scope = normalize_scope(authorized_cidr)
+    ids = {f['id'] for f in doc['findings'] if f['kind'] == 'host' and not f.get('local') and
+           (not scope['cidrs'] or approved_host(f, scope))}
+    if host_id and host_id not in ids:
+        raise ValueError('Selected host is outside the authorized scope.')
+    if host_ids is not None and not set(host_ids) <= ids:
+        raise ValueError('A selected host is outside the authorized or approved scope.')
     if host_id:
-        findings = [f for f in doc['findings'] if f['id'] == host_id or f.get('hostId') == host_id]
-    elif authorized_cidr:
-        network = ipaddress.ip_network(authorized_cidr, strict=False)
-        ids = {f['id'] for f in doc['findings'] if f['kind'] == 'host' and not f.get('local') and
-               f.get('ip') and ipaddress.ip_address(f['ip']) in network}
-        findings = [f for f in doc['findings'] if f['id'] in ids or f.get('hostId') in ids]
-    else:
-        findings = doc['findings']
+        ids = {host_id}
+    elif host_ids is not None:
+        ids = set(host_ids)
+    findings = [f for f in doc['findings'] if f['id'] in ids or f.get('hostId') in ids]
     ids = {e for f in findings for e in f['evidenceIds']}
     return dict(schemaVersion=doc['schemaVersion'], findings=findings, evidence=[e for e in doc['evidence'] if e['id'] in ids])
 
@@ -87,7 +104,19 @@ def build_context(doc, authorized_cidr=None):
     ranked = sorted((e for e in doc['evidence'] if e['id'] in scores),
                     key=lambda e: (evidence_priority(e), scores[e['id']], e.get('observedAt', '')), reverse=True)
     chosen, signatures = [], set()
+    host_for = {f['id']: (f['id'] if f['kind'] == 'host' else f.get('hostId')) for f in doc['findings']}
+    evidence_hosts = {}
+    for finding in doc['findings']:
+        for evidence_id in finding['evidenceIds']:
+            evidence_hosts.setdefault(evidence_id, set()).add(host_for.get(finding['id']))
+    selected_hosts = set()
+    balanced = []
     for ev in ranked:
+        host = next(iter(sorted(h for h in evidence_hosts.get(ev['id'], set()) - selected_hosts if h)), None)
+        if host:
+            balanced.append(ev)
+            selected_hosts.add(host)
+    for ev in balanced + ranked:
         signature = (ev['tool'], ev.get('command', ''), hashlib.sha256(ev['output'].encode()).hexdigest())
         if signature in signatures:
             continue
@@ -160,8 +189,13 @@ def build_context(doc, authorized_cidr=None):
 
 
 def validate_result(data, context):
-    if not isinstance(data.get('assessments'), list) or not isinstance(data.get('suggestions'), list):
-        raise LlmError('invalid-response', 'Model analysis must contain assessments and suggestions arrays.')
+    if not isinstance(data, dict):
+        raise LlmError('invalid-response', 'Model analysis must be a JSON object.')
+    invalid = [f"{key} ({'missing' if key not in data else type(data[key]).__name__})"
+               for key in ('assessments', 'suggestions') if not isinstance(data.get(key), list)]
+    if invalid:
+        raise LlmError('invalid-response',
+                       'Model analysis requires top-level arrays: ' + ', '.join(invalid) + '.')
     findings = {f['id']: f for f in context['findings']}
     evidence = {e['id'] for e in context['evidence']}
     candidates = {c['id']: c for c in context['candidates']}
@@ -173,8 +207,10 @@ def validate_result(data, context):
         fids, eids, unknown = a.get('findingIds'), a.get('evidenceIds'), a.get('uncertainties')
         valid = (isinstance(fids, list) and bool(fids) and isinstance(eids, list) and bool(eids) and
                  isinstance(a.get('interpretation'), str) and bool(a['interpretation'].strip()) and isinstance(unknown, list) and
-                 all(isinstance(x, str) for x in unknown) and all(x in findings for x in fids) and
-                 all(x in evidence and any(x in findings[f]['evidenceIds'] for f in fids) for x in eids) and
+                 all(isinstance(x, str) for x in unknown) and
+                 all(isinstance(x, str) and x in findings for x in fids) and
+                 all(isinstance(x, str) and x in evidence and
+                     any(x in findings[f]['evidenceIds'] for f in fids) for x in eids) and
                  all(any(e in eids for e in findings[f]['evidenceIds']) for f in fids))
         if not valid:
             rejected += 1
@@ -182,7 +218,7 @@ def validate_result(data, context):
         assessments.append(dict(findingIds=list(dict.fromkeys(fids)), evidenceIds=list(dict.fromkeys(eids)), interpretation=a['interpretation'].strip()[:1000], uncertainties=[x[:300] for x in unknown[:5]]))
     for s in data['suggestions']:
         cid = s.get('candidateId') if isinstance(s, dict) else None
-        if cid not in candidates:
+        if not isinstance(cid, str) or cid not in candidates:
             rejected += 1
         elif cid not in used:
             used.add(cid)
@@ -283,13 +319,14 @@ def built_in(doc):
 
 
 def analyze(doc, scope, llm, model=''):
-    selected = scoped_document(doc, scope.get('hostId'), scope.get('authorizedCidr'))
-    context = build_context(selected, scope.get('authorizedCidr'))
+    authorized = scope.get('authorizedScope', scope.get('authorizedCidr'))
+    selected = scoped_document(doc, scope.get('hostId'), authorized, scope.get('hostIds'))
+    context = build_context(selected, authorized)
     hosts = [f for f in selected['findings'] if f['kind'] == 'host']
     services = [f for f in selected['findings'] if f['kind'] == 'service']
     observations = [f for f in selected['findings'] if f['kind'] == 'observation']
     result = dict(schemaVersion=1, generatedAt=now(), snapshotId=fingerprint(selected),
-                  scope=dict(hostId=scope.get('hostId'), authorizedCidr=scope.get('authorizedCidr'), hostIds=[h['id'] for h in hosts], ips=[h['ip'] for h in hosts]),
+                  scope=dict(hostId=scope.get('hostId'), selectedHostIds=scope.get('hostIds'), authorizedScope=normalize_scope(authorized), hostIds=[h['id'] for h in hosts], ips=[h['ip'] for h in hosts]),
                   counts=dict(hosts=len(hosts), services=len(services), observations=len(observations), evidence=len(selected['evidence'])),
                   summary=f'Recorded {len(hosts)} hosts, {len(services)} services, and {len(observations)} observations.',
                   context=dict(findingIds=[f['id'] for f in context['findings']], evidenceIds=[e['id'] for e in context['evidence']], truncated=context['truncated']),
@@ -297,12 +334,21 @@ def analyze(doc, scope, llm, model=''):
     if not selected['findings']:
         return {**result, 'status': 'no-findings', 'source': 'built-in', 'model': None, 'message': 'No findings are recorded in this scope.'}
     try:
-        response = llm.complete([dict(role='system', content=PROMPT), dict(role='user', content=encoded(context))], max_tokens=2400, model=model)
-        validated = validate_result(response['data'], context)
+        messages = [dict(role='system', content=PROMPT), dict(role='user', content=encoded(context))]
+        for attempt in range(2):
+            try:
+                response = llm.complete(messages, max_tokens=2400, model=model)
+                validated = validate_result(response['data'], context)
+                break
+            except LlmError as exc:
+                if attempt or exc.code not in ('invalid-response', 'ungrounded-response'):
+                    raise
+                result['warnings'].append('Model response failed validation once; retried with a stricter format request.')
+                messages = [*messages, dict(role='user', content=RETRY_PROMPT)]
         if validated['rejected']:
             result['warnings'].append(f"{validated['rejected']} unsupported model item(s) were rejected.")
         return {**result, 'status': 'complete', 'source': 'local model', 'model': response['model'], 'assessments': validated['assessments'], 'suggestions': validated['suggestions'], 'hypotheses': validated['hypotheses'], 'message': 'Evidence references and next commands were verified. Interpretations are model hypotheses for review.'}
     except Exception as exc:
         return {**result, 'status': 'fallback', 'source': 'built-in', 'model': model or llm.configuration()['model'],
                 'error': dict(code=getattr(exc, 'code', 'model-error'), message=str(exc)), 'assessments': built_in(selected),
-                'suggestions': workflow(selected, scope.get('authorizedCidr'))['candidates'][:6], 'message': 'Local model analysis is unavailable. Showing recorded facts and built-in next checks.'}
+                'suggestions': workflow(selected, authorized)['candidates'][:6], 'message': 'Local model analysis is unavailable. Showing recorded facts and built-in next checks.'}
