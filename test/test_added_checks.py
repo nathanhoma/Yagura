@@ -32,6 +32,26 @@ class AddedChecksTests(unittest.TestCase):
         self.assertTrue(any(f['title'] == 'HTTP response headers' and f['serviceId'] == headers['serviceIds'][0] for f in self.doc['findings']))
         self.assertEqual(self.doc['evidence'][-1]['output'], 'HTTP/1.1 200 OK\nServer: lab\n')
 
+    def test_nxc_smb_is_fixed_to_recorded_445_and_links_evidence(self):
+        candidates = workflow(self.doc, '192.168.56.10/32')['candidates']
+        checks = {c['catalogId']: c for c in candidates if c['catalogId'].startswith('nxc-')}
+        self.assertEqual(set(checks), {'nxc-smb', 'nxc-smb-shares'})
+        self.assertEqual(invocation(checks['nxc-smb'], self.doc),
+                         ('nxc', ['smb', '192.168.56.10', '--port', '445'], 'nxc-smb'))
+        self.assertEqual(invocation(checks['nxc-smb-shares'], self.doc),
+                         ('nxc', ['smb', '192.168.56.10', '--port', '445', '-u', '', '-p', '', '--shares'], 'nxc-smb-shares'))
+        with self.assertRaises(ValueError):
+            edited_invocation(checks['nxc-smb'], self.doc, checks['nxc-smb']['command'] + ' -x whoami')
+        output = 'SMB 192.168.56.10 445 LAB [*] Windows (signing:True)\n'
+        parsed = parse_check_result(checks['nxc-smb'], 'nxc-smb', output)
+        F.merge_parsed(self.doc, parsed)
+        self.assertEqual(parsed['findings'][0]['title'], 'NetExec SMB host')
+        self.assertEqual(parsed['findings'][0]['serviceId'], checks['nxc-smb']['serviceIds'][0])
+        self.assertEqual(parsed['evidence'][0]['output'], output)
+        self.assertFalse(any(c['catalogId'] == 'nxc-smb' for c in workflow(self.doc, '192.168.56.10/32')['candidates']))
+        with self.assertRaises(ValueError):
+            parse_check_result(checks['nxc-smb'], 'nxc-smb', output.replace('192.168.56.10', '192.168.56.11'))
+
     def test_httpx_and_nuclei_jsonl_import(self):
         ip = '192.168.56.10'
         for tool, row, title in [

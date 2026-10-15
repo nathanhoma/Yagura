@@ -73,6 +73,10 @@ def invocation(candidate, doc):
         return sys.executable, [str(ROOT / 'backend/web_contacts.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-contacts'
     if kind == 'smb-shares':
         return 'smbclient', ['-L', f'//{ip}', '-N'], 'smb-shares'
+    if kind == 'nxc-smb' and len(services) == 1 and services[0]['port'] == 445 and services[0].get('protocol') == 'tcp' and services[0].get('state') == 'open':
+        return 'nxc', ['smb', ip, '--port', '445'], 'nxc-smb'
+    if kind == 'nxc-smb-shares' and len(services) == 1 and services[0]['port'] == 445 and services[0].get('protocol') == 'tcp' and services[0].get('state') == 'open':
+        return 'nxc', ['smb', ip, '--port', '445', '-u', '', '-p', '', '--shares'], 'nxc-smb-shares'
     if kind == 'dns-ptr':
         return 'getent', ['hosts', ip], 'dns-ptr'
     if kind == 'web-exposure':
@@ -186,6 +190,12 @@ def parse_check_result(candidate, tool, output):
         if not re.search(r'\bSharename\b|\bDisk\b|\bIPC\b', output, re.I):
             raise ValueError('No SMB share listing found.')
         add('SMB share listing', output)
+    elif tool in ('nxc-smb', 'nxc-smb-shares'):
+        target_ip = shlex.split(candidate['command'])[2]
+        rows = [line for line in output.splitlines() if re.match(r'^SMB\s+' + re.escape(target_ip) + r'\s+445\s+', line)]
+        if not rows:
+            raise ValueError('No NetExec SMB response from the selected target.')
+        add('NetExec SMB host' if tool == 'nxc-smb' else 'NetExec anonymous SMB shares', '\n'.join(rows)[:4000])
     elif tool == 'dns-ptr':
         lines = [line.strip() for line in output.splitlines() if line.strip()]
         if not lines or not any(line.split()[0] == candidate['command'].split()[-1] for line in lines if line.split()):
@@ -432,7 +442,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 if self.command == 'GET' and path == '/api/health':
                     result = workspace.runner('nmap', ['--version'], 2.5)
                     base = workspace.llm.base
-                    return self.send_json(200, dict(ready=True, nmap=result['ok'], nuclei=bool(shutil.which('nuclei')),
+                    return self.send_json(200, dict(ready=True, nmap=result['ok'], nxc=bool(shutil.which('nxc')), nuclei=bool(shutil.which('nuclei')),
                                                     llm='configured' if base and private_url(base, getattr(workspace.llm, 'trusted_https_host', '')) else 'blocked: URL must point to localhost, a private IP, or the trusted HTTPS host' if base else 'not configured'))
                 if self.command == 'GET' and path == '/api/scope':
                     with workspace.lock:

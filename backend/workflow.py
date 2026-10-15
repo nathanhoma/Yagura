@@ -26,6 +26,8 @@ COMMAND_CATALOG = [
     dict(id='http-headers', title='Inspect HTTP headers', command="curl -q --noproxy '*' --resolve {web_host}:{port}:{host} -I --max-time 5 {url}", when='Review headers for a recorded open web service, pinned to its recorded IP.'),
     dict(id='web-contacts', title='Inspect published website contacts', command='python3 -m backend.web_contacts --url {url} --ip {host}', when='Review email addresses in page text and mailto links on a recorded web service; inspect up to five same-origin pages.'),
     dict(id='smb-shares', title='List SMB shares', command='smbclient -L //{host} -N', when='Check advertised shares for a recorded open SMB service.'),
+    dict(id='nxc-smb', title='Inspect SMB host with NetExec', command='nxc smb {host} --port 445', when='Record SMB host metadata from a recorded open 445/tcp service.'),
+    dict(id='nxc-smb-shares', title='Check anonymous SMB shares with NetExec', command="nxc smb {host} --port 445 -u '' -p '' --shares", when='Try one anonymous SMB login and list accessible shares on a recorded open 445/tcp service.'),
     dict(id='dns-ptr', title='Resolve host PTR name', command='getent hosts {host}', when='Record the locally resolved reverse DNS name for a scoped host.'),
     dict(id='web-inventory', title='Inventory web pages and routes', command='python3 -m backend.web_inventory --url {url} --ip {host}', when='Record HTTP status, title, server, and up to 50 same-origin links from five pages.'),
     dict(id='ssh-hostkey', title='Inspect SSH host key', command='nmap -n -Pn -sT -p {port} --script ssh-hostkey -oX - {host}', when='Read the SSH host key on a recorded open SSH service.'),
@@ -95,6 +97,11 @@ def workflow(doc, authorized_scope=None):
                     add('smb-shares', host, [s], f"Recorded open {port}/tcp ({name or 'SMB-associated port'}) supports share enumeration.")
                     if not any(o.get('title') == 'smb2-security-mode' and o.get('serviceId') == s['id'] for o in observations):
                         add('smb-security', host, [s], f"Inspect SMB security mode on {port}/tcp.", port=port)
+                if port == 445:
+                    if not any(o.get('title') == 'NetExec SMB host' and o.get('serviceId') == s['id'] for o in observations):
+                        add('nxc-smb', host, [s], 'Record SMB host metadata on the approved 445/tcp service.')
+                    if not any(o.get('title') == 'NetExec anonymous SMB shares' and o.get('serviceId') == s['id'] for o in observations):
+                        add('nxc-smb-shares', host, [s], 'Check one anonymous SMB session and its visible shares on 445/tcp.')
                 if port == 22 or name == 'ssh':
                     if not any(o.get('title') == 'ssh-hostkey' and o.get('serviceId') == s['id'] for o in observations):
                         add('ssh-hostkey', host, [s], f"Read the host key on recorded SSH service {port}/tcp.", port=port)
