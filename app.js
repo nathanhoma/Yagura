@@ -3,7 +3,7 @@ const $=s=>document.querySelector(s);
 let findings=[],evidence=[],catalog=[],map={targets:[],candidates:[]},previewPayload=null,toastTimer;
 const runResults=new Map();
 let currentSuggestions=[];
-let autoPlan=null,autoRunning=false,autoStop=false;
+let autoPlan=null,autoRunning=false,autoStop=false,autoCurrentCheck='',autoStartedAt=null;
 const autoKinds=['ping','nmap-ports','nmap-service','http-headers','ssh-hostkey','dns-ptr'];
 function checkOutcome(result){return result.outcome==='no-response'?'No response':result.outcome==='completed'?'Completed':result.outcome==='failed'?'Failed':result.ok?'Completed':'Failed';}
 let emailContacts=[],emailDrafts=[],activeDraft=null,draftDirty=false,draftBusy=false;
@@ -151,6 +151,7 @@ $('#startAuto').onclick=async()=>{
   if(!plan||autoRunning)return;
   if(!$('#checksAuthorized').checked){$('#autoState').textContent='Confirm authorization above before starting.';$('#checksAuthorized').focus();return;}
   autoRunning=true;autoStop=false;
+  autoStartedAt=new Date().toISOString();
   $('#startAuto').disabled=true;$('#previewAuto').disabled=true;$('#autoHost').disabled=true;$('#stopAuto').disabled=false;
   let completed=0,stopReason='All listed checks completed.';
   try{
@@ -164,6 +165,7 @@ $('#startAuto').onclick=async()=>{
       const current=fresh.candidates.find(c=>c.id===check.id&&c.hostId===plan.hostId&&c.command===check.command);
       if(!current){stopReason='A listed check or target changed. Stopped before the next check.';break;}
       $('#autoState').textContent=`Running ${completed+1} of ${plan.checks.length}: ${check.title}…`;
+      autoCurrentCheck=check.command;
       const result=await post('/api/checks/run',{candidateId:check.id,authorized:true,authorizedScope:JSON.parse(plan.scope)});
       completed++;
       $('#autoResults').innerHTML+=`<div class="cmd"><strong>${esc(check.title)} · ${checkOutcome(result)}</strong><p class="status">${result.imported?'Findings updated':'No findings imported'}${result.warning?' · '+esc(result.warning):''}</p><code>${esc(result.command)}</code><pre>${esc(result.output||result.stderr||'No output.')}</pre></div>`;
@@ -174,6 +176,8 @@ $('#startAuto').onclick=async()=>{
   }catch(e){stopReason=e.message;}
   finally{
     autoRunning=false;autoPlan=null;
+    autoCurrentCheck='';
+    autoStartedAt=null;
     $('#stopAuto').disabled=true;$('#startAuto').disabled=true;$('#autoHost').disabled=false;
     updateAutoHosts();
     $('#autoState').textContent=`${completed} of ${plan.checks.length} check(s) finished. ${stopReason} Preview again for another run.`;
@@ -282,4 +286,31 @@ async function loadAutonomyHistory(){try{const data=await api('/api/autonomy');c
 $('#autonomyHistory').onchange=()=>{autonomyCurrent=$('#autonomyHistory').value;renderAutonomy();autonomySummaries();};
 $('#autonomyStart').onclick=async()=>{const hostId=$('#autonomyHost').value;if(!hostId||!checkScope()){$('#autonomyState').textContent='Choose an approved host under the saved scope.';return;}if(!$('#autonomyAuthorized').checked){$('#autonomyState').textContent='Confirm authorization for this run first.';return;}const button=$('#autonomyStart');button.disabled=true;$('#autonomyState').textContent='Starting AI-led run…';try{const run=await post('/api/autonomy/start',{hostId,model:$('#autonomyModel').value,authorizedScope:checkScope(),authorized:true});autonomyCurrent=run.id;$('#autonomyAuthorized').checked=false;await loadAutonomyHistory();}catch(e){$('#autonomyState').textContent=e.message;button.disabled=false;}};
 $('#autonomyStop').onclick=async()=>{const active=autonomyRuns.find(r=>r.status==='running');if(!active)return;$('#autonomyStop').disabled=true;try{await post('/api/autonomy/stop',{runId:active.id});$('#autonomyState').textContent='Stop requested; waiting for the current check.';}catch(e){$('#autonomyState').textContent=e.message;}};
-load();loadAutonomyHistory();loadCheckProposals();setInterval(()=>{if(autonomyRuns.some(r=>r.status==='running'))loadAutonomyHistory();},2500);
+let activityData={active:[],recent:[]},activityError='',activityLoading=false,activityFocus=null;
+function activityElapsed(started){if(!started)return '';const seconds=Math.max(0,Math.floor((Date.now()-Date.parse(started))/1000));return Number.isFinite(seconds)?seconds<60?seconds+'s':Math.floor(seconds/60)+'m '+String(seconds%60).padStart(2,'0')+'s':'';}
+function activityCard(row){
+  const progress=row.progress,hasProgress=progress&&Number.isFinite(progress.completed)&&Number.isFinite(progress.total)&&progress.total>0;
+  const pct=hasProgress?Math.min(100,Math.max(0,Math.round(100*progress.completed/progress.total))):0;
+  const label=row.state==='running'?'Running':row.outcome==='no-response'?'No response':row.outcome==='completed'?'Completed':row.outcome==='stopped'?'Stopped':'Failed';
+  return '<article class="activity-entry"><strong>'+esc(row.title||row.kind)+'</strong><p class="activity-meta">'+esc(label)+' · '+esc(row.kind)+(row.target?' · '+esc(row.target):'')+(row.state==='running'?' · '+esc(activityElapsed(row.startedAt)):' · '+esc(date(row.endedAt)))+'</p>'+(row.detail?'<p>'+esc(row.detail)+'</p>':'')+(row.command?'<code>'+esc(row.command)+'</code>':'')+(hasProgress?'<p class="activity-meta">'+esc(progress.completed)+' / '+esc(progress.total)+' '+esc(progress.unit||'steps')+'</p><div class="activity-progress" aria-label="'+esc(progress.completed)+' of '+esc(progress.total)+' '+esc(progress.unit||'steps')+'"><span style="width:'+pct+'%"></span></div>':'')+'</article>';
+}
+function renderActivity(){
+  const local=[];
+  if(autoRunning&&autoPlan)local.push({kind:'browser run',title:'Short automatic check run',target:recordLabel(findings.find(f=>f.id===autoPlan.hostId)||{title:'Selected host'}),command:autoCurrentCheck,detail:$('#autoState').textContent,progress:{completed:$('#autoResults').children.length,total:autoPlan.checks.length,unit:'checks'},state:'running',startedAt:autoStartedAt});
+  if(!$('#stopScanBtn').disabled)local.push({kind:'browser run',title:'Scoped discovery sequence',target:$('#scanTarget').value,detail:$('#scanState').textContent,state:'running'});
+  const active=[...local,...activityData.active],count=active.length;
+  $('#activityToggleText').textContent=activityError?'Activity ?':count?count+' running':'Activity';
+  $('#activityPulse').classList.toggle('running',!!count&&!activityError);
+  $('#activityPulse').classList.toggle('error',!!activityError);
+  $('#activitySummary').textContent=activityError?'Status unavailable: '+activityError:count?count+' operation(s) in progress.':'No operations running.';
+  $('#activityActive').innerHTML=activityError?'<div class="empty">Live status is unavailable. Retrying…</div>':active.length?active.map(activityCard).join(''):'<div class="empty">Nothing is running right now.</div>';
+  $('#activityRecent').innerHTML=activityData.recent.length?activityData.recent.map(activityCard).join(''):'<div class="empty">No recent server activity.</div>';
+}
+async function refreshActivity(){if(activityLoading)return;activityLoading=true;try{activityData=await api('/api/activity');activityError='';}catch(e){activityError=e.message;}finally{activityLoading=false;renderActivity();}}
+function openActivity(){activityFocus=document.activeElement;$('#activityBackdrop').hidden=false;$('#activityDrawer').hidden=false;document.body.classList.add('activity-open');$('#activityToggle').setAttribute('aria-expanded','true');renderActivity();$('#activityClose').focus();}
+function closeActivity(){$('#activityBackdrop').hidden=true;$('#activityDrawer').hidden=true;document.body.classList.remove('activity-open');$('#activityToggle').setAttribute('aria-expanded','false');(activityFocus||$('#activityToggle')).focus();}
+$('#activityToggle').onclick=()=>$('#activityDrawer').hidden?openActivity():closeActivity();
+$('#activityClose').onclick=closeActivity;
+$('#activityBackdrop').onclick=closeActivity;
+document.addEventListener('keydown',event=>{if($('#activityDrawer').hidden||$('#reviewDialog').open)return;if(event.key==='Escape'){event.preventDefault();closeActivity();}else if(event.key==='Tab'){event.preventDefault();$('#activityClose').focus();}});
+load();loadAutonomyHistory();loadCheckProposals();refreshActivity();setInterval(()=>{refreshActivity();if(autonomyRuns.some(r=>r.status==='running'))loadAutonomyHistory();},2500);

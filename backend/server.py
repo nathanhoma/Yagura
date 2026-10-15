@@ -25,6 +25,7 @@ from .sensitive import redact, sanitize_document
 from .outbound import require_target, require_web_origin
 from .autonomy import AutonomyController
 from .check_proposals import CheckProposals
+from .activity import ActivityTracker
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -253,6 +254,7 @@ class Workspace:
         self.active_checks = set()
         self.active_analyses = {}
         self.active_discoveries = set()
+        self.activity = ActivityTracker()
         self.autonomy = AutonomyController(self)
         self.check_proposals = CheckProposals(self, edited_invocation)
 
@@ -369,6 +371,8 @@ class Workspace:
                 program, args, tool = invocation(candidate, doc)
                 command = candidate['command']
             self.active_checks.add(candidate['id'])
+            activity_id = self.activity.begin('check', candidate['title'], command, host.get('name') or host['ip'],
+                                              'Command running')
         try:
             result = self.runner(program, args, timeout)
             output, stderr = str(result.get('stdout') or '')[:100000], str(result.get('stderr') or '')[:3000]
@@ -393,9 +397,21 @@ class Workspace:
                     warning = f'Output was not imported: {exc}'
             outcome = ('no-response' if imported and no_response else
                        'completed' if result['ok'] and imported and not warning else 'failed')
+            if outcome == 'no-response':
+                message = 'No ICMP reply; host state is not proven down.'
+            elif warning:
+                message = warning
+            elif result['ok']:
+                message = 'Evidence imported.' if imported else 'No importable evidence.'
+            else:
+                message = stderr or 'Command failed.'
+            self.activity.finish(activity_id, outcome, message)
             return dict(candidateId=candidate['id'], command=redact(command), ok=result['ok'], outcome=outcome,
                         output=redact(output), stderr=redact(stderr), imported=imported, warning=redact(warning),
                         evidenceIds=evidence_ids)
+        except Exception as exc:
+            self.activity.finish(activity_id, 'failed', str(exc))
+            raise
         finally:
             with self.lock:
                 self.active_checks.discard(candidate['id'])
@@ -518,6 +534,8 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(200, scope)
                 if self.command == 'GET' and path == '/api/llm/health':
                     return self.send_json(200, workspace.llm.health())
+                if self.command == 'GET' and path == '/api/activity':
+                    return self.send_json(200, workspace.activity.snapshot())
                 if self.command == 'GET' and path == '/api/autonomy':
                     return self.send_json(200, workspace.autonomy.history())
                 if self.command == 'GET' and path == '/api/check-proposals':
@@ -595,6 +613,9 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             event = threading.Event()
                             workspace.active_analyses[key] = event
                             owner = True
+                            target = scope.get('hostId') or ', '.join(scope.get('hostIds', [])) or 'All scoped findings'
+                            activity_id = workspace.activity.begin('analysis', 'Analyze findings', target=target,
+                                detail='AI is reviewing saved evidence.')
                     if owner:
                         try:
                             result = analyze(sanitize_document(doc), scope, workspace.llm, body.get('model', ''))
@@ -604,8 +625,10 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                                     result['suggestions'] = []
                                 workspace.save_analysis(result)
                                 event.result = result
+                            workspace.activity.finish(activity_id, 'completed', f"Analysis {result.get('status', 'completed')}.")
                         except Exception as exc:
                             event.error = exc
+                            workspace.activity.finish(activity_id, 'failed', str(exc))
                         finally:
                             with workspace.lock:
                                 del workspace.active_analyses[key]
@@ -636,8 +659,16 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         workspace.save(doc)
                     return self.send_json(201, {**sanitize_document(doc), 'summary': summary, 'warnings': parsed['warnings']})
                 if self.command == 'POST' and path == '/api/discovery/local':
-                    address = workspace.runner('ip', ['-j', '-4', 'addr'], 15)
-                    neighbor = workspace.runner('ip', ['-j', '-4', 'neigh'], 15)
+                    activity_id = workspace.activity.begin('local', 'Read server network state',
+                        'ip -j -4 addr / ip -j -4 neigh', detail='Reading interfaces and neighbor table.')
+                    try:
+                        address = workspace.runner('ip', ['-j', '-4', 'addr'], 15)
+                        workspace.activity.update(activity_id, detail='Interfaces read; checking neighbors.')
+                        neighbor = workspace.runner('ip', ['-j', '-4', 'neigh'], 15)
+                    except Exception as exc:
+                        workspace.activity.finish(activity_id, 'failed', str(exc))
+                        raise
+                    workspace.activity.finish(activity_id, 'completed', 'Local network state read.')
                     time, errors = F.now(), []
                     with workspace.lock:
                         doc = workspace.load()
@@ -668,7 +699,14 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         raise ValueError('Choose an authorized domain name and internal resolvers.')
                     with workspace.lock:
                         scope = workspace.load_scope()
-                    seed = name_discovery(body['name'], body['resolvers'], scope, workspace.runner)
+                    activity_id = workspace.activity.begin('dns', 'Look up authorized hostname',
+                        target=body['name'], detail='Querying approved internal resolvers.')
+                    try:
+                        seed = name_discovery(body['name'], body['resolvers'], scope, workspace.runner)
+                    except Exception as exc:
+                        workspace.activity.finish(activity_id, 'failed', str(exc))
+                        raise
+                    workspace.activity.finish(activity_id, 'completed', 'Name lookup finished; private addresses remain quarantined.')
                     with workspace.lock:
                         if workspace.load_scope() != scope:
                             raise ValueError('Scope changed during name discovery. Results were not saved.')
@@ -718,6 +756,12 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         workspace.save_discovery(data)
                         workspace.active_discoveries.add(key)
                         chunk = part['cidr']
+                        progress = discovery_progress(run)
+                        activity_id = workspace.activity.begin('discovery', 'Discover target hosts',
+                            f'nmap -n -sn --max-rate 5 --max-retries 1 -oX - {chunk}', cidr,
+                            f"Scanning segment {chunk}.",
+                            progress=dict(completed=progress['completed'], total=progress['total'], unit='segments'))
+                    activity_finished = False
                     try:
                         args = ['-n', '-sn', '--max-rate', '5', '--max-retries', '1', '-oX', '-', chunk]
                         result = workspace.runner('nmap', args, 90)
@@ -750,6 +794,9 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             workspace.save_discovery(data)
                             progress = discovery_progress(run)
                         response = {**progress, 'hosts': hosts, 'chunk': chunk, 'quarantined': True, 'outcome': 'completed'}
+                        workspace.activity.update(activity_id, progress=dict(completed=progress['completed'], total=progress['total'], unit='segments'))
+                        workspace.activity.finish(activity_id, 'completed', f"Segment complete; {len(hosts)} host(s) quarantined.")
+                        activity_finished = True
                     except (ValueError, OSError) as exc:
                         with workspace.lock:
                             if workspace.load_scope() != scope:
@@ -761,7 +808,11 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             workspace.save_discovery(data)
                             progress = discovery_progress(run)
                         response = {**progress, 'hosts': [], 'quarantined': True, 'outcome': 'failed'}
+                        workspace.activity.finish(activity_id, 'failed', str(exc))
+                        activity_finished = True
                     finally:
+                        if not activity_finished:
+                            workspace.activity.finish(activity_id, 'failed', 'Discovery segment ended unexpectedly.')
                         with workspace.lock:
                             workspace.active_discoveries.discard(key)
                     return self.send_json(200, response)
@@ -774,7 +825,14 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         row = next((h for h in workspace.load_discovery()['hosts'] if h.get('ip') == body['ip'] and normalize_scope(h.get('scope')) == scope), None)
                         if row is None:
                             raise ValueError('Discover this IP inside the saved scope first.')
-                    review = dns_review(body['ip'], body['resolvers'], scope, workspace.runner, row.get('seedName'))
+                    activity_id = workspace.activity.begin('dns', 'Review internal DNS',
+                        target=body['ip'], detail='Comparing PTR and A answers from approved resolvers.')
+                    try:
+                        review = dns_review(body['ip'], body['resolvers'], scope, workspace.runner, row.get('seedName'))
+                    except Exception as exc:
+                        workspace.activity.finish(activity_id, 'failed', str(exc))
+                        raise
+                    workspace.activity.finish(activity_id, 'completed', 'DNS answers recorded for review.')
                     with workspace.lock:
                         if workspace.load_scope() != scope:
                             raise ValueError('Scope changed during DNS review.')
@@ -900,6 +958,8 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         return fallback('Built-in checks grounded in recorded findings. Local model is not configured.')
                     if not private_url(workspace.llm.base, getattr(workspace.llm, 'trusted_https_host', '')):
                         return fallback('Local model URL blocked. Built-in checks remain available.')
+                    activity_id = workspace.activity.begin('planning', 'Suggest next checks',
+                        detail='AI is ranking current scoped candidates.')
                     try:
                         ids = {x for c in available for x in c['findingIds']}
                         context = [{**f, 'detail': str(f.get('detail') or '')[:600]} for f in doc['findings'] if f['id'] in ids]
@@ -920,8 +980,10 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                                 break
                         if not suggestions and selected:
                             raise ValueError('Ungrounded response')
+                        workspace.activity.finish(activity_id, 'completed', f'{len(suggestions)} grounded check(s) selected.')
                         return self.send_json(200, dict(suggestions=suggestions, source='local model', model=response['model'], message='Local model selected recorded checks. Commands and evidence links were verified by the server.'))
                     except Exception:
+                        workspace.activity.finish(activity_id, 'failed', 'AI suggestion failed; using built-in checks.')
                         return fallback('Local model unavailable or returned invalid checks. Showing built-in checks.')
                 if self.command not in ('GET', 'HEAD'):
                     return self.send_json(405, {'error': 'Method not allowed.'})

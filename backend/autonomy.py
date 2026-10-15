@@ -30,6 +30,7 @@ class AutonomyController:
         self.file = workspace.findings_file.with_name('autonomy.json')
         self.stop_event = threading.Event()
         self.thread = None
+        self.activity_ids = {}
         self._recover()
 
     def _load(self):
@@ -82,6 +83,9 @@ class AutonomyController:
     def _finish(self, run_id, status, reason):
         self._event(run_id, dict(type='stop', reason=redact(reason)[:300]))
         self._update(run_id, status=status, stopReason=redact(reason)[:300], endedAt=now())
+        activity_id = self.activity_ids.pop(run_id, None)
+        if activity_id:
+            self.workspace.activity.finish(activity_id, 'completed' if status == 'completed' else 'stopped', reason)
 
     def start(self, host_id, scope, model=''):
         ws = self.workspace
@@ -108,6 +112,9 @@ class AutonomyController:
                        stopReason='', events=[])
             data['runs'] = [run] + data['runs'][:19]
             self._save(data)
+            self.activity_ids[run['id']] = ws.activity.begin('ai-run', 'AI-led investigation',
+                target=host.get('name') or host['ip'], detail='AI is choosing the next check.',
+                progress=dict(completed=0, total=MAX_CHECKS, unit='checks'))
             self.stop_event = threading.Event()
             self.thread = threading.Thread(target=self._worker, args=(run['id'], host_id, scope, model, self.stop_event),
                                            daemon=True, name='yagura-ai-checks')
@@ -170,6 +177,7 @@ class AutonomyController:
                                          title=candidate['title'], command=redact(candidate['command']),
                                          reason=redact(decision['reason'])[:300], expectedEvidence=redact(expected)[:300],
                                          findingIds=candidate['findingIds'], evidenceIds=candidate['evidenceIds'], model=response['model']))
+                ws.activity.update(self.activity_ids[run_id], detail=f"AI selected {candidate['title']}.")
                 if stop_event.is_set():
                     return self._finish(run_id, 'stopped', 'Stopped by operator before the selected check.')
                 remaining = MAX_SECONDS - (time.monotonic() - started)
@@ -182,6 +190,8 @@ class AutonomyController:
                                          outcome=result['outcome'], imported=result['imported'],
                                          evidenceIds=result['evidenceIds'], warning=redact(result['warning'])[:300],
                                          summary=redact(result['output'] or result['stderr'])[:280]))
+                ws.activity.update(self.activity_ids[run_id], detail=f"Check {step + 1}: {result['outcome']}. AI is reviewing the result.",
+                                   progress=dict(completed=step + 1, total=MAX_CHECKS, unit='checks'))
                 with ws.lock:
                     saved = sanitize_document(ws.load())
                 fresh = [e for e in saved['evidence'] if e['id'] in result['evidenceIds']]

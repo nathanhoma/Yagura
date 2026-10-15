@@ -87,9 +87,16 @@ class CheckProposals:
             context = build_context(scoped_document(doc, host_id, scope), scope)
             context['candidates'] = [{k: c[k] for k in ('id', 'title', 'catalogId', 'command', 'reason')}
                                      for c in candidates]
-        response = ws.llm.complete([{'role': 'system', 'content': PROMPT},
-                                    {'role': 'user', 'content': json.dumps({'request': redact(request), 'context': context}, ensure_ascii=False)}],
-                                   max_tokens=450, model=model)
+        activity_id = ws.activity.begin('planning', 'Create check proposal', target=host.get('name') or host['ip'],
+                                        detail='AI is translating the request into a command.')
+        try:
+            response = ws.llm.complete([{'role': 'system', 'content': PROMPT},
+                                        {'role': 'user', 'content': json.dumps({'request': redact(request), 'context': context}, ensure_ascii=False)}],
+                                       max_tokens=450, model=model)
+        except Exception as exc:
+            ws.activity.finish(activity_id, 'failed', str(exc))
+            raise
+        ws.activity.finish(activity_id, 'completed', 'AI response received; validating the proposal.')
         answer = response['data']
         if not isinstance(answer, dict) or not isinstance(answer.get('reason'), str) or not 1 <= len(answer['reason']) <= 400:
             raise ValueError('The AI did not return a valid explanation. Nothing was added.')

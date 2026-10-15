@@ -38,6 +38,17 @@ class HttpTests(unittest.TestCase):
             with exc:
                 return exc.code, json.load(exc)
 
+    def test_activity_endpoint_reports_live_and_finished_operations(self):
+        self.assertEqual(self.call('/api/activity')[1]['active'], [])
+        item = self.workspace.activity.begin('check', 'Test check', 'ping -c 3 100.96.1.70', '100.96.1.70')
+        status, data = self.call('/api/activity')
+        self.assertEqual(status, 200)
+        self.assertEqual(data['active'][0]['title'], 'Test check')
+        self.workspace.activity.finish(item, 'no-response', 'No reply')
+        data = self.call('/api/activity')[1]
+        self.assertEqual(data['active'], [])
+        self.assertEqual(data['recent'][0]['outcome'], 'no-response')
+
     def test_health_accepts_explicit_https_gateway(self):
         self.workspace.llm = LlmService('https://llm-gateway.xs.network/v1', trusted_https_host='llm-gateway.xs.network')
         self.assertEqual(self.call('/api/health')[1]['llm'], 'configured')
