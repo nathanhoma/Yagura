@@ -23,7 +23,7 @@ explanations visible; do not force an end-to-end chain when evidence is missing.
 Propose investigations that would support or refute each path. Investigations may go beyond the
 executable candidate catalog, but describe an objective and expected evidence, not shell commands.
 Use only supplied hostIds. Unknown destinations belong in missingEvidence, not invented hosts.
-Select at most three executable suggestions by exact candidateId. Do not execute anything.
+Select at most one executable suggestion by exact candidateId. Do not execute anything.
 Return very short JSON with assessments (at most two), suggestions (at most one), and hypotheses (at most one):
 {"assessments":[{"findingIds":["id"],"evidenceIds":["id"],"interpretation":"text","uncertainties":["text"]}],
 "suggestions":[{"candidateId":"id"}],
@@ -35,10 +35,17 @@ Use at most two steps and one investigation per hypothesis. Cite at most two fin
 two evidence IDs per item. Keep each text field under 100 characters. Do not repeat a fact in
 multiple fields. Omit a path if the supplied evidence does not suggest a concrete connection.
 Prefer one well-supported path to several speculative paths. Empty arrays are valid.
+The top-level JSON object must contain assessments and suggestions arrays. Do not wrap
+the result in an analysis, result, or data object, and do not replace arrays with text.
 For a selected group, cover evidence from more than one host when relevant. Separate
 what is established, what evidence is missing, and which safe next check would
 distinguish competing explanations. Never include credential values in your reply.
 """
+
+RETRY_PROMPT = """Return only one JSON object with top-level arrays named assessments,
+suggestions, and hypotheses. Empty arrays are valid. Do not wrap the object or use prose.
+Use only the findingIds, evidenceIds, candidateIds, and hostIds supplied in the context.
+Every nonempty item must follow the required structure and cite its supporting evidence."""
 
 
 def encoded(value):
@@ -182,8 +189,13 @@ def build_context(doc, authorized_cidr=None):
 
 
 def validate_result(data, context):
-    if not isinstance(data.get('assessments'), list) or not isinstance(data.get('suggestions'), list):
-        raise LlmError('invalid-response', 'Model analysis must contain assessments and suggestions arrays.')
+    if not isinstance(data, dict):
+        raise LlmError('invalid-response', 'Model analysis must be a JSON object.')
+    invalid = [f"{key} ({'missing' if key not in data else type(data[key]).__name__})"
+               for key in ('assessments', 'suggestions') if not isinstance(data.get(key), list)]
+    if invalid:
+        raise LlmError('invalid-response',
+                       'Model analysis requires top-level arrays: ' + ', '.join(invalid) + '.')
     findings = {f['id']: f for f in context['findings']}
     evidence = {e['id'] for e in context['evidence']}
     candidates = {c['id']: c for c in context['candidates']}
@@ -195,8 +207,10 @@ def validate_result(data, context):
         fids, eids, unknown = a.get('findingIds'), a.get('evidenceIds'), a.get('uncertainties')
         valid = (isinstance(fids, list) and bool(fids) and isinstance(eids, list) and bool(eids) and
                  isinstance(a.get('interpretation'), str) and bool(a['interpretation'].strip()) and isinstance(unknown, list) and
-                 all(isinstance(x, str) for x in unknown) and all(x in findings for x in fids) and
-                 all(x in evidence and any(x in findings[f]['evidenceIds'] for f in fids) for x in eids) and
+                 all(isinstance(x, str) for x in unknown) and
+                 all(isinstance(x, str) and x in findings for x in fids) and
+                 all(isinstance(x, str) and x in evidence and
+                     any(x in findings[f]['evidenceIds'] for f in fids) for x in eids) and
                  all(any(e in eids for e in findings[f]['evidenceIds']) for f in fids))
         if not valid:
             rejected += 1
@@ -204,7 +218,7 @@ def validate_result(data, context):
         assessments.append(dict(findingIds=list(dict.fromkeys(fids)), evidenceIds=list(dict.fromkeys(eids)), interpretation=a['interpretation'].strip()[:1000], uncertainties=[x[:300] for x in unknown[:5]]))
     for s in data['suggestions']:
         cid = s.get('candidateId') if isinstance(s, dict) else None
-        if cid not in candidates:
+        if not isinstance(cid, str) or cid not in candidates:
             rejected += 1
         elif cid not in used:
             used.add(cid)
@@ -320,8 +334,17 @@ def analyze(doc, scope, llm, model=''):
     if not selected['findings']:
         return {**result, 'status': 'no-findings', 'source': 'built-in', 'model': None, 'message': 'No findings are recorded in this scope.'}
     try:
-        response = llm.complete([dict(role='system', content=PROMPT), dict(role='user', content=encoded(context))], max_tokens=2400, model=model)
-        validated = validate_result(response['data'], context)
+        messages = [dict(role='system', content=PROMPT), dict(role='user', content=encoded(context))]
+        for attempt in range(2):
+            try:
+                response = llm.complete(messages, max_tokens=2400, model=model)
+                validated = validate_result(response['data'], context)
+                break
+            except LlmError as exc:
+                if attempt or exc.code not in ('invalid-response', 'ungrounded-response'):
+                    raise
+                result['warnings'].append('Model response failed validation once; retried with a stricter format request.')
+                messages = [*messages, dict(role='user', content=RETRY_PROMPT)]
         if validated['rejected']:
             result['warnings'].append(f"{validated['rejected']} unsupported model item(s) were rejected.")
         return {**result, 'status': 'complete', 'source': 'local model', 'model': response['model'], 'assessments': validated['assessments'], 'suggestions': validated['suggestions'], 'hypotheses': validated['hypotheses'], 'message': 'Evidence references and next commands were verified. Interpretations are model hypotheses for review.'}
