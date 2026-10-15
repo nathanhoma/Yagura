@@ -19,6 +19,7 @@ class SafetyReviewTests(unittest.TestCase):
 
     def test_secret_values_are_removed_from_output_and_marked_evidence(self):
         self.assertNotIn('abc123', redact('password=abc123 Authorization: Bearer abc123 {"access_token":"abc123"}'))
+        self.assertNotIn('cookie-secret', redact('Set-Cookie: session=cookie-secret\n{"Set-Cookie":"session=cookie-secret"}'))
         parsed = F.parse_import(dict(tool='evidence', ip='10.1.51.5', title='Credential found',
                                      output='password=abc123', sensitive=True))
         safe = sanitize_document(parsed)

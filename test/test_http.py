@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import shlex
 import tempfile
 import threading
 import unittest
@@ -36,6 +37,17 @@ class HttpTests(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             with exc:
                 return exc.code, json.load(exc)
+
+    def test_activity_endpoint_reports_live_and_finished_operations(self):
+        self.assertEqual(self.call('/api/activity')[1]['active'], [])
+        item = self.workspace.activity.begin('check', 'Test check', 'ping -c 3 100.96.1.70', '100.96.1.70')
+        status, data = self.call('/api/activity')
+        self.assertEqual(status, 200)
+        self.assertEqual(data['active'][0]['title'], 'Test check')
+        self.workspace.activity.finish(item, 'no-response', 'No reply')
+        data = self.call('/api/activity')[1]
+        self.assertEqual(data['active'], [])
+        self.assertEqual(data['recent'][0]['outcome'], 'no-response')
 
     def test_health_accepts_explicit_https_gateway(self):
         self.workspace.llm = LlmService('https://llm-gateway.xs.network/v1', trusted_https_host='llm-gateway.xs.network')
@@ -477,6 +489,91 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/email-drafts')[1]['drafts'], [])
         self.assertEqual(self.call('/api/email-drafts', 'POST', {'to': 'a@example.test\r\nBcc: b@example.test'})[0], 400)
         self.assertEqual(self.calls, [])
+
+    def test_ai_run_api_records_decision_and_requires_explicit_authorization(self):
+        class StopModel:
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, **kwargs):
+                return {'model': 'fake', 'data': {'candidateId': None, 'reason': 'Enough evidence for now.', 'expectedEvidence': ''}}
+        self.workspace.llm = StopModel()
+        self.assertEqual(self.call('/api/autonomy')[1], {'runs': []})
+        output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\n'
+                  'Host is up.\n80/tcp open http\nNmap done: 1 IP address (1 host up) scanned')
+        doc = self.call('/api/import', 'POST', {'tool': 'nmap', 'output': output})[1]
+        scope = self.call('/api/scope', 'PUT', {'cidrs': ['100.96.1.0/24'], 'domains': ['03.crimsonia.net']})[1]
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        stored = self.workspace.load()
+        next(f for f in stored['findings'] if f['id'] == host['id'])['approval'] = {
+            'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        self.workspace.save(stored)
+        payload = {'hostId': host['id'], 'authorizedScope': scope, 'authorized': True}
+        self.assertEqual(self.call('/api/autonomy/start', 'POST', {**payload, 'authorized': False})[0], 400)
+        status, run = self.call('/api/autonomy/start', 'POST', payload)
+        self.assertEqual(status, 202)
+        self.workspace.autonomy.thread.join(3)
+        history = self.call('/api/autonomy')[1]['runs']
+        self.assertEqual(history[0]['id'], run['id'])
+        self.assertEqual(history[0]['status'], 'completed')
+        self.assertEqual(self.calls, [])
+
+    def test_natural_language_check_proposal_api_requires_review_and_scope(self):
+        class ProposalModel:
+            def complete(self, messages, **kwargs):
+                row = next(c for c in json.loads(messages[1]['content'])['context']['candidates']
+                           if c['catalogId'] == 'http-headers')
+                return {'model': 'fake', 'data': {'candidateId': row['id'],
+                                                 'command': shlex.join(shlex.split(row['command'])),
+                                                 'reason': 'Inspect recorded web headers.'}}
+        self.workspace.llm = ProposalModel()
+        output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\n'
+                  'Host is up.\n80/tcp open http\nNmap done: 1 IP address (1 host up) scanned')
+        doc = self.call('/api/import', 'POST', {'tool': 'nmap', 'output': output})[1]
+        scope = self.call('/api/scope', 'PUT', {'cidrs': ['100.96.1.0/24'], 'domains': ['03.crimsonia.net']})[1]
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        stored = self.workspace.load()
+        next(f for f in stored['findings'] if f['id'] == host['id'])['approval'] = {
+            'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        self.workspace.save(stored)
+        self.assertEqual(self.call('/api/check-proposals')[1], {'proposals': []})
+        status, result = self.call('/api/check-proposals', 'POST', {
+            'hostId': host['id'], 'request': 'Check the web response headers', 'authorizedScope': scope})
+        self.assertEqual(status, 201)
+        self.assertTrue(result['added'])
+        self.assertEqual(self.calls, [])
+        proposal = self.call('/api/check-proposals')[1]['proposals'][0]
+        self.assertEqual(self.call('/api/check-proposals/run', 'POST', {
+            'proposalId': proposal['id'], 'authorized': False, 'authorizedScope': scope})[0], 400)
+        self.workspace.runner = lambda program, args, timeout: {'ok': True, 'stdout': 'HTTP/1.1 200 OK\n', 'stderr': ''}
+        self.assertEqual(self.call('/api/check-proposals/run', 'POST', {
+            'proposalId': proposal['id'], 'authorized': True, 'authorizedScope': scope})[1]['outcome'], 'completed')
+        class ManualModel:
+            def complete(self, messages, **kwargs):
+                return {'model': 'fake', 'data': {'candidateId': None,
+                                                 'command': 'custom-inspect --host web.03.crimsonia.net',
+                                                 'reason': 'Needs a manual tool.'}}
+        self.workspace.llm = ManualModel()
+        status, manual = self.call('/api/check-proposals', 'POST', {
+            'hostId': host['id'], 'request': 'Use a custom inspector on this host', 'authorizedScope': scope})
+        self.assertEqual(status, 201)
+        manual = manual['proposal']
+        self.assertEqual(manual['reviewStatus'], 'pending')
+        review = {'proposalId': manual['id'], 'expectedCommand': manual['command'],
+                  'decision': 'approve', 'acknowledged': False, 'authorizedScope': scope}
+        self.assertEqual(self.call('/api/check-proposals/review', 'POST', review)[0], 400)
+        self.assertEqual(self.call('/api/check-proposals/review', 'POST', {**review, 'acknowledged': True})[1]['reviewStatus'], 'approved')
+        self.assertEqual(self.call('/api/check-proposals/run', 'POST', {
+            'proposalId': manual['id'], 'authorized': True, 'authorizedScope': scope})[0], 400)
+        self.assertFalse(any(c['id'] == 'reviewed-' + manual['id'] for c in self.call('/api/commands')[1]['commands']))
+        record = {'proposalId': manual['id'], 'expectedCommand': manual['command'],
+                  'output': 'Observed local result', 'acknowledged': True, 'authorizedScope': scope}
+        status, saved = self.call('/api/check-proposals/manual-result', 'POST', record)
+        self.assertEqual(status, 201)
+        self.assertTrue(saved['manualEvidenceId'])
+        entry = next(c for c in self.call('/api/commands')[1]['commands'] if c['id'] == 'reviewed-' + manual['id'])
+        self.assertFalse(entry['executable'])
+        self.assertEqual(entry['evidenceId'], saved['manualEvidenceId'])
+        self.assertEqual(self.call('/api/check-proposals/manual-result', 'POST', record)[0], 400)
 
 
 if __name__ == '__main__':
