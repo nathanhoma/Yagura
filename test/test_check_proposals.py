@@ -91,6 +91,36 @@ class CheckProposalTests(unittest.TestCase):
             self.ws.check_proposals.run(proposal['id'], self.scope)
         self.assertEqual(self.calls, [])
 
+    def test_only_reviewed_and_recorded_manual_result_enters_reference_catalog(self):
+        self.ws.llm = ProposalModel('manual')
+        proposal = self.ws.check_proposals.propose(self.host['id'], self.scope,
+                                                   'Use a custom tool to inspect this host')['proposal']
+        self.assertEqual(self.ws.check_proposals.catalog_entries(), [])
+        with self.assertRaises(ValueError):
+            self.ws.check_proposals.record_manual_execution(proposal['id'], self.scope,
+                proposal['command'], 'observed output', True)
+        self.ws.check_proposals.review(proposal['id'], self.scope, proposal['command'], 'approve', True)
+        self.assertEqual(self.ws.check_proposals.catalog_entries(), [])
+        with self.assertRaises(ValueError):
+            self.ws.check_proposals.record_manual_execution(proposal['id'], self.scope,
+                'changed command', 'observed output', True)
+        with self.assertRaises(ValueError):
+            self.ws.check_proposals.record_manual_execution(proposal['id'], self.scope,
+                proposal['command'], 'observed output', False)
+        recorded = self.ws.check_proposals.record_manual_execution(proposal['id'], self.scope,
+            proposal['command'], 'observed output', True)
+        entries = self.ws.check_proposals.catalog_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertFalse(entries[0]['executable'])
+        self.assertEqual(entries[0]['command'], proposal['command'])
+        self.assertEqual(entries[0]['evidenceId'], recorded['manualEvidenceId'])
+        self.assertEqual(len(self.calls), 0)
+        evidence = next(ev for ev in self.ws.load()['evidence'] if ev['id'] == recorded['manualEvidenceId'])
+        self.assertTrue(evidence['sensitive'])
+        with self.assertRaises(ValueError):
+            self.ws.check_proposals.record_manual_execution(proposal['id'], self.scope,
+                proposal['command'], 'second output', True)
+
 
 if __name__ == '__main__':
     unittest.main()

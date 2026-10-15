@@ -564,6 +564,16 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/check-proposals/review', 'POST', {**review, 'acknowledged': True})[1]['reviewStatus'], 'approved')
         self.assertEqual(self.call('/api/check-proposals/run', 'POST', {
             'proposalId': manual['id'], 'authorized': True, 'authorizedScope': scope})[0], 400)
+        self.assertFalse(any(c['id'] == 'reviewed-' + manual['id'] for c in self.call('/api/commands')[1]['commands']))
+        record = {'proposalId': manual['id'], 'expectedCommand': manual['command'],
+                  'output': 'Observed local result', 'acknowledged': True, 'authorizedScope': scope}
+        status, saved = self.call('/api/check-proposals/manual-result', 'POST', record)
+        self.assertEqual(status, 201)
+        self.assertTrue(saved['manualEvidenceId'])
+        entry = next(c for c in self.call('/api/commands')[1]['commands'] if c['id'] == 'reviewed-' + manual['id'])
+        self.assertFalse(entry['executable'])
+        self.assertEqual(entry['evidenceId'], saved['manualEvidenceId'])
+        self.assertEqual(self.call('/api/check-proposals/manual-result', 'POST', record)[0], 400)
 
 
 if __name__ == '__main__':

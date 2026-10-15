@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 from .analysis import build_context, scoped_document
 from .findings import now, uid
+from . import findings as F
 from .outbound import require_target
 from .sensitive import redact, sanitize_document
 from .workflow import workflow
@@ -47,6 +48,14 @@ class CheckProposals:
         tmp.chmod(0o600)
         tmp.replace(self.file)
 
+    @staticmethod
+    def _prepend(data, proposal):
+        # Keep recorded manual runs even when the short proposal history rolls over.
+        history = data['proposals']
+        recorded = [item for item in history if item.get('manualEvidenceId')]
+        recent = [item for item in history if not item.get('manualEvidenceId')][:19]
+        data['proposals'] = [proposal] + recorded + recent
+
     def list(self):
         with self.workspace.lock:
             data = self._load()
@@ -69,6 +78,54 @@ class CheckProposals:
                     proposal['stale'] = (scope != proposal['scope'] or current is None or
                                          current['command'] != proposal['baseCommand'])
             return data
+
+    def catalog_entries(self):
+        """Executed manual commands are examples, never executable candidates."""
+        with self.workspace.lock:
+            evidence_ids = {ev['id'] for ev in self.workspace.load()['evidence']}
+            entries = []
+            for proposal in self._load()['proposals']:
+                evidence_id = proposal.get('manualEvidenceId')
+                if (proposal.get('kind') != 'manual' or proposal.get('reviewStatus') != 'approved' or
+                        not evidence_id or evidence_id not in evidence_ids):
+                    continue
+                entries.append(dict(id='reviewed-' + proposal['id'], title=proposal['title'],
+                                    command=proposal['command'], when='Previously reviewed and run manually for '
+                                    + (proposal['hostName'] or proposal['hostIp']) + '. Review again before reuse.',
+                                    tool='manual', stage='reviewed example', executable=False,
+                                    hostIp=proposal['hostIp'], evidenceId=evidence_id))
+            return entries
+
+    def record_manual_execution(self, proposal_id, scope, expected_command, output, acknowledged):
+        """Import an operator-attested result without executing the command."""
+        if acknowledged is not True or not isinstance(output, str) or not output.strip():
+            raise ValueError('Confirm the exact reviewed command was run and provide its output.')
+        if len(output.encode()) > 12000:
+            raise ValueError('Manual output exceeds the 12 KB limit; import a redacted excerpt.')
+        with self.workspace.lock:
+            data = self._load()
+            proposal = next((p for p in data['proposals'] if p['id'] == proposal_id), None)
+            if proposal is None or proposal.get('kind') != 'manual' or proposal.get('reviewStatus') != 'approved':
+                raise ValueError('Approve this manual proposal before recording execution.')
+            if proposal.get('manualEvidenceId'):
+                raise ValueError('Execution was already recorded for this proposal.')
+            if proposal['command'] != expected_command:
+                raise ValueError('The command changed since review; reopen the proposal.')
+            if self.workspace.load_scope() != scope or proposal['scope'] != scope:
+                raise ValueError('Scope changed; request a new proposal.')
+            doc = self.workspace.load()
+            host = next((f for f in doc['findings'] if f['kind'] == 'host' and f['id'] == proposal['hostId']), None)
+            if host is None or host['ip'] != proposal['hostIp'] or host.get('name', '') != proposal['hostName']:
+                raise ValueError('Host identity changed; request a new proposal.')
+            require_target(host, scope)
+            parsed = F.parse_import(dict(tool='evidence', title='Reviewed manual check output', ip=host['ip'],
+                                         command=proposal['command'], output=output, sensitive=True))
+            F.merge_parsed(doc, parsed)
+            self.workspace.save(doc)
+            proposal.update(manualEvidenceId=parsed['evidence'][0]['id'], manualRunAt=now(),
+                            lastOutcome='recorded', lastEvidenceIds=[parsed['evidence'][0]['id']])
+            self._save(data)
+            return {**proposal, 'stale': False}
 
     def propose(self, host_id, scope, request, model=''):
         ws = self.workspace
@@ -124,7 +181,7 @@ class CheckProposals:
                                 createdAt=now(), reviewStatus='pending', reviewedAt=None,
                                 lastOutcome=None, lastEvidenceIds=[])
                 data = self._load()
-                data['proposals'] = [proposal] + data['proposals'][:19]
+                self._prepend(data, proposal)
                 self._save(data)
             return {'added': True, 'proposal': {**proposal, 'stale': False}}
         candidate = next((c for c in candidates if c['id'] == answer['candidateId']), None)
@@ -157,7 +214,7 @@ class CheckProposals:
                             evidenceIds=current['evidenceIds'], createdAt=now(), lastOutcome=None,
                             lastEvidenceIds=[])
             data = self._load()
-            data['proposals'] = [proposal] + data['proposals'][:19]
+            self._prepend(data, proposal)
             self._save(data)
         return {'added': True, 'proposal': {**proposal, 'stale': False}}
 

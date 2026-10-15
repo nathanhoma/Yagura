@@ -570,6 +570,16 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         scope = workspace.load_scope() if body['decision'] == 'reject' else workspace.resolve_scope(body['authorizedScope'])
                     return self.send_json(200, workspace.check_proposals.review(
                         body['proposalId'], scope, body['expectedCommand'], body['decision'], body['acknowledged']))
+                if self.command == 'POST' and path == '/api/check-proposals/manual-result':
+                    body = self.body(16000)
+                    if (not isinstance(body, dict) or set(body) != {'proposalId', 'expectedCommand', 'output', 'acknowledged', 'authorizedScope'} or
+                            not isinstance(body['proposalId'], str) or not isinstance(body['expectedCommand'], str) or
+                            not isinstance(body['output'], str) or body['acknowledged'] is not True):
+                        raise ValueError('Confirm the reviewed command was run and provide its output.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                    return self.send_json(201, workspace.check_proposals.record_manual_execution(
+                        body['proposalId'], scope, body['expectedCommand'], body['output'], body['acknowledged']))
                 if self.command == 'POST' and path == '/api/autonomy/start':
                     body = self.body(4000)
                     if (not isinstance(body, dict) or set(body) - {'hostId', 'model', 'authorizedScope', 'authorized'} or
@@ -641,7 +651,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 if self.command == 'GET' and path in ('/api/findings', '/api/workflow', '/api/commands'):
                     with workspace.lock:
                         scope = workspace.resolve_scope(parse_qs(url.query).get('cidr', [None])[0]) if path == '/api/workflow' else None
-                        data = {'/api/findings': lambda: sanitize_document(workspace.load()), '/api/workflow': lambda: workflow(sanitize_document(workspace.load()), scope), '/api/commands': lambda: {'commands': COMMAND_CATALOG}}[path]()
+                        data = {'/api/findings': lambda: sanitize_document(workspace.load()), '/api/workflow': lambda: workflow(sanitize_document(workspace.load()), scope), '/api/commands': lambda: {'commands': COMMAND_CATALOG + workspace.check_proposals.catalog_entries()}}[path]()
                     return self.send_json(200, data)
                 if self.command == 'GET' and path == '/api/export':
                     with workspace.lock:
