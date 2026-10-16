@@ -103,6 +103,19 @@ class BackendTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             F.parse_import({'tool': 'nmap', 'output': '<nmaprun><host></nmaprun>'})
 
+    def test_nmap_pn_does_not_prove_reachability_without_open_port(self):
+        start = '<nmaprun args="nmap -Pn -sT --top-ports 100 192.168.56.10"><host><status state="up" reason="user-set"/><address addr="192.168.56.10" addrtype="ipv4"/><ports>'
+        end = '</ports></host></nmaprun>'
+        no_open = F.parse_import({'tool': 'nmap', 'output': start + '<extraports state="filtered" count="100"/>' + end})
+        host = next(f for f in no_open['findings'] if f['kind'] == 'host')
+        self.assertEqual(host['state'], 'unknown')
+        self.assertIn('assumed', next(f['detail'] for f in no_open['findings'] if f['kind'] == 'observation'))
+        opened = F.parse_import({'tool': 'nmap', 'output': start + '<port protocol="tcp" portid="80"><state state="open"/><service name="http"/></port>' + end})
+        self.assertEqual(next(f['state'] for f in opened['findings'] if f['kind'] == 'host'), 'up')
+        text = 'Nmap scan report for 192.168.56.10\nHost is up.\nAll 100 scanned ports on 192.168.56.10 are filtered\nNmap done: 1 IP address (1 host up) scanned\n'
+        parsed = F.parse_import({'tool': 'nmap', 'command': 'nmap -n -Pn -sT --top-ports 100 192.168.56.10', 'output': text})
+        self.assertEqual(next(f['state'] for f in parsed['findings'] if f['kind'] == 'host'), 'unknown')
+
     def test_model_adapter_selects_advertised_ids(self):
         llm = LlmService('http://127.0.0.1:11434/v1')
         calls = []

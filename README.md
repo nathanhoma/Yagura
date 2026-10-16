@@ -111,6 +111,8 @@ Python tests cover the parser, record merging, API persistence, scope limits, an
 
 ## Findings analysis backend
 
+Context selection reserves linked host and service evidence before higher-priority observations, so a dense web survey cannot crowd out every host from a group analysis. DNS approval records are shortened to the approved IP/name pair in the model input; the full resolver review remains in stored evidence. If no linked evidence fits, analysis reports `no-context` instead of a successful empty model result. The bounded context can still omit findings; check its truncation warning before relying on a cross-host hypothesis.
+
 Use **Findings analysis** in the UI to analyze all recorded findings or one host. **Test model connection** checks the endpoint and model list. Each interpretation links to the supplied findings and evidence and is labeled as a model hypothesis requiring review. Missing services, authentication evidence, and other uncertainties are returned separately. The latest analysis is saved locally in `data/analysis.json`; edits/imports mark it stale. The analysis service never runs target commands. The model's JSON-object mode does not enforce the analysis field schema: Yagura validates fields and evidence links itself, retries a malformed or ungrounded reply once with a stricter format request, then falls back to recorded facts if validation still fails. Error details name only invalid fields and types, not model-generated values.
 
 | API | Purpose |
