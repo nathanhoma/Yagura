@@ -171,13 +171,20 @@ def parse_import(data):
                     continue
                 status = node.find('status')
                 status = status.attrib if status is not None else {}
+                assumed_up = status.get('state') == 'up' and (status.get('reason') == 'user-set' or '-Pn' in str(command).split())
+                open_port = any((port.find('state') is not None and port.find('state').get('state') == 'open')
+                                for port in node.findall('./ports/port'))
+                state = 'unknown' if assumed_up and not open_port else status.get('state', 'unknown')
                 hostname = node.find('./hostnames/hostname')
                 name = hostname.get('name', '') if hostname is not None else ''
-                h = host(address.get('addr'), state=status.get('state', 'unknown'), name=name, mac=next((a.get('addr') for a in addresses if a.get('addrtype') == 'mac'), ''))
+                h = host(address.get('addr'), state=state, name=name, mac=next((a.get('addr') for a in addresses if a.get('addrtype') == 'mac'), ''))
                 if not h:
                     continue
                 h['aliases'] = [a['addr'] for a in addresses if is_ip(a.get('addr')) and a['addr'] != h['ip']]
-                observe(h, 'Nmap host status', status.get('state', 'unknown') + (f" ({status['reason']})" if status.get('reason') else ''))
+                detail = ('Nmap -Pn assumed this host up; no open port confirmed.' if state == 'unknown' and assumed_up else
+                          'Host responded on an open port.' if assumed_up and open_port else
+                          status.get('state', 'unknown') + (f" ({status['reason']})" if status.get('reason') else ''))
+                observe(h, 'Nmap host status', detail)
                 for p in node.findall('./ports/port'):
                     st, sv = p.find('state'), p.find('service')
                     st, sv = st.attrib if st is not None else {}, sv.attrib if sv is not None else {}
@@ -208,11 +215,14 @@ def parse_import(data):
                 if not h:
                     continue
                 if line.startswith('Host is up') or line.startswith('Host seems down'):
-                    h['state'] = 'up' if line.startswith('Host is up') else 'down'
-                    observe(h, 'Nmap host status', line.strip())
+                    assumed_up = line.startswith('Host is up') and '-Pn' in str(command).split()
+                    h['state'] = 'unknown' if assumed_up else 'up' if line.startswith('Host is up') else 'down'
+                    observe(h, 'Nmap host status', 'Nmap -Pn assumed this host up; no open port confirmed.' if assumed_up else line.strip())
                 p = re.match(r'^\s*(\d+)/(tcp|udp|sctp)\s+(\S+)\s+(\S+)(?:\s+(.*))?$', line)
                 if p:
                     current = service(h, port=int(p[1]), protocol=p[2], state=p[3], name='' if p[4] == 'unknown' else p[4], product=p[5] or '')
+                    if current and current['state'] == 'open':
+                        h['state'] = 'up'
                     continue
                 mac = re.match(r'^MAC Address:\s+(\S+)', line)
                 if mac:
