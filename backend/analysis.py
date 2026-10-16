@@ -103,6 +103,22 @@ def build_context(doc, authorized_cidr=None):
         return 1
     ranked = sorted((e for e in doc['evidence'] if e['id'] in scores),
                     key=lambda e: (evidence_priority(e), scores[e['id']], e.get('observedAt', '')), reverse=True)
+    evidence_by_id = {e['id']: e for e in ranked}
+    host_rows = [f for f in doc['findings'] if f['kind'] == 'host']
+    related_count = {h['id']: sum(f.get('hostId') == h['id'] for f in doc['findings']) for h in host_rows}
+    anchors, service_anchors = [], []
+    for host in sorted(host_rows, key=lambda h: (related_count[h['id']], h.get('lastSeen', '')), reverse=True)[:8]:
+        linked = [evidence_by_id[eid] for eid in host['evidenceIds'] if eid in evidence_by_id]
+        if linked:
+            anchors.append(max(linked, key=lambda e: (e['tool'] == 'dns-review', e.get('observedAt', ''))))
+        service_links = {}
+        for service in (f for f in doc['findings'] if f['kind'] == 'service' and f.get('hostId') == host['id']):
+            for eid in service['evidenceIds']:
+                if eid in evidence_by_id:
+                    service_links[eid] = service_links.get(eid, 0) + 1
+        if service_links:
+            service_anchors.append(evidence_by_id[max(service_links, key=lambda eid: (
+                service_links[eid], evidence_by_id[eid].get('observedAt', '')))])
     chosen, signatures = [], set()
     host_for = {f['id']: (f['id'] if f['kind'] == 'host' else f.get('hostId')) for f in doc['findings']}
     evidence_hosts = {}
@@ -116,7 +132,7 @@ def build_context(doc, authorized_cidr=None):
         if host:
             balanced.append(ev)
             selected_hosts.add(host)
-    for ev in balanced + ranked:
+    for ev in anchors + service_anchors + balanced + ranked:
         signature = (ev['tool'], ev.get('command', ''), hashlib.sha256(ev['output'].encode()).hexdigest())
         if signature in signatures:
             continue
@@ -164,7 +180,14 @@ def build_context(doc, authorized_cidr=None):
     for ev in chosen:
         if ev['id'] not in ids:
             continue
-        excerpt = ev['output'] if len(ev['output']) <= 350 else ev['output'][:220] + '\n[Middle omitted]\n' + ev['output'][-130:]
+        if ev['tool'] == 'dns-review':
+            try:
+                approval = json.loads(ev['output'])
+                excerpt = encoded({key: approval[key] for key in ('ip', 'name') if isinstance(approval.get(key), str)})
+            except (ValueError, TypeError, AttributeError):
+                excerpt = '[DNS approval record; see linked evidence]'
+        else:
+            excerpt = ev['output'] if len(ev['output']) <= 350 else ev['output'][:220] + '\n[Middle omitted]\n' + ev['output'][-130:]
         row = dict(id=ev['id'], tool=ev['tool'], command=ev.get('command', '')[:120], output=excerpt, excerptTruncated=len(ev['output']) > 350)
         if len(encoded(context['evidence'] + [row])) <= 3900:
             context['evidence'].append(row)
@@ -333,6 +356,10 @@ def analyze(doc, scope, llm, model=''):
                   assessments=[], suggestions=[], hypotheses=[], warnings=['Only a bounded subset of the recorded findings and evidence was sent to the model.'] if context['truncated'] else [])
     if not selected['findings']:
         return {**result, 'status': 'no-findings', 'source': 'built-in', 'model': None, 'message': 'No findings are recorded in this scope.'}
+    if not context['findings'] or not context['evidence']:
+        return {**result, 'status': 'no-context', 'source': 'built-in', 'model': None,
+                'assessments': built_in(selected),
+                'message': 'No linked evidence could be included in model context; showing recorded facts only.'}
     try:
         messages = [dict(role='system', content=PROMPT), dict(role='user', content=encoded(context))]
         for attempt in range(2):
