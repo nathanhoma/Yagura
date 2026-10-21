@@ -27,6 +27,23 @@ class FakeLlm:
 
 
 class BackendTests(unittest.TestCase):
+    def test_llm_metrics_capture_usage_and_truncation_without_content(self):
+        llm = LlmService(model='test-model')
+        rows = []
+        llm.on_completion = rows.append
+        llm.call = lambda route, body=None: {'choices': [{'message': {'content': '{"answer":"secret-value"}'}, 'finish_reason': 'stop'}],
+                                               'usage': {'prompt_tokens': 42, 'completion_tokens': 8, 'total_tokens': 50}}
+        llm.complete([{'role': 'user', 'content': 'password=secret-value'}], max_tokens=100)
+        self.assertEqual((rows[0]['promptTokens'], rows[0]['completionTokens'], rows[0]['finishReason']), (42, 8, 'stop'))
+        self.assertEqual(rows[0]['inputChars'], len('password=secret-value'))
+        self.assertNotIn('secret-value', str(rows))
+        llm.call = lambda route, body=None: {'choices': [{'message': {'content': '{"partial":true}'}, 'finish_reason': 'length'}]}
+        with self.assertRaisesRegex(LlmError, 'truncated'):
+            llm.complete([{'role': 'user', 'content': 'test'}], max_tokens=100)
+        self.assertEqual((rows[1]['status'], rows[1]['finishReason'], rows[1]['outputChars']),
+                         ('invalid-response', 'length', len('{"partial":true}')))
+        self.assertIsNone(rows[1]['promptTokens'])
+
     def test_llm_timeout_allows_three_minutes_and_remains_bounded(self):
         self.assertEqual(LlmService(timeout_ms=180000).timeout, 180)
         self.assertEqual(LlmService(timeout_ms=300000).timeout, 180)

@@ -2,6 +2,7 @@ import ipaddress
 import json
 import re
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,6 +44,7 @@ class LlmService:
         except (TypeError, ValueError):
             self.timeout = 30
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
+        self.on_completion = None
 
     def configuration(self):
         return dict(configured=bool(self.base), allowed=bool(self.base) and private_url(self.base, self.trusted_https_host), model=self.model or self.resolved_model or None, autoSelect=not bool(self.model))
@@ -103,11 +105,21 @@ class LlmService:
             return {**self.configuration(), 'status': exc.code, 'message': str(exc), 'models': models}
 
     def complete(self, messages, max_tokens=1600, model=''):
-        selected = self.select_model(requested=model)
-        data = self.call('/chat/completions', dict(model=selected, temperature=.1, max_tokens=max_tokens, response_format={'type': 'json_object'}, messages=messages))
+        started = time.monotonic()
+        selected = model or self.model or self.resolved_model or ''
+        input_text = ''.join(item.get('content', '') for item in messages)
+        raw = None
+        raw_content = None
+        choice = {}
+        usage = {}
+        outcome = 'completed'
         try:
+            selected = self.select_model(requested=model)
+            data = self.call('/chat/completions', dict(model=selected, temperature=.1, max_tokens=max_tokens, response_format={'type': 'json_object'}, messages=messages))
+            usage = (data.get('usage') or {}) if isinstance(data, dict) else {}
             choice = data['choices'][0]
             raw = choice['message']['content']
+            raw_content = raw
             if choice.get('finish_reason') == 'length':
                 raise LlmError('invalid-response', 'The local model response was truncated.')
             if not isinstance(raw, str) or not raw.strip():
@@ -118,4 +130,26 @@ class LlmService:
                 raise LlmError('invalid-response', 'The local model content must be a JSON object.')
             return dict(data=parsed, model=selected)
         except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+            outcome = 'invalid-response'
             raise LlmError('invalid-response', 'The local model content was not valid JSON.')
+        except LlmError as exc:
+            outcome = exc.code
+            raise
+        finally:
+            if self.on_completion:
+                reason = choice.get('finish_reason') if isinstance(choice, dict) else None
+                if reason not in ('stop', 'length', 'tool_calls', 'content_filter', 'function_call'):
+                    reason = 'other' if reason is not None else None
+                def count(key):
+                    value = usage.get(key) if isinstance(usage, dict) else None
+                    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+                try:
+                    self.on_completion(dict(model=selected[:200], status=outcome,
+                        finishReason=reason, durationMs=round((time.monotonic() - started) * 1000),
+                        inputChars=len(input_text), inputBytes=len(input_text.encode()),
+                        outputChars=len(raw_content) if isinstance(raw_content, str) else None,
+                        outputBytes=len(raw_content.encode()) if isinstance(raw_content, str) else None,
+                        promptTokens=count('prompt_tokens'), completionTokens=count('completion_tokens'),
+                        totalTokens=count('total_tokens'), maxOutputTokens=max_tokens))
+                except OSError:
+                    pass

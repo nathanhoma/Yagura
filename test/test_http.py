@@ -51,6 +51,16 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(data['flags'][0]['kind'], 'software')
         self.assertEqual(len(data['flags'][0]['evidenceIds']), 1)
 
+    def test_llm_metrics_endpoint_returns_only_measurements(self):
+        self.workspace.llm_metrics.record({'model': 'test-model', 'status': 'completed',
+            'finishReason': 'stop', 'inputChars': 120, 'outputChars': 30,
+            'promptTokens': 40, 'completionTokens': 10, 'durationMs': 12, 'maxOutputTokens': 100})
+        status, data = self.call('/api/llm/metrics')
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data['calls']), 1)
+        self.assertEqual(data['calls'][0]['promptTokens'], 40)
+        self.assertNotIn('content', str(data))
+
     def test_vulnerability_endpoint_uses_scoped_saved_evidence(self):
         self.workspace.save_scope({'cidrs': ['192.168.56.0/24'], 'domains': []})
         self.assertEqual(self.call('/api/vulnerabilities')[1]['matches'], [])

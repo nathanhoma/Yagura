@@ -17,6 +17,7 @@ from . import findings as F
 from .email_drafts import DraftStore, DraftConflict, discovered_contacts, export_eml, generate_draft
 from .analysis import analyze, fingerprint, scoped_document
 from .llm import LlmService, private_url
+from .llm_metrics import LlmMetrics
 from .workflow import COMMAND_CATALOG, is_local_ip, workflow
 from .web_contacts import website_url
 from .scope import normalize_scope, valid_cidr
@@ -263,6 +264,9 @@ class Workspace:
         self.analysis_file = Path(analysis_file or self.findings_file.with_name('analysis.json'))
         self.drafts = DraftStore(self.findings_file.with_name('email-drafts.json'))
         self.llm = llm or LlmService(os.getenv('LLM_BASE_URL', ''), os.getenv('LLM_MODEL', ''), os.getenv('LLM_API_KEY', ''), os.getenv('LLM_TIMEOUT_MS', '30000'), os.getenv('LLM_TRUSTED_HTTPS_HOST', ''))
+        self.llm_metrics = LlmMetrics(self.findings_file.with_name('llm-metrics.json'))
+        if isinstance(self.llm, LlmService):
+            self.llm.on_completion = self.llm_metrics.record
         self.runner = runner or run_command
         self.lock = threading.RLock()
         self.active_checks = set()
@@ -548,6 +552,8 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(200, scope)
                 if self.command == 'GET' and path == '/api/llm/health':
                     return self.send_json(200, workspace.llm.health())
+                if self.command == 'GET' and path == '/api/llm/metrics':
+                    return self.send_json(200, {'calls': workspace.llm_metrics.history()[:30]})
                 if self.command == 'GET' and path == '/api/activity':
                     return self.send_json(200, workspace.activity.snapshot())
                 if self.command == 'GET' and path == '/api/autonomy':
