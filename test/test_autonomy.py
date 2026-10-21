@@ -116,18 +116,19 @@ class AutonomyTests(unittest.TestCase):
             def complete(self, messages, max_tokens=400, model=''):
                 self.prompts.append(json.loads(messages[1]['content']))
                 if len(self.prompts) == 1:
-                    command = 'nmap -n -Pn -sT -p 8443 100.96.1.70'
+                    command = 'nxc smb 100.96.1.70'
                 elif len(self.prompts) == 2:
-                    command = 'nmap -n -Pn -sT -p 9443 100.96.1.70'
+                    command = 'smbclient -L //100.96.1.70 -N'
                 else:
                     command = None
                 return {'model': 'fake', 'data': {'command': command,
-                        'reason': 'Check another approved TCP port.',
-                        'expectedEvidence': 'Open or closed port state.'}}
+                        'reason': 'Inspect the selected host.',
+                        'expectedEvidence': 'Service and share information.',
+                        'reviewNotes': 'One approved host; no credential supplied.'}}
 
         self.ws.llm = ProposalLlm()
         self.ws.runner = lambda program, args, timeout: self.calls.append((program, args, timeout)) or {
-            'ok': True, 'stdout': 'Nmap scan report for web.03.crimsonia.net (100.96.1.70)\nHost is up.\n9443/tcp open ssl/https\nNmap done: 1 IP address (1 host up) scanned', 'stderr': ''}
+            'ok': True, 'stdout': 'Sharename Type Comment\npublic Disk Example share', 'stderr': ''}
         with patch('backend.autonomy.workflow', return_value={'candidates': []}):
             run = self.ws.autonomy.start(self.host['id'], self.scope)
             self.ws.autonomy.thread.join(3)
@@ -136,10 +137,10 @@ class AutonomyTests(unittest.TestCase):
             self.assertEqual(self.calls, [])
             old = pending['pendingProposal']
             revised = self.ws.autonomy.revise(run['id'], old['id'], old['revision'],
-                                               'Use TCP port 9443 instead.', self.scope)
+                                               'Use smbclient share listing instead.', self.scope)
             new = revised['pendingProposal']
             self.assertEqual(new['revision'], old['revision'] + 1)
-            self.assertIn('9443', new['command'])
+            self.assertIn('smbclient', new['command'])
             with self.assertRaisesRegex(ValueError, 'changed'):
                 self.ws.autonomy.approve(run['id'], old['id'], old['revision'], old['command'], self.scope)
             self.assertEqual(self.calls, [])
@@ -148,18 +149,18 @@ class AutonomyTests(unittest.TestCase):
             saved = self.ws.autonomy.history()['runs'][0]
             self.assertEqual(saved['status'], 'completed')
             self.assertEqual(len(self.calls), 1)
-            self.assertEqual(self.calls[0][0], 'nmap')
+            self.assertEqual(self.calls[0][0], 'smbclient')
+            self.assertEqual(self.calls[0][1], ['-L', '//100.96.1.70', '-N'])
             self.assertEqual([e['type'] for e in saved['events']],
                              ['proposal', 'proposal', 'approval', 'check', 'stop'])
 
-    def test_reviewed_command_grammar_blocks_extra_destinations_and_scripts(self):
-        good, args = validate_reviewed_check('nmap -n -Pn -sT -p 80,443 100.96.1.70', '100.96.1.70')
-        self.assertEqual(good, 'nmap -n -Pn -sT -p 80,443 100.96.1.70')
-        self.assertEqual(args[-1], '100.96.1.70')
-        for command in ('nmap -n -Pn -sT --script vuln -p 80 100.96.1.70',
-                        'nmap -n -Pn -sT -p 80 100.96.1.71',
-                        'nmap -n -Pn -sT -p 80 100.96.1.70; whoami',
-                        'nmap -n -Pn -sT -p 80 100.96.1.70 8.8.8.8'):
+    def test_reviewed_command_parser_accepts_any_program_without_implicit_shell(self):
+        good, program, args = validate_reviewed_check('nxc smb 100.96.1.70 --shares', '100.96.1.70')
+        self.assertEqual(good, 'nxc smb 100.96.1.70 --shares')
+        self.assertEqual(program, 'nxc')
+        self.assertEqual(args, ['smb', '100.96.1.70', '--shares'])
+        for command in ('', 'nmap -p 80 100.96.1.70\nwhoami',
+                        'nxc smb "unterminated', '-u user', 'nxc smb 100.96.1.70\x00'):
             with self.subTest(command=command), self.assertRaises(ValueError):
                 validate_reviewed_check(command, '100.96.1.70')
 
