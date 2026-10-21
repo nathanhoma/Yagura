@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -81,7 +80,7 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(restarted.autonomy.history()['runs'][0]['status'], 'interrupted')
         self.assertEqual(self.calls, [])
 
-    def test_temporary_uncapped_mode_runs_more_than_three_checks(self):
+    def test_ai_mode_runs_more_than_three_checks_without_count_limit(self):
         class RepeatedHeaders(FakeLlm):
             def complete(self, messages, max_tokens=400, model=''):
                 user = json.loads(messages[1]['content'])
@@ -99,8 +98,7 @@ class AutonomyTests(unittest.TestCase):
         host = next(f for f in doc['findings'] if f['kind'] == 'host')
         host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': self.scope}
         model = RepeatedHeaders()
-        with patch.dict(os.environ, {'YAGURA_AUTONOMY_UNCAPPED': '1'}):
-            ws = Workspace(findings_file=self.ws.findings_file, llm=model, runner=self.ws.runner)
+        ws = Workspace(findings_file=self.ws.findings_file, llm=model, runner=self.ws.runner)
         ws.save(doc)
         self.assertIsNone(ws.autonomy.limits()['maxChecks'])
         self.assertIsNone(ws.autonomy.limits()['groupMaxChecks'])
@@ -112,7 +110,7 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(len([e for e in run['events'] if e['type'] == 'check']), 4)
         self.assertEqual(len(self.calls), 4)
 
-    def test_temporary_uncapped_group_records_no_count_limit(self):
+    def test_group_mode_records_no_count_limit(self):
         doc = self.ws.load()
         extra = F.parse_import({'tool': 'nmap', 'output':
             'Nmap scan report for other.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
@@ -120,8 +118,7 @@ class AutonomyTests(unittest.TestCase):
         other = next(f for f in extra['findings'] if f['kind'] == 'host')
         other['approval'] = {'ip': other['ip'], 'name': other['name'], 'scope': self.scope}
         F.merge_parsed(doc, extra)
-        with patch.dict(os.environ, {'YAGURA_AUTONOMY_UNCAPPED': '1'}):
-            ws = Workspace(findings_file=self.ws.findings_file, llm=self.llm, runner=self.ws.runner)
+        ws = Workspace(findings_file=self.ws.findings_file, llm=self.llm, runner=self.ws.runner)
         ws.save(doc)
         with patch.object(ws.autonomy, '_group_worker'):
             run = ws.autonomy.start_group([self.host['id'], other['id']], self.scope)

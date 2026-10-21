@@ -19,9 +19,7 @@ from .sensitive import redact, sanitize_document
 from .workflow import workflow
 
 
-MAX_CHECKS = 3
 MAX_SECONDS = 180
-GROUP_MAX_CHECKS = 12
 GROUP_MAX_SECONDS = 600
 MAX_RESPONSE_TOKENS = 6400
 GROUP_RESPONSE_TOKENS = 3600
@@ -77,8 +75,8 @@ class AutonomyController:
         self.thread = None
         self.activity_ids = {}
         self.revising = set()
-        self.max_checks = None if os.getenv('YAGURA_AUTONOMY_UNCAPPED') == '1' else MAX_CHECKS
-        self.group_max_checks = None if os.getenv('YAGURA_AUTONOMY_UNCAPPED') == '1' else GROUP_MAX_CHECKS
+        self.max_checks = None
+        self.group_max_checks = None
         self._recover()
 
     def limits(self):
@@ -852,10 +850,6 @@ class AutonomyController:
                     return self._finish(run_id, 'stopped', 'Stopped by operator after the current check.')
                 run, doc, hosts, candidates = self._group_state(run_id, scope)
                 count = sum(e['type'] == 'check' for e in run['events'])
-                if self.group_max_checks is not None and count >= self.group_max_checks:
-                    if len(run['surveyedHostIds']) == len(run['hostIds']):
-                        self._group_compare(run_id, scope, model, doc, [])
-                    return self._finish(run_id, 'completed', 'Group check limit reached; review the host flags.')
                 remaining = GROUP_MAX_SECONDS - (time.monotonic() - started)
                 if remaining <= 0:
                     return self._finish(run_id, 'stopped', 'Group time limit reached.')
@@ -938,8 +932,6 @@ class AutonomyController:
             for step in itertools.count(completed):
                 if stop_event.is_set():
                     return self._finish(run_id, 'stopped', 'Stopped by operator after the current check.')
-                if self.max_checks is not None and step >= self.max_checks:
-                    return self._finish(run_id, 'completed', f'Maximum of {self.max_checks} checks reached; review before continuing.')
                 remaining = MAX_SECONDS - (time.monotonic() - started)
                 if remaining <= 0:
                     return self._finish(run_id, 'stopped', 'Time limit reached.')
