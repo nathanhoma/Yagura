@@ -6,6 +6,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest.mock import patch
 
 from backend.llm import LlmService
 from backend.server import Workspace, create_server
@@ -52,6 +53,45 @@ class HttpTests(unittest.TestCase):
     def test_health_accepts_explicit_https_gateway(self):
         self.workspace.llm = LlmService('https://llm-gateway.xs.network/v1', trusted_https_host='llm-gateway.xs.network')
         self.assertEqual(self.call('/api/health')[1]['llm'], 'configured')
+
+    def test_autonomy_proposal_requires_exact_human_approval(self):
+        class ProposalModel:
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, **kwargs):
+                return {'model': 'fake', 'data': {'command': 'nmap -n -Pn -sT -p 8443 100.96.1.70',
+                    'reason': 'Check another TCP port.', 'expectedEvidence': 'Open or closed state.'}}
+        self.workspace.llm = ProposalModel()
+        output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\n'
+                  'Host is up.\nNmap done: 1 IP address (1 host up) scanned')
+        doc = self.call('/api/import', 'POST', {'tool': 'nmap', 'output': output})[1]
+        scope = self.call('/api/scope', 'PUT', {'cidrs': ['100.96.1.0/24'], 'domains': ['03.crimsonia.net']})[1]
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        stored = self.workspace.load()
+        next(f for f in stored['findings'] if f['id'] == host['id'])['approval'] = {
+            'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        self.workspace.save(stored)
+        with patch('backend.autonomy.workflow', return_value={'candidates': []}):
+            status, run = self.call('/api/autonomy/start', 'POST', {'hostId': host['id'],
+                'authorizedScope': scope, 'authorized': True})
+            self.assertEqual(status, 202)
+            self.workspace.autonomy.thread.join(3)
+            pending = self.call('/api/autonomy')[1]['runs'][0]
+            self.assertEqual(pending['status'], 'awaiting-approval')
+            self.assertEqual(self.calls, [])
+            proposal = pending['pendingProposal']
+            body = {'runId': run['id'], 'proposalId': proposal['id'],
+                    'revision': proposal['revision'], 'expectedCommand': proposal['command'],
+                    'authorizedScope': scope, 'authorized': False}
+            self.assertEqual(self.call('/api/autonomy/approve', 'POST', body)[0], 400)
+            self.assertEqual(self.call('/api/autonomy/approve', 'POST', {**body,
+                'authorized': True, 'expectedCommand': proposal['command'] + ' --script vuln'})[0], 400)
+            self.assertEqual(self.calls, [])
+            self.workspace.runner = lambda program, args, timeout: self.calls.append((program, args)) or {
+                'ok': True, 'stdout': output, 'stderr': ''}
+            self.assertEqual(self.call('/api/autonomy/approve', 'POST', {**body, 'authorized': True})[0], 202)
+            self.workspace.autonomy.thread.join(3)
+            self.assertEqual(len(self.calls), 1)
 
     def test_import_review_analysis_and_export(self):
         output = (Path(__file__).parent / 'fixtures/nmap.xml').read_text()

@@ -594,6 +594,27 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     if not isinstance(body, dict) or set(body) != {'runId'} or not isinstance(body['runId'], str):
                         raise ValueError('Choose an active AI run to stop.')
                     return self.send_json(200, workspace.autonomy.stop(body['runId']))
+                if self.command == 'POST' and path == '/api/autonomy/revise':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) != {'runId', 'proposalId', 'revision', 'instruction', 'authorizedScope'} or
+                            not isinstance(body['runId'], str) or not isinstance(body['proposalId'], str) or
+                            type(body['revision']) is not int or not isinstance(body['instruction'], str)):
+                        raise ValueError('Select the current proposal and describe the correction.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                    return self.send_json(200, workspace.autonomy.revise(body['runId'], body['proposalId'],
+                        body['revision'], body['instruction'], scope))
+                if self.command == 'POST' and path == '/api/autonomy/approve':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) != {'runId', 'proposalId', 'revision', 'expectedCommand', 'authorizedScope', 'authorized'} or
+                            body['authorized'] is not True or not isinstance(body['runId'], str) or
+                            not isinstance(body['proposalId'], str) or type(body['revision']) is not int or
+                            not isinstance(body['expectedCommand'], str)):
+                        raise ValueError('Review the current exact command and confirm authorization before execution.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                    return self.send_json(202, workspace.autonomy.approve(body['runId'], body['proposalId'],
+                        body['revision'], body['expectedCommand'], scope))
                 if self.command == 'GET' and path == '/api/analysis/latest':
                     with workspace.lock:
                         try:
