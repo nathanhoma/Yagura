@@ -1,5 +1,7 @@
 """Bounded AI selection of existing, approved read-only checks."""
 import json
+import itertools
+import os
 import threading
 import time
 
@@ -32,7 +34,11 @@ class AutonomyController:
         self.stop_event = threading.Event()
         self.thread = None
         self.activity_ids = {}
+        self.max_checks = None if os.getenv('YAGURA_AUTONOMY_UNCAPPED') == '1' else MAX_CHECKS
         self._recover()
+
+    def limits(self):
+        return {'maxChecks': self.max_checks, 'maxSeconds': MAX_SECONDS}
 
     def _load(self):
         try:
@@ -109,13 +115,13 @@ class AutonomyController:
             data = self._load()
             run = dict(id=uid('ai-run'), hostId=host_id, hostName=redact(host.get('name') or ''),
                        hostIp=host['ip'], model=model or 'server default', scope=scope,
-                       status='running', startedAt=now(), endedAt=None, maxChecks=MAX_CHECKS,
+                       status='running', startedAt=now(), endedAt=None, maxChecks=self.max_checks,
                        stopReason='', events=[])
             data['runs'] = [run] + data['runs'][:19]
             self._save(data)
             self.activity_ids[run['id']] = ws.activity.begin('ai-run', 'AI-led investigation',
                 target=host.get('name') or host['ip'], detail='AI is choosing the next check.',
-                progress=dict(completed=0, total=MAX_CHECKS, unit='checks'))
+                progress=dict(completed=0, total=self.max_checks, unit='checks'))
             self.stop_event = threading.Event()
             self.thread = threading.Thread(target=self._worker, args=(run['id'], host_id, scope, model, self.stop_event),
                                            daemon=True, name='yagura-ai-checks')
@@ -136,9 +142,11 @@ class AutonomyController:
         tried = set()
         last = {'summary': 'No check has run yet.'}
         try:
-            for step in range(MAX_CHECKS):
+            for step in itertools.count():
                 if stop_event.is_set():
                     return self._finish(run_id, 'stopped', 'Stopped by operator after the current check.')
+                if self.max_checks is not None and step >= self.max_checks:
+                    return self._finish(run_id, 'completed', f'Maximum of {self.max_checks} checks reached; review before continuing.')
                 remaining = MAX_SECONDS - (time.monotonic() - started)
                 if remaining <= 0:
                     return self._finish(run_id, 'stopped', 'Time limit reached.')
@@ -192,7 +200,7 @@ class AutonomyController:
                                          evidenceIds=result['evidenceIds'], warning=redact(result['warning'])[:300],
                                          summary=redact(result['output'] or result['stderr'])[:280]))
                 ws.activity.update(self.activity_ids[run_id], detail=f"Check {step + 1}: {result['outcome']}. AI is reviewing the result.",
-                                   progress=dict(completed=step + 1, total=MAX_CHECKS, unit='checks'))
+                                   progress=dict(completed=step + 1, total=self.max_checks, unit='checks'))
                 with ws.lock:
                     saved = sanitize_document(ws.load())
                 fresh = [e for e in saved['evidence'] if e['id'] in result['evidenceIds']]
@@ -200,7 +208,6 @@ class AutonomyController:
                         'evidence': [{'id': e['id'], 'excerpt': e['output'][:1600]} for e in fresh[:2]]}
                 if result['outcome'] != 'completed' or not result['imported'] or result['warning']:
                     return self._finish(run_id, 'stopped', 'Check failed, gave no response, or could not be imported; review manually.')
-            self._finish(run_id, 'completed', f'Maximum of {MAX_CHECKS} checks reached; review before continuing.')
         except (ValueError, LlmError, RuntimeError) as exc:
             self._finish(run_id, 'stopped', f'Run stopped safely: {exc}')
         except Exception:

@@ -1,7 +1,9 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from backend import findings as F
 from backend.autonomy import MAX_RESPONSE_TOKENS
@@ -77,6 +79,36 @@ class AutonomyTests(unittest.TestCase):
         restarted = Workspace(findings_file=self.ws.findings_file, llm=self.llm, runner=self.ws.runner)
         self.assertEqual(restarted.autonomy.history()['runs'][0]['status'], 'interrupted')
         self.assertEqual(self.calls, [])
+
+    def test_temporary_uncapped_mode_runs_more_than_three_checks(self):
+        class RepeatedHeaders(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                user = json.loads(messages[1]['content'])
+                self.prompts.append(user)
+                choice = next((c['id'] for c in user['context']['candidates']
+                               if c['catalogId'] == 'http-headers'), None)
+                return {'model': 'fake', 'data': {'candidateId': choice,
+                        'reason': 'Inspect the next recorded web service.',
+                        'expectedEvidence': 'HTTP response headers'}}
+
+        doc = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for web.03.crimsonia.net (100.96.1.70)\nHost is up.\n'
+            '80/tcp open http\n8000/tcp open http\n8080/tcp open http\n8888/tcp open http\n'
+            'Nmap done: 1 IP address (1 host up) scanned'})
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': self.scope}
+        model = RepeatedHeaders()
+        with patch.dict(os.environ, {'YAGURA_AUTONOMY_UNCAPPED': '1'}):
+            ws = Workspace(findings_file=self.ws.findings_file, llm=model, runner=self.ws.runner)
+        ws.save(doc)
+        self.assertIsNone(ws.autonomy.limits()['maxChecks'])
+        ws.autonomy.start(host['id'], self.scope)
+        ws.autonomy.thread.join(3)
+        run = ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertIsNone(run['maxChecks'])
+        self.assertEqual(len([e for e in run['events'] if e['type'] == 'check']), 4)
+        self.assertEqual(len(self.calls), 4)
 
 
 if __name__ == '__main__':

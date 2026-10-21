@@ -497,7 +497,8 @@ class HttpTests(unittest.TestCase):
             def complete(self, messages, **kwargs):
                 return {'model': 'fake', 'data': {'candidateId': None, 'reason': 'Enough evidence for now.', 'expectedEvidence': ''}}
         self.workspace.llm = StopModel()
-        self.assertEqual(self.call('/api/autonomy')[1], {'runs': []})
+        self.assertEqual(self.call('/api/autonomy')[1],
+                         {'runs': [], 'limits': {'maxChecks': 3, 'maxSeconds': 180}})
         output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\n'
                   'Host is up.\n80/tcp open http\nNmap done: 1 IP address (1 host up) scanned')
         doc = self.call('/api/import', 'POST', {'tool': 'nmap', 'output': output})[1]

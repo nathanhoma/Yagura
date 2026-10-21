@@ -537,7 +537,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 if self.command == 'GET' and path == '/api/activity':
                     return self.send_json(200, workspace.activity.snapshot())
                 if self.command == 'GET' and path == '/api/autonomy':
-                    return self.send_json(200, workspace.autonomy.history())
+                    return self.send_json(200, {**workspace.autonomy.history(), 'limits': workspace.autonomy.limits()})
                 if self.command == 'GET' and path == '/api/check-proposals':
                     return self.send_json(200, workspace.check_proposals.list())
                 if self.command == 'POST' and path == '/api/check-proposals':
