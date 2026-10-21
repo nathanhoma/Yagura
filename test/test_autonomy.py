@@ -103,6 +103,7 @@ class AutonomyTests(unittest.TestCase):
             ws = Workspace(findings_file=self.ws.findings_file, llm=model, runner=self.ws.runner)
         ws.save(doc)
         self.assertIsNone(ws.autonomy.limits()['maxChecks'])
+        self.assertIsNone(ws.autonomy.limits()['groupMaxChecks'])
         ws.autonomy.start(host['id'], self.scope)
         ws.autonomy.thread.join(3)
         run = ws.autonomy.history()['runs'][0]
@@ -110,6 +111,23 @@ class AutonomyTests(unittest.TestCase):
         self.assertIsNone(run['maxChecks'])
         self.assertEqual(len([e for e in run['events'] if e['type'] == 'check']), 4)
         self.assertEqual(len(self.calls), 4)
+
+    def test_temporary_uncapped_group_records_no_count_limit(self):
+        doc = self.ws.load()
+        extra = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for other.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            '80/tcp open http\nNmap done: 1 IP address (1 host up) scanned'})
+        other = next(f for f in extra['findings'] if f['kind'] == 'host')
+        other['approval'] = {'ip': other['ip'], 'name': other['name'], 'scope': self.scope}
+        F.merge_parsed(doc, extra)
+        with patch.dict(os.environ, {'YAGURA_AUTONOMY_UNCAPPED': '1'}):
+            ws = Workspace(findings_file=self.ws.findings_file, llm=self.llm, runner=self.ws.runner)
+        ws.save(doc)
+        with patch.object(ws.autonomy, '_group_worker'):
+            run = ws.autonomy.start_group([self.host['id'], other['id']], self.scope)
+            ws.autonomy.thread.join(3)
+        self.assertIsNone(run['maxChecks'])
+        self.assertEqual(ws.autonomy.limits()['groupMaxSeconds'], 600)
 
     def test_exhausted_catalog_waits_for_review_and_revision_before_execution(self):
         class ProposalLlm(FakeLlm):

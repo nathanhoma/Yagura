@@ -78,11 +78,12 @@ class AutonomyController:
         self.activity_ids = {}
         self.revising = set()
         self.max_checks = None if os.getenv('YAGURA_AUTONOMY_UNCAPPED') == '1' else MAX_CHECKS
+        self.group_max_checks = None if os.getenv('YAGURA_AUTONOMY_UNCAPPED') == '1' else GROUP_MAX_CHECKS
         self._recover()
 
     def limits(self):
         return {'maxChecks': self.max_checks, 'maxSeconds': MAX_SECONDS,
-                'groupMaxChecks': GROUP_MAX_CHECKS, 'groupMaxSeconds': GROUP_MAX_SECONDS,
+                'groupMaxChecks': self.group_max_checks, 'groupMaxSeconds': GROUP_MAX_SECONDS,
                 'groupMaxHosts': 8, 'discoveryMaxSeconds': MAX_DISCOVERY_SECONDS,
                 'autoGroupHosts': AUTO_GROUP_HOSTS}
 
@@ -195,13 +196,13 @@ class AutonomyController:
                        hostSnapshots={hid: {'ip': hosts[hid]['ip'], 'name': hosts[hid].get('name')} for hid in host_ids},
                        hostId=host_ids[0], hostName=f'{len(host_ids)} selected hosts', hostIp='',
                        model=model or 'server default', scope=scope, status='running', startedAt=now(),
-                       endedAt=None, maxChecks=GROUP_MAX_CHECKS, stopReason='', flags=[], events=[])
+                       endedAt=None, maxChecks=self.group_max_checks, stopReason='', flags=[], events=[])
             data = self._load()
             data['runs'] = [run] + data['runs'][:19]
             self._save(data)
             self.activity_ids[run['id']] = ws.activity.begin('ai-run', 'Cross-host investigation',
                 target=f'{len(host_ids)} selected hosts', detail='Surveying one current check per host.',
-                progress=dict(completed=0, total=GROUP_MAX_CHECKS, unit='checks'))
+                progress=dict(completed=0, total=self.group_max_checks, unit='checks'))
             self.stop_event = threading.Event()
             self.thread = threading.Thread(target=self._group_worker,
                 args=(run['id'], scope, model, self.stop_event), daemon=True, name='yagura-ai-cross-host')
@@ -225,7 +226,7 @@ class AutonomyController:
             run = dict(id=uid('ai-run'), mode='discover-group', hostIds=[], surveyedHostIds=[],
                        hostSnapshots={}, hostId='', hostName='Saved target scope', hostIp='',
                        model=model or 'server default', scope=scope, resolvers=resolvers,
-                       status='running', startedAt=now(), endedAt=None, maxChecks=GROUP_MAX_CHECKS,
+                       status='running', startedAt=now(), endedAt=None, maxChecks=self.group_max_checks,
                        stopReason='', flags=[], events=[])
             data = self._load()
             data['runs'] = [run] + data['runs'][:19]
@@ -851,7 +852,7 @@ class AutonomyController:
                     return self._finish(run_id, 'stopped', 'Stopped by operator after the current check.')
                 run, doc, hosts, candidates = self._group_state(run_id, scope)
                 count = sum(e['type'] == 'check' for e in run['events'])
-                if count >= GROUP_MAX_CHECKS:
+                if self.group_max_checks is not None and count >= self.group_max_checks:
                     if len(run['surveyedHostIds']) == len(run['hostIds']):
                         self._group_compare(run_id, scope, model, doc, [])
                     return self._finish(run_id, 'completed', 'Group check limit reached; review the host flags.')
@@ -907,7 +908,7 @@ class AutonomyController:
                                          warning=redact(result['warning'])[:300],
                                          summary=redact(result['output'] or result['stderr'])[:280]))
                 ws.activity.update(self.activity_ids[run_id], detail=f"Group check {count + 1}: {result['outcome']}.",
-                                   progress=dict(completed=count + 1, total=GROUP_MAX_CHECKS, unit='checks'))
+                                   progress=dict(completed=count + 1, total=self.group_max_checks, unit='checks'))
                 if result['outcome'] != 'completed' or not result['imported'] or result['warning']:
                     if unvisited:
                         continue
