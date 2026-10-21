@@ -156,7 +156,7 @@ def generate_draft(llm, payload):
         raise ValueError('Describe the message you want to draft.')
     result = llm.complete([dict(role='system', content=DRAFT_PROMPT),
                            dict(role='user', content=json.dumps({k: payload.get(k, '') for k in ('brief', 'subject', 'body')}))],
-                          max_tokens=1600, model=payload.get('model', ''))
+                          max_tokens=4000, model=payload.get('model', ''))
     data = result['data']
     if not isinstance(data, dict) or set(data) != {'subject', 'body'} or not all(isinstance(data[k], str) and data[k].strip() for k in data):
         raise ValueError('The model did not return a usable subject and body. Your draft has not changed.')

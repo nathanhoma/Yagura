@@ -1046,7 +1046,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     try:
                         ids = {x for c in available for x in c['findingIds']}
                         context = [{**f, 'detail': str(f.get('detail') or '')[:600]} for f in doc['findings'] if f['id'] in ids]
-                        response = workspace.llm.complete([dict(role='system', content=SYSTEM_PROMPT), dict(role='user', content=json.dumps(dict(findings=context, candidates=available, commands=COMMAND_CATALOG)))], max_tokens=800, model=body.get('model', ''))
+                        response = workspace.llm.complete([dict(role='system', content=SYSTEM_PROMPT), dict(role='user', content=json.dumps(dict(findings=context, candidates=available, commands=COMMAND_CATALOG)))], max_tokens=2000, model=body.get('model', ''))
                         selected = response['data']['suggestions']
                         if not isinstance(selected, list):
                             raise ValueError('Invalid response')
