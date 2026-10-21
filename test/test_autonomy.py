@@ -265,7 +265,7 @@ class AutonomyTests(unittest.TestCase):
             self.ws.autonomy.thread.join(3)
         saved = self.ws.autonomy.history()['runs'][0]
         self.assertEqual(saved['status'], 'stopped')
-        self.assertIn('linked evidence', saved['stopReason'])
+        self.assertIn('without a linked cited finding', saved['stopReason'])
         self.assertEqual(self.calls, [])
 
     def test_scope_discovery_selects_ip_only_hosts_and_starts_group_loop(self):

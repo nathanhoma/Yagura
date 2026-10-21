@@ -42,6 +42,10 @@ class GroupContextTests(unittest.TestCase):
         self.assertTrue(all(h['id'] in fids for h in self.hosts))
         for finding in context['findings']:
             self.assertTrue(set(finding['evidenceIds']) <= eids)
+        self.assertEqual(context['citationPairs'], [
+            {'hostId': finding.get('hostId', finding['id']), 'findingId': finding['id'],
+             'evidenceId': eid}
+            for finding in context['findings'] for eid in finding['evidenceIds']])
         for row in context['candidates']:
             self.assertTrue(set(row['findingIds']) <= fids)
             self.assertTrue(set(row['evidenceIds']) <= eids)
@@ -100,6 +104,8 @@ class GroupContextTests(unittest.TestCase):
                         {'tool': 'get_evidence', 'evidenceIds': [evidence_id]}]}}
                 result = json.loads(messages[-1]['content'])['readResults']
                 assert result[0]['items'][0]['id'] == evidence_id
+                assert {'hostId': host_id, 'findingId': host_id, 'evidenceId': evidence_id} in \
+                    json.loads(messages[-1]['content'])['allowedCitationPairs']
                 return {'model': 'fake', 'data': {'flags': [{'hostId': host_id,
                     'reason': 'One host has a distinct saved observation.',
                     'uncertainty': 'The observation needs confirmation.',
@@ -132,8 +138,9 @@ class GroupContextTests(unittest.TestCase):
                         'uncertainty': 'Needs evidence', 'findingIds': [host_id],
                         'evidenceIds': ['invented']}], 'candidateId': None, 'reason': ''}}
                 correction = json.loads(messages[-1]['content'])
-                assert correction['validationError'].startswith('Comparison flag lacked')
+                assert correction['validationError'].startswith('Comparison cited evidence ID invented')
                 assert correction['allowedCitationPairs']
+                assert correction['invalidCitations'][0]['evidenceId'] == 'invented'
                 return {'model': 'fake', 'data': {'flags': [], 'candidateId': None,
                                                 'reason': 'No supported flag.'}}
         host_id = self.hosts[0]['id']
@@ -148,6 +155,55 @@ class GroupContextTests(unittest.TestCase):
         self.assertEqual(sum(e['type'] == 'context-repair' for e in saved['events']), 1)
         repair = next(e for e in saved['events'] if e['type'] == 'context-repair')
         self.assertEqual(repair['submittedFlags'][0]['evidenceIds'], ['invented'])
+        self.assertEqual(repair['invalidCitations'][0]['evidenceId'], 'invented')
+
+    def test_visible_evidence_must_pair_with_a_cited_finding(self):
+        doc = self.ws.load()
+        host_id = self.hosts[0]['id']
+        service = next(f for f in doc['findings'] if f.get('kind') == 'service' and f.get('hostId') == host_id)
+        evidence_id = 'service-only-evidence'
+        doc['evidence'].append({'id': evidence_id, 'tool': 'manual', 'command': '',
+            'output': 'Service-specific observation.', 'observedAt': '2099-01-01T00:00:00+00:00',
+            'importedAt': '2099-01-01T00:00:00+00:00', 'format': 'text'})
+        service['evidenceIds'].append(evidence_id)
+        self.ws.save(doc)
+
+        class PairModel:
+            def __init__(self):
+                self.calls = 0
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                if 'previousFlags' not in json.loads(messages[1]['content']):
+                    return {'model': 'fake', 'data': {'command': None, 'reason': 'No useful check.',
+                                                      'expectedEvidence': '', 'reviewNotes': ''}}
+                self.calls += 1
+                flag = {'hostId': host_id, 'reason': 'Inspect the service-specific result.',
+                        'uncertainty': 'Further validation is needed.',
+                        'evidenceIds': [evidence_id]}
+                if self.calls == 1:
+                    initial = json.loads(messages[1]['content'])['context']['citationPairs']
+                    assert {'hostId': host_id, 'findingId': service['id'], 'evidenceId': evidence_id} in initial
+                    assert {'hostId': host_id, 'findingId': host_id, 'evidenceId': evidence_id} not in initial
+                    return {'model': 'fake', 'data': {'flags': [{**flag, 'findingIds': [host_id]}],
+                                                     'candidateId': None, 'reason': ''}}
+                correction = json.loads(messages[-1]['content'])
+                assert correction['invalidCitations'] == [{
+                    'hostId': host_id, 'evidenceId': evidence_id,
+                    'citedFindingIds': [host_id], 'allowedFindingIds': [service['id']]}]
+                return {'model': 'fake', 'data': {'flags': [{**flag, 'findingIds': [service['id']]}],
+                                                 'candidateId': None, 'reason': ''}}
+
+        model = PairModel()
+        self.ws.llm = model
+        with patch('backend.autonomy.workflow', return_value={'candidates': []}):
+            self.ws.autonomy.start_group([h['id'] for h in self.hosts], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(model.calls, 2)
+        self.assertEqual(run['flags'][0]['findingIds'], [service['id']])
+        self.assertEqual(run['events'][-2]['type'], 'comparison')
 
     def test_invalid_context_host_gets_one_bounded_correction(self):
         host_id = self.hosts[0]['id']

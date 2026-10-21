@@ -59,6 +59,13 @@ def _candidate(candidate, finding_ids, evidence_ids):
         'evidenceIds': [eid for eid in candidate['evidenceIds'] if eid in evidence_ids]}
 
 
+def citation_pairs(findings, evidence_ids):
+    """Only pairs explicitly visible in the model's saved-context view."""
+    shown = set(evidence_ids)
+    return [{'hostId': _host_id(finding), 'findingId': finding['id'], 'evidenceId': eid}
+            for finding in findings for eid in finding['evidenceIds'] if eid in shown]
+
+
 def seed_context(doc, host_ids, candidates):
     """Give every selected host a small, citation-closed starting view."""
     findings = {f['id']: f for f in doc['findings']}
@@ -97,6 +104,7 @@ def seed_context(doc, host_ids, candidates):
     result['truncated'] = (len(result['findings']) < len(doc['findings']) or
                            len(result['evidence']) < len(doc['evidence']) or
                            len(result['candidates']) < len(candidates))
+    result['citationPairs'] = citation_pairs(result['findings'], eids)
     return result
 
 

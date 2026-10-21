@@ -10,7 +10,7 @@ from .analysis import build_context, fingerprint, scoped_document
 from . import findings as F
 from .discovery import discovery_chunks, discovery_progress, dns_review, validate_resolvers
 from .findings import now, uid
-from .group_context import MAX_READ_ROUNDS, fresh_candidates, read_requests, seed_context
+from .group_context import MAX_READ_ROUNDS, citation_pairs, fresh_candidates, read_requests, seed_context
 from .llm import LlmError
 from .outbound import require_target
 from .reviewed_check import validate as validate_reviewed_check
@@ -54,8 +54,9 @@ GROUP_PROMPT = ("Compare saved evidence across the selected approved exercise ho
                 "list_candidates or get_check_history with hostId and optional offset. "
                 "These operations only read saved data; they do not execute commands. "
                 "Use only selected hostIds and supplied IDs. After at most three read rounds, "
-                "return a final JSON answer. Cite only findingId/evidenceId pairs whose evidence excerpt was supplied "
-                "for each flagged host. Explain the difference, uncertainty and useful next check. "
+                "return a final JSON answer. For each flagged host, every evidenceId must pair with at least "
+                "one cited findingId using the supplied citationPairs or allowedCitationPairs; do not merely "
+                "cite IDs from the same host. Explain the difference, uncertainty and useful next check. "
                 "An open port or banner does not establish access. Choose at most one supplied "
                 "candidateId for a flagged host, or null. Empty flags are valid. Return ONLY JSON: "
                 '{"readRequests":[{"tool":"list_findings","hostId":"id","kind":"service"}]} '
@@ -754,7 +755,9 @@ class AutonomyController:
                              'candidateIds': [c['id'] for c in r['items']] if r['tool'] == 'list_candidates' else []}
                             for r in results]))
             messages.append({'role': 'assistant', 'content': json.dumps(answer, ensure_ascii=False)})
-            messages.append({'role': 'user', 'content': json.dumps({'readResults': results}, ensure_ascii=False)})
+            messages.append({'role': 'user', 'content': json.dumps({
+                'readResults': results,
+                'allowedCitationPairs': citation_pairs(visible.values(), evidence)}, ensure_ascii=False)})
         else:
             raise ValueError('AI did not return a final comparison.')
         def validate_final(value):
@@ -767,10 +770,15 @@ class AutonomyController:
                 ids, eids = item.get('findingIds'), item.get('evidenceIds')
                 if (not isinstance(ids, list) or not 1 <= len(ids) <= 3 or not isinstance(eids, list) or
                         not 1 <= len(eids) <= 3 or any(not isinstance(i, str) or i not in visible or
-                        visible[i].get('hostId', visible[i]['id']) != item['hostId'] for i in ids) or
-                        any(not isinstance(i, str) or i not in evidence or
-                        not any(i in visible[fid]['evidenceIds'] for fid in ids) for i in eids)):
+                        visible[i].get('hostId', visible[i]['id']) != item['hostId'] for i in ids)):
                     raise ValueError('Comparison flag lacked linked evidence for its host.')
+                for eid in eids:
+                    if not isinstance(eid, str):
+                        raise ValueError('Comparison cited a non-string evidence ID.')
+                    if eid not in evidence:
+                        raise ValueError(f'Comparison cited evidence ID {eid[:100]} that was not shown to the model.')
+                    if not any(eid in visible[fid]['evidenceIds'] for fid in ids):
+                        raise ValueError(f'Comparison cited evidence ID {eid[:100]} without a linked cited finding for host {item["hostId"]}.')
                 if any(not isinstance(item.get(key), str) or not item[key].strip() or len(item[key]) > 500
                        for key in ('reason', 'uncertainty')):
                     raise ValueError('Comparison explanation was invalid.')
@@ -787,6 +795,31 @@ class AutonomyController:
                 raise ValueError('Comparison reason was invalid.')
             return flags, choice, reason
 
+        def citation_mismatches(value):
+            mismatches = []
+            if not isinstance(value, dict):
+                return mismatches
+            for item in value.get('flags', [])[:3] if isinstance(value.get('flags'), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                host_id = item.get('hostId')
+                ids = item.get('findingIds')
+                eids = item.get('evidenceIds')
+                if not isinstance(ids, list) or not isinstance(eids, list):
+                    continue
+                cited = [fid for fid in ids[:3] if isinstance(fid, str)]
+                for eid in eids[:3]:
+                    if not isinstance(eid, str) or any(
+                            eid in visible[fid]['evidenceIds'] for fid in cited if fid in visible):
+                        continue
+                    valid = [fid for fid, finding in visible.items() if
+                             finding.get('hostId', finding['id']) == host_id and
+                             eid in finding['evidenceIds'] and eid in evidence]
+                    mismatches.append({'hostId': str(host_id)[:100], 'evidenceId': eid[:100],
+                                       'citedFindingIds': [fid[:100] for fid in cited],
+                                       'allowedFindingIds': valid[:8]})
+            return mismatches
+
         for repair in range(2):
             try:
                 flags, choice, reason = validate_final(answer)
@@ -794,19 +827,21 @@ class AutonomyController:
             except ValueError as exc:
                 if repair:
                     raise
-                pairs = [{'hostId': f.get('hostId', f['id']), 'findingId': f['id'], 'evidenceId': eid}
-                         for f in visible.values() for eid in f['evidenceIds'] if eid in evidence][:32]
+                pairs = citation_pairs(visible.values(), evidence)
+                mismatches = citation_mismatches(answer)
+                submitted_flags = answer.get('flags', []) if isinstance(answer, dict) else []
                 self._event(run_id, dict(type='context-repair', snapshotId=snapshot,
-                    reason=str(exc)[:160], submittedFlags=[{
+                    reason=str(exc)[:160], invalidCitations=mismatches, submittedFlags=[{
                         'hostId': redact(str(item.get('hostId', '')))[:100],
                         'findingIds': [redact(str(fid))[:100] for fid in item.get('findingIds', [])[:3]]
                             if isinstance(item.get('findingIds'), list) else [],
                         'evidenceIds': [redact(str(eid))[:100] for eid in item.get('evidenceIds', [])[:3]]
                             if isinstance(item.get('evidenceIds'), list) else []}
-                        for item in answer.get('flags', [])[:3] if isinstance(item, dict)]
-                        if isinstance(answer.get('flags'), list) else []))
+                        for item in submitted_flags[:3] if isinstance(item, dict)]
+                        if isinstance(submitted_flags, list) else []))
                 messages.append({'role': 'user', 'content': json.dumps({
-                    'validationError': str(exc), 'allowedCitationPairs': pairs,
+                    'validationError': str(exc), 'invalidCitations': mismatches,
+                    'allowedCitationPairs': pairs,
                     'shownCandidateIds': sorted(shown_candidates),
                     'instruction': 'Return a corrected final comparison JSON. Use only these linked IDs; empty flags are valid. Do not request more context.'},
                     ensure_ascii=False)})
