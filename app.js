@@ -9,6 +9,12 @@ function checkOutcome(result){return result.outcome==='no-response'?'No response
 let emailContacts=[],emailDrafts=[],activeDraft=null,draftDirty=false,draftBusy=false;
 const views={drafts:'Prepare, review, and save email drafts. Sender infrastructure can be configured later.',scope:'Define and save the authorized target ranges and domains before working with evidence or checks.',briefing:'Review what the saved evidence supports and ask grounded follow-up questions.',review:'Import output, inspect linked evidence, and correct findings.',analysis:'Choose a local model and analyze stored evidence.',checks:'Review grounded checks, then run a check against an authorized local target.',autonomy:'See exactly what the AI chose, what Yagura executed, and why it stopped.'};
 const viewTitles={scope:'Scope',briefing:'Briefing',review:'Findings',analysis:'Analysis',checks:'Next checks',drafts:'Email drafts',autonomy:'AI investigation'};
+const aiViews=new Set(['autonomy','briefing','analysis']),manualViews=new Set(['checks','drafts']);
+let workflowMode='ai';
+try{workflowMode=localStorage.getItem('yagura-workflow-mode')==='manual'?'manual':'ai';}catch{}
+function applyWorkflowMode(){document.body.dataset.workflowMode=workflowMode;document.querySelectorAll('[data-workflow-switch]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.workflowSwitch===workflowMode)));$('#workflowModeHint').textContent=(workflowMode==='ai'?'Yagura chooses follow-up checks within the saved scope. You approve each run and every additional AI-written command.':'Choose and review each check yourself. Optional AI suggestions and a previewed short sequence are available.')+' Switching modes does not stop an active run.';}
+function switchWorkflowMode(mode){if(mode!==workflowMode){workflowMode=mode;try{localStorage.setItem('yagura-workflow-mode',mode);}catch{}}location.hash=mode==='ai'?'#autonomy':'#checks';showView();}
+document.querySelectorAll('[data-workflow-switch]').forEach(button=>button.onclick=()=>switchWorkflowMode(button.dataset.workflowSwitch));
 let latestAnalysis=null,briefingMessages=[],briefingContextKey='',briefingBusy=false;
 let autonomyModelRequired=false,autonomyMode='group',autonomyNewInitialized=false;
 const autonomySelectedHosts=new Set();
@@ -16,13 +22,13 @@ const emptyScope=()=>({cidrs:[],domains:[],matchMode:'and'});
 let savedScope=emptyScope(),scopeLoaded=false,scopeLoadError='';
 let stopDiscovery=false;
 const scopeLabel=()=>[savedScope.cidrs.join(', '),savedScope.domains.length?`${(savedScope.matchMode||'and').toUpperCase()} domains: `+savedScope.domains.join(', '):''].filter(Boolean).join(' · ');
-function showView(){const hash=location.hash.slice(1);const view=hash==='recon'?'scope':hash;const selected=views[view]?view:'scope';document.body.dataset.view=selected;$('#viewTitle').textContent=viewTitles[selected];document.title=viewTitles[selected]+' · Yagura';$('#viewIntro').textContent=views[selected];document.querySelectorAll('.nav a,.mobile-nav a').forEach(a=>{const active=a.hash==='#'+selected&&!a.hasAttribute('data-nav-parent');a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});$('#actionsNav').classList.toggle('active-parent',['checks','drafts'].includes(selected));$('#checksSubnav').hidden=!['checks','drafts'].includes(selected);$('#checksSubnav').querySelectorAll('a').forEach(a=>{const active=a.hash==='#'+selected;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});updateScopeGate();window.scrollTo(0,0);}
+function showView(){const hash=location.hash.slice(1);const view=hash==='recon'?'scope':hash;const selected=views[view]?view:'scope';if(aiViews.has(selected))workflowMode='ai';else if(manualViews.has(selected))workflowMode='manual';try{localStorage.setItem('yagura-workflow-mode',workflowMode);}catch{}applyWorkflowMode();document.body.dataset.view=selected;$('#viewTitle').textContent=viewTitles[selected];document.title=viewTitles[selected]+' · Yagura';$('#viewIntro').textContent=views[selected];document.querySelectorAll('.nav a,.mobile-nav a').forEach(a=>{const active=a.hash==='#'+selected;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});updateScopeGate();window.scrollTo(0,0);}
 function updateScopeGate(){
   const ready=scopeLoaded&&savedScope.cidrs.length>0;
   document.body.dataset.scopeState=ready?'ready':scopeLoaded?'required':scopeLoadError?'error':'loading';
   $('#scopeGate').hidden=document.body.dataset.view==='scope'||ready;
   $('#scopeGateTitle').textContent=scopeLoadError?'Target scope could not be loaded':!scopeLoaded?'Loading target scope…':'Define the target scope first';
-  $('#scopeGateMessage').textContent=scopeLoadError?'The saved scope could not be verified. Open Scope and refresh to retry. '+scopeLoadError:!scopeLoaded?'Checking the saved engagement scope.':'Save an authorized target range to continue to Next checks, then review Findings and Analysis. Next checks and Email drafts are available under Actions. This server’s network is not the target network.';
+  $('#scopeGateMessage').textContent=scopeLoadError?'The saved scope could not be verified. Open Scope and refresh to retry. '+scopeLoadError:!scopeLoaded?'Checking the saved engagement scope.':`Save an authorized target range to continue in ${workflowMode==='ai'?'AI investigation':'Next checks'}. This server’s network is not the target network.`;
   $('#savedScopeDisplay').textContent=scopeLabel()||'Not defined';
   $('#scanBtn').disabled=!ready;
   $('#seedBtn').disabled=!ready||savedScope.matchMode!=='or'||!savedScope.domains.length;
@@ -59,7 +65,7 @@ async function saveScope(clear=false){
   $('#authorized').checked=false;$('#checksAuthorized').checked=false;$('#scanResults').innerHTML='';
   showScope();updateScopeGate();updatePrerequisites();clearAutoPlan('Target scope changed. Preview checks again.');
   $('#scopeState').textContent=checkScope()?'Saved target scope: '+scopeLabel()+'. Other workflow sections are now available.':'Scope cleared. Save a target range to continue.';
-  if(checkScope()){location.hash='#checks';showView();}
+  if(checkScope()){location.hash=workflowMode==='ai'?'#autonomy':'#checks';showView();}
   await refreshFindings();if(checkScope())await loadPendingDiscovery();return result;
 }
 async function persistScope(clear=false){const button=$('#saveScope');button.disabled=true;$('#clearScope').disabled=true;try{await saveScope(clear);toast(clear?'Target scope cleared':'Target scope saved');}catch(e){$('#scopeState').textContent=e.message;}finally{button.disabled=false;$('#clearScope').disabled=false;}}
@@ -332,6 +338,7 @@ function renderAutonomy(){
   select.value=autonomyCurrent;
   const run=autonomyRuns.find(r=>r.id===autonomyCurrent),active=autonomyRuns.find(r=>['running','awaiting-approval','awaiting-host-review','awaiting-discovery'].includes(r.status));
   const now=$('#autonomyNow'),reviewAction=$('#autonomyReviewAction');
+  const modeState=$('#workflowAiState');modeState.hidden=!active;modeState.textContent=active?.status==='running'?'Investigation running':active?'Your review is needed':'';
   now.classList.toggle('attention',!!active&&active.status!=='running');
   now.querySelector('strong').textContent=active?active.status==='running'?'Investigation running':active.status==='awaiting-approval'?'Command approval required':'Discovery needs your review':'No active investigation';
   now.querySelector('p').textContent=active?`${active.hostName||active.hostIp} · ${active.events.filter(e=>e.type==='check').length}/${active.maxChecks==null?'∞':active.maxChecks} checks${active.stopReason?' · '+active.stopReason:''}`:'Review a saved run below or start a new one.';
