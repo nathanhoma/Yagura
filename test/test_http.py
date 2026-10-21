@@ -94,6 +94,41 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(len(self.calls), 1)
             self.assertEqual(self.calls[0], ('nxc', ['smb', '100.96.1.70']))
 
+    def test_group_autonomy_api_requires_selected_approved_hosts(self):
+        class CompareModel:
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, **kwargs):
+                return {'model': 'fake', 'data': {'flags': [], 'candidateId': None,
+                    'reason': 'No host has enough evidence for a flag.'}}
+        self.workspace.llm = CompareModel()
+        output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\nHost is up.\n'
+                  '80/tcp open http\nNmap scan report for api.03.crimsonia.net (100.96.1.71)\n'
+                  'Host is up.\n443/tcp open https\nNmap done: 2 IP addresses (2 hosts up) scanned')
+        doc = self.call('/api/import', 'POST', {'tool': 'nmap', 'output': output})[1]
+        scope = self.call('/api/scope', 'PUT', {'cidrs': ['100.96.1.0/24'],
+            'domains': ['03.crimsonia.net']})[1]
+        hosts = [f for f in doc['findings'] if f['kind'] == 'host']
+        stored = self.workspace.load()
+        for host in stored['findings']:
+            if host['kind'] == 'host':
+                host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        self.workspace.save(stored)
+        body = {'hostIds': [h['id'] for h in hosts], 'authorizedScope': scope, 'authorized': True}
+        self.assertEqual(self.call('/api/autonomy/start-group', 'POST',
+            {**body, 'authorized': False})[0], 400)
+        self.assertEqual(self.call('/api/autonomy/start-group', 'POST',
+            {**body, 'hostIds': [hosts[0]['id']]})[0], 400)
+        with patch('backend.autonomy.workflow', return_value={'candidates': []}):
+            status, run = self.call('/api/autonomy/start-group', 'POST', body)
+            self.assertEqual(status, 202)
+            self.workspace.autonomy.thread.join(3)
+        saved = self.call('/api/autonomy')[1]['runs'][0]
+        self.assertEqual(saved['id'], run['id'])
+        self.assertEqual(saved['mode'], 'group')
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(self.calls, [])
+
     def test_import_review_analysis_and_export(self):
         output = (Path(__file__).parent / 'fixtures/nmap.xml').read_text()
         payload = {'tool': 'nmap', 'output': output}
@@ -539,7 +574,9 @@ class HttpTests(unittest.TestCase):
                 return {'model': 'fake', 'data': {'candidateId': None, 'reason': 'Enough evidence for now.', 'expectedEvidence': ''}}
         self.workspace.llm = StopModel()
         self.assertEqual(self.call('/api/autonomy')[1],
-                         {'runs': [], 'limits': {'maxChecks': 3, 'maxSeconds': 180}})
+                     {'runs': [], 'limits': {'maxChecks': 3, 'maxSeconds': 180,
+                                              'groupMaxChecks': 12, 'groupMaxSeconds': 600,
+                                              'groupMaxHosts': 8}})
         output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\n'
                   'Host is up.\n80/tcp open http\nNmap done: 1 IP address (1 host up) scanned')
         doc = self.call('/api/import', 'POST', {'tool': 'nmap', 'output': output})[1]
