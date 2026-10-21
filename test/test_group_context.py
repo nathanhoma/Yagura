@@ -7,6 +7,7 @@ from unittest.mock import patch
 from backend import findings as F
 from backend.analysis import scoped_document
 from backend.group_context import fresh_candidates, read_requests, seed_context
+from backend.llm import LlmError
 from backend.server import Workspace
 
 
@@ -142,6 +143,59 @@ class GroupContextTests(unittest.TestCase):
         self.assertEqual(saved['status'], 'completed')
         self.assertEqual(model.calls, 2)
         self.assertEqual(sum(e['type'] == 'context-repair' for e in saved['events']), 1)
+
+    def test_invalid_context_host_gets_one_bounded_correction(self):
+        host_id = self.hosts[0]['id']
+        class RepairModel:
+            def __init__(self):
+                self.calls = 0
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                self.calls += 1
+                if self.calls == 1:
+                    return {'model': 'fake', 'data': {'readRequests': [
+                        {'tool': 'list_findings', 'hostId': 'unselected'}]}}
+                if self.calls == 2:
+                    correction = json.loads(messages[-1]['content'])
+                    assert host_id in correction['selectedHostIds']
+                    return {'model': 'fake', 'data': {'readRequests': [
+                        {'tool': 'list_findings', 'hostId': host_id}]}}
+                return {'model': 'fake', 'data': {'flags': [], 'candidateId': None,
+                                                'reason': 'No supported flag.'}}
+        model = RepairModel()
+        self.ws.llm = model
+        with patch('backend.autonomy.workflow', return_value={'candidates': []}):
+            self.ws.autonomy.start_group([h['id'] for h in self.hosts], self.scope)
+            self.ws.autonomy.thread.join(3)
+        saved = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(model.calls, 3)
+        repair = next(e for e in saved['events'] if e['type'] == 'context-request-repair')
+        self.assertEqual(repair['submittedRequests'][0]['hostId'], 'unselected')
+        self.assertEqual(sum(e['type'] == 'context-read' for e in saved['events']), 1)
+
+    def test_truncated_group_response_retries_with_larger_limit(self):
+        class TruncatedModel:
+            def __init__(self):
+                self.limits = []
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                self.limits.append(max_tokens)
+                if len(self.limits) == 1:
+                    raise LlmError('invalid-response', 'The local model response was truncated.')
+                return {'model': 'fake', 'data': {'flags': [], 'candidateId': None,
+                                                'reason': 'No supported flag.'}}
+        model = TruncatedModel()
+        self.ws.llm = model
+        with patch('backend.autonomy.workflow', return_value={'candidates': []}):
+            self.ws.autonomy.start_group([h['id'] for h in self.hosts], self.scope)
+            self.ws.autonomy.thread.join(3)
+        saved = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(model.limits, [3600, 6400])
+        self.assertEqual(sum(e['type'] == 'model-retry' for e in saved['events']), 1)
 
 
 if __name__ == '__main__':

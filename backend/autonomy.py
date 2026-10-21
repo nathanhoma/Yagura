@@ -24,7 +24,8 @@ MAX_SECONDS = 180
 GROUP_MAX_CHECKS = 12
 GROUP_MAX_SECONDS = 600
 MAX_RESPONSE_TOKENS = 6400
-GROUP_RESPONSE_TOKENS = 1800
+GROUP_RESPONSE_TOKENS = 3600
+GROUP_RETRY_TOKENS = 6400
 MAX_DISCOVERY_SECONDS = 600
 MAX_DNS_REVIEWS = 8
 AUTO_GROUP_HOSTS = 4
@@ -694,16 +695,52 @@ class AutonomyController:
             {'role': 'system', 'content': GROUP_PROMPT},
             {'role': 'user', 'content': json.dumps({'hostIds': run['hostIds'], 'context': context,
                 'previousFlags': run.get('flags', [])}, ensure_ascii=False)}]
+        def complete_group():
+            try:
+                return self.workspace.llm.complete(messages,
+                    max_tokens=GROUP_RESPONSE_TOKENS, model=model)
+            except LlmError as exc:
+                if exc.code != 'invalid-response' or 'truncated' not in str(exc).lower():
+                    raise
+                self._event(run_id, dict(type='model-retry', snapshotId=snapshot,
+                    reason='Model response reached its output limit.',
+                    maxTokens=GROUP_RETRY_TOKENS))
+                return self.workspace.llm.complete(messages,
+                    max_tokens=GROUP_RETRY_TOKENS, model=model)
+
         for round_number in range(MAX_READ_ROUNDS + 1):
-            response = self.workspace.llm.complete(messages,
-                max_tokens=GROUP_RESPONSE_TOKENS, model=model)
+            response = complete_group()
             answer = response['data']
             if 'readRequests' not in answer:
                 break
             if round_number >= MAX_READ_ROUNDS:
                 raise ValueError('AI exceeded the saved-context read limit.')
-            results = read_requests(answer['readRequests'], selected, run['hostIds'],
-                                    candidates, run['events'])
+            for repair in range(2):
+                try:
+                    results = read_requests(answer['readRequests'], selected, run['hostIds'],
+                                            candidates, run['events'])
+                    break
+                except ValueError as exc:
+                    if repair:
+                        raise
+                    requests = answer.get('readRequests')
+                    submitted = [{'tool': redact(str(item.get('tool', '')))[:40],
+                                  'hostId': redact(str(item.get('hostId', '')))[:100]}
+                                 for item in requests[:3] if isinstance(item, dict)] if isinstance(requests, list) else []
+                    self._event(run_id, dict(type='context-request-repair', snapshotId=snapshot,
+                        reason=str(exc)[:160], submittedRequests=submitted))
+                    messages.append({'role': 'assistant', 'content': json.dumps(answer, ensure_ascii=False)})
+                    messages.append({'role': 'user', 'content': json.dumps({
+                        'validationError': str(exc), 'selectedHostIds': run['hostIds'],
+                        'allowedTools': ['list_findings', 'get_evidence', 'list_candidates', 'get_check_history'],
+                        'instruction': 'Return corrected readRequests for selected hosts using saved IDs, or a final comparison. Do not execute commands.'
+                    }, ensure_ascii=False)})
+                    response = complete_group()
+                    answer = response['data']
+                    if 'readRequests' not in answer:
+                        break
+            if 'readRequests' not in answer:
+                break
             for result in results:
                 rows = result.get('findings', [])
                 if result['tool'] == 'list_findings':
@@ -777,8 +814,7 @@ class AutonomyController:
                     'shownCandidateIds': sorted(shown_candidates),
                     'instruction': 'Return a corrected final comparison JSON. Use only these linked IDs; empty flags are valid. Do not request more context.'},
                     ensure_ascii=False)})
-                response = self.workspace.llm.complete(messages,
-                    max_tokens=GROUP_RESPONSE_TOKENS, model=model)
+                response = complete_group()
                 answer = response['data']
         _, latest, _, _ = self._group_state(run_id, scope)
         if fingerprint(scoped_document(latest, None, scope, run['hostIds'])) != snapshot:
