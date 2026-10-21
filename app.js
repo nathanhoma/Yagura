@@ -352,7 +352,7 @@ function renderAutonomy(){
   select.value=autonomyCurrent;
   const run=autonomyRuns.find(r=>r.id===autonomyCurrent),active=autonomyRuns.find(r=>['running','awaiting-approval','awaiting-host-review','awaiting-discovery'].includes(r.status));
   const now=$('#autonomyNow'),reviewAction=$('#autonomyReviewAction');
-  const modeState=$('#workflowAiState');modeState.hidden=!active;modeState.textContent=active?.status==='running'?'Investigation running':active?'Your review is needed':'';
+  document.querySelectorAll('[data-ai-state]').forEach(modeState=>{modeState.hidden=!active;modeState.textContent=active?.status==='running'?'Investigation running':active?'Your review is needed':'';});
   now.classList.toggle('attention',!!active&&active.status!=='running');
   now.querySelector('strong').textContent=active?active.status==='running'?'Investigation running':active.status==='awaiting-approval'?'Command approval required':'Discovery needs your review':'No active investigation';
   now.querySelector('p').textContent=active?`${active.hostName||active.hostIp} · ${active.events.filter(e=>e.type==='check').length}/${active.maxChecks==null?'∞':active.maxChecks} checks${active.stopReason?' · '+active.stopReason:''}`:'Review a saved run below or start a new one.';
