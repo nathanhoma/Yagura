@@ -142,11 +142,13 @@ function renderAttention(){
   $('#attentionCount').textContent=`${attentionFlags.length} flag${attentionFlags.length===1?'':'s'}`;
   const byId=new Map(findings.map(f=>[f.id,f]));
   const box=$('#attentionList');
-  box.innerHTML=attentionFlags.length?attentionFlags.map(flag=>{
-    const host=byId.get(flag.hostId),service=byId.get(flag.serviceId);
+  const grouped=new Map();for(const flag of attentionFlags){if(!grouped.has(flag.hostId))grouped.set(flag.hostId,[]);grouped.get(flag.hostId).push(flag);}
+  const row=flag=>{
+    const service=byId.get(flag.serviceId);
     const source=(flag.findingIds||[]).map(id=>ref(id,recordLabel(byId.get(id)||{title:id}))).join(' · ');
-    return `<div class="finding-record"><div class="item-left"><strong>${esc(flag.title)}</strong><small>${host?ref(host.id,recordLabel(host)):esc(flag.hostId)}${service&&service.id!==host?.id?' · '+ref(service.id,recordLabel(service)):''}</small><p>${esc(flag.reason)}</p><small>Findings: ${source}</small><small>Evidence: ${evidenceLinks(flag.evidenceIds)}</small></div><span class="kind">${esc(flag.kind)}</span></div>`;
-  }).join(''):'<div class="empty">No evidence-linked review flags in the approved scope.</div>';
+    return `<div class="finding-record"><div class="item-left"><strong>${esc(flag.title)}</strong>${service?`<small>${ref(service.id,recordLabel(service))}</small>`:''}<p>${esc(flag.reason)}</p><small>Findings: ${source}</small><small>Evidence: ${evidenceLinks(flag.evidenceIds)}</small></div><span class="kind">${esc(flag.kind)}</span></div>`;
+  };
+  box.innerHTML=attentionFlags.length?[...grouped].map(([hostId,flags])=>{const host=byId.get(hostId);return `<details class="finding-branch"><summary><span class="finding-name">${esc(recordLabel(host||{title:hostId}))}</span><span class="finding-summary-count">${flags.length} flag${flags.length===1?'':'s'}</span></summary><div class="finding-children">${host?`<p>${ref(host.id,'Open host evidence')}</p>`:''}${flags.map(row).join('')}</div></details>`;}).join(''):'<div class="empty">No evidence-linked review flags in the approved scope.</div>';
   wireRefs(box);
 }
 function renderMap(){

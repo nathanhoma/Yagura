@@ -32,15 +32,22 @@ def review_flags(doc, scope):
 
     for item in services:
         product, version = str(item.get('product') or '').strip(), str(item.get('version') or '').strip()
-        if product or version:
+        if version:
             label = ' '.join(part for part in (product, version) if part)
             add('software', item, f'Software identified: {label}',
                 f'{item["port"]}/{item["protocol"]} reports {label}. Confirm the version and assess relevance; identification alone does not establish a vulnerability.')
 
+    latest_os = {}
+    for item in observations:
+        if item.get('title') == 'Nmap OS guess' and item.get('detail') and 'No exact OS matches' not in item['detail']:
+            previous = latest_os.get(item['hostId'])
+            if not previous or str(item.get('lastSeen') or '') >= str(previous.get('lastSeen') or ''):
+                latest_os[item['hostId']] = item
+
     for item in observations:
         title, detail = str(item.get('title') or ''), str(item.get('detail') or '')
         lowered = detail.lower()
-        if title == 'Nmap OS guess' and detail:
+        if title == 'Nmap OS guess' and latest_os.get(item.get('hostId')) is item:
             add('os', item, 'OS fingerprint to review',
                 f'Nmap reported {detail[:230]}. This is a fingerprint estimate; confirm it before relying on the platform or version.')
         elif title == 'Curated Nuclei exposure check' and detail.startswith('Exposed Git HEAD'):
@@ -58,9 +65,13 @@ def review_flags(doc, scope):
         elif title == 'Web form metadata' and ('password' in lowered or 'login' in lowered):
             add('auth-surface', item, 'Authentication form found',
                 'Web form metadata mentions login or password fields. Identify the service and authentication flow before further testing.')
-        elif title in ('Web technologies', 'Web inventory') and re.search(r'(?:\bserver:|\bpowered.by:|\b\d+\.\d+(?:\.\d+)?\b)', detail, re.I):
+        elif title == 'Web technologies' and re.search(r'\b[a-z][a-z0-9_.-]*[/ ]\d+\.\d+(?:\.\d+)?\b', detail, re.I):
             add('web-software', item, 'Web software details to review',
                 'The web response contains software or version details. Verify the product and version in the linked evidence.')
+        elif title == 'Web inventory' and any(re.search(r'\b[a-z][a-z0-9_.-]*/\d+\.\d+(?:\.\d+)?\b', line.rsplit(' · ', 1)[-1], re.I)
+                                                   for line in detail.splitlines() if ' · ' in line):
+            add('web-software', item, 'Web server version to review',
+                'A web response reported a server version. Verify the header and product in the linked evidence.')
 
     by_port = {}
     for item in services:

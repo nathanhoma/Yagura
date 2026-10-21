@@ -36,6 +36,14 @@ class AttentionTests(unittest.TestCase):
         service['product'] = ''
         self.assertEqual(review_flags(doc, SCOPE), [])
 
+    def test_multiple_os_guesses_collapse_to_latest_and_product_without_version_is_not_flagged(self):
+        doc = F.empty()
+        import_nmap(doc, '192.168.56.10', '', os_name='Linux 4.x')
+        import_nmap(doc, '192.168.56.10', '', os_name='Linux 5.x')
+        flags = review_flags(doc, SCOPE)
+        self.assertEqual([f['kind'] for f in flags], ['os'])
+        self.assertIn('Linux 5.x', flags[0]['reason'])
+
     def test_unapproved_domain_host_is_not_flagged(self):
         doc = F.empty()
         import_nmap(doc, '192.168.56.10', '1.20')
