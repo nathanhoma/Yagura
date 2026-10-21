@@ -28,6 +28,7 @@ from .briefing import answer_question
 from .check_proposals import CheckProposals
 from .activity import ActivityTracker
 from .attention import review_flags
+from .vulnerabilities import match_versions
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -713,10 +714,10 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     if hasattr(event, 'error'):
                         raise event.error
                     return self.send_json(200, event.result)
-                if self.command == 'GET' and path in ('/api/findings', '/api/workflow', '/api/commands', '/api/attention'):
+                if self.command == 'GET' and path in ('/api/findings', '/api/workflow', '/api/commands', '/api/attention', '/api/vulnerabilities'):
                     with workspace.lock:
                         scope = workspace.resolve_scope(parse_qs(url.query).get('cidr', [None])[0]) if path == '/api/workflow' else None
-                        data = {'/api/findings': lambda: sanitize_document(workspace.load()), '/api/workflow': lambda: workflow(sanitize_document(workspace.load()), scope), '/api/commands': lambda: {'commands': COMMAND_CATALOG + workspace.check_proposals.catalog_entries()}, '/api/attention': lambda: {'flags': review_flags(sanitize_document(workspace.load()), workspace.load_scope())}}[path]()
+                        data = {'/api/findings': lambda: sanitize_document(workspace.load()), '/api/workflow': lambda: workflow(sanitize_document(workspace.load()), scope), '/api/commands': lambda: {'commands': COMMAND_CATALOG + workspace.check_proposals.catalog_entries()}, '/api/attention': lambda: {'flags': review_flags(sanitize_document(workspace.load()), workspace.load_scope())}, '/api/vulnerabilities': lambda: match_versions(sanitize_document(workspace.load()), workspace.load_scope())}[path]()
                     return self.send_json(200, data)
                 if self.command == 'GET' and path == '/api/export':
                     with workspace.lock:

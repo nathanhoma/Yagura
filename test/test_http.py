@@ -51,6 +51,17 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(data['flags'][0]['kind'], 'software')
         self.assertEqual(len(data['flags'][0]['evidenceIds']), 1)
 
+    def test_vulnerability_endpoint_uses_scoped_saved_evidence(self):
+        self.workspace.save_scope({'cidrs': ['192.168.56.0/24'], 'domains': []})
+        self.assertEqual(self.call('/api/vulnerabilities')[1]['matches'], [])
+        xml = '<nmaprun><host><status state="up"/><address addrtype="ipv4" addr="192.168.56.10"/><ports><port protocol="tcp" portid="80"><state state="open"/><service name="http" product="Apache httpd" version="2.4.58"/></port></ports></host></nmaprun>'
+        self.workspace.save(F.parse_import({'tool': 'nmap', 'output': xml}))
+        status, data = self.call('/api/vulnerabilities')
+        self.assertEqual(status, 200)
+        self.assertEqual(data['catalog']['asOf'], '2026-10-21')
+        self.assertIn('CVE-2023-38709', {match['cveId'] for match in data['matches']})
+        self.assertTrue(all(match['evidenceIds'] and match['status'] == 'possible' for match in data['matches']))
+
     def test_activity_endpoint_reports_live_and_finished_operations(self):
         self.assertEqual(self.call('/api/activity')[1]['active'], [])
         item = self.workspace.activity.begin('check', 'Test check', 'ping -c 3 100.96.1.70', '100.96.1.70')
