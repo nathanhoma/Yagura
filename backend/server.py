@@ -994,12 +994,13 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(200, sanitize_document(doc))
                 if self.command == 'POST' and path == '/api/checks/run':
                     body = self.body(4000)
-                    if not isinstance(body, dict) or set(body) - {'candidateId', 'authorized', 'authorizedCidr', 'authorizedScope', 'editedCommand'} or body.get('authorized') is not True or not isinstance(body.get('candidateId'), str) or ('editedCommand' in body and not isinstance(body['editedCommand'], str)) or 'authorizedCidr' in body and 'authorizedScope' in body:
+                    if not isinstance(body, dict) or set(body) - {'candidateId', 'authorized', 'authorizedCidr', 'authorizedScope', 'editedCommand', 'expectedCommand'} or body.get('authorized') is not True or not isinstance(body.get('candidateId'), str) or ('editedCommand' in body and not isinstance(body['editedCommand'], str)) or ('expectedCommand' in body and not isinstance(body['expectedCommand'], str)) or 'authorizedCidr' in body and 'authorizedScope' in body:
                         raise ValueError('Choose a current suggested check and confirm authorization.')
                     with workspace.lock:
                         scope = workspace.resolve_scope(body.get('authorizedScope', body.get('authorizedCidr')))
                     try:
-                        result = workspace.execute_candidate(body['candidateId'], scope, body.get('editedCommand'))
+                        result = workspace.execute_candidate(body['candidateId'], scope, body.get('editedCommand'),
+                                                             body.get('expectedCommand'))
                     except CheckBusy as exc:
                         return self.send_json(409, {'error': str(exc)})
                     return self.send_json(200, result)

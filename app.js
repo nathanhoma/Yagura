@@ -15,14 +15,14 @@ try{workflowMode=localStorage.getItem('yagura-workflow-mode')==='manual'?'manual
 function applyWorkflowMode(){document.body.dataset.workflowMode=workflowMode;document.querySelectorAll('[data-workflow-switch]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.workflowSwitch===workflowMode)));$('#workflowModeHint').textContent=(workflowMode==='ai'?'Yagura chooses follow-up checks within the saved scope. You approve each run and every additional AI-written command.':'Choose and review each check yourself. Optional AI suggestions and a previewed short sequence are available.')+' Switching modes does not stop an active run.';}
 function switchWorkflowMode(mode){if(mode!==workflowMode){workflowMode=mode;try{localStorage.setItem('yagura-workflow-mode',mode);}catch{}}location.hash=mode==='ai'?'#autonomy':'#checks';showView();}
 document.querySelectorAll('[data-workflow-switch]').forEach(button=>button.onclick=()=>switchWorkflowMode(button.dataset.workflowSwitch));
-let latestAnalysis=null,briefingMessages=[],briefingContextKey='',briefingBusy=false;
+let latestAnalysis=null,briefingMessages=[],briefingContextKey='',briefingBusy=false,briefingSavedCandidates=[],briefingSavedResults={};
 let autonomyModelRequired=false,autonomyMode='group',autonomyNewInitialized=false;
 const autonomySelectedHosts=new Set();
 const emptyScope=()=>({cidrs:[],domains:[],matchMode:'and'});
 let savedScope=emptyScope(),scopeLoaded=false,scopeLoadError='';
 let stopDiscovery=false;
 const scopeLabel=()=>[savedScope.cidrs.join(', '),savedScope.domains.length?`${(savedScope.matchMode||'and').toUpperCase()} domains: `+savedScope.domains.join(', '):''].filter(Boolean).join(' · ');
-function showView(){const hash=location.hash.slice(1);const view=hash==='recon'?'scope':hash;const selected=views[view]?view:'scope';if(aiViews.has(selected))workflowMode='ai';else if(manualViews.has(selected))workflowMode='manual';try{localStorage.setItem('yagura-workflow-mode',workflowMode);}catch{}applyWorkflowMode();document.body.dataset.view=selected;$('#viewTitle').textContent=viewTitles[selected];document.title=viewTitles[selected]+' · Yagura';$('#viewIntro').textContent=views[selected];document.querySelectorAll('.nav a,.mobile-nav a').forEach(a=>{const active=a.hash==='#'+selected;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});updateScopeGate();window.scrollTo(0,0);}
+function showView(){const hash=location.hash.slice(1);const view=hash==='recon'?'scope':hash;const selected=views[view]?view:'scope';if(aiViews.has(selected))workflowMode='ai';else if(manualViews.has(selected))workflowMode='manual';try{localStorage.setItem('yagura-workflow-mode',workflowMode);}catch{}applyWorkflowMode();document.body.dataset.view=selected;$('#viewTitle').textContent=viewTitles[selected];document.title=viewTitles[selected]+' · Yagura';$('#viewIntro').textContent=views[selected];document.querySelectorAll('.nav a,.mobile-nav a').forEach(a=>{const active=a.hash==='#'+selected;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});updateScopeGate();window.scrollTo(0,0);if(selected==='briefing')requestAnimationFrame(boxScroll);}
 function updateScopeGate(){
   const ready=scopeLoaded&&savedScope.cidrs.length>0;
   document.body.dataset.scopeState=ready?'ready':scopeLoaded?'required':scopeLoadError?'error':'loading';
@@ -294,6 +294,12 @@ function briefingGroup(){const approved=new Set(briefingApprovedHosts().map(h=>h
 function briefingHostIds(){const selected=$('#briefingHost').value;if(selected&&selected!=='group')return [selected];const group=briefingGroup();return group?group.hostIds:briefingApprovedHosts().slice(0,4).map(h=>h.id);}
 function briefingTurn(role,html){return `<div class="briefing-turn ${role}"><span class="briefing-speaker">${role==='user'?'You':'Yagura'}</span><div class="briefing-bubble">${html}</div></div>`;}
 function briefingSources(findingIds,evidenceIds){const fids=(findingIds||[]).filter(id=>findings.some(f=>f.id===id)),eids=(evidenceIds||[]).filter(id=>evidence.some(e=>e.id===id));if(!fids.length&&!eids.length)return '';const links=(fs,es)=>fs.map(id=>ref(id,recordLabel(findings.find(f=>f.id===id)))).join('')+es.map(id=>ref(id,'Source evidence')).join('');const remaining=fids.slice(2).length+eids.slice(2).length;return `<div class="briefing-links">${links(fids.slice(0,2),eids.slice(0,2))}${remaining?`<details><summary>Show ${remaining} more source${remaining===1?'':'s'}</summary><div class="briefing-links">${links(fids.slice(2),eids.slice(2))}</div></details>`:''}</div>`;}
+function briefingNearBottom(){const box=$('#briefingTranscript');return box.scrollHeight-box.scrollTop-box.clientHeight<80;}
+function updateBriefingLatest(){$('#briefingLatest').hidden=briefingNearBottom();}
+function briefingCandidateCard(candidate,messageIndex,result){
+  const host=findings.find(f=>f.id===candidate.hostId);
+  return `<div class="briefing-check"><strong>${esc(candidate.title)} · ${esc(recordLabel(host||{title:candidate.hostId}))}</strong><p>${esc(candidate.reason)}</p><button class="btn" type="button" data-briefing-review="${esc(candidate.id)}" data-briefing-message="${messageIndex}">Review command</button>${result?`<p class="status">${esc(checkOutcome(result))} · ${result.imported?'Findings updated':'Review the recorded output'}</p><button class="btn" type="button" data-briefing-result="${esc(candidate.id)}" data-briefing-message="${messageIndex}">View result</button>`:''}</div>`;
+}
 function renderBriefing(){
   briefingModelOptions();
   const box=$('#briefingTranscript'),hostSelect=$('#briefingHost'),previous=hostSelect.value,approved=briefingApprovedHosts(),group=briefingGroup();
@@ -301,7 +307,7 @@ function renderBriefing(){
   hostSelect.value=approved.some(h=>h.id===previous)?previous:'group';
   const hostIds=briefingHostIds(),selected=new Set(hostIds),latest=autonomyRuns.find(r=>r.scope&&JSON.stringify(r.scope)===JSON.stringify(savedScope)&&(r.hostIds||[r.hostId]).some(id=>selected.has(id)));
   const contextKey=JSON.stringify({scope:savedScope,hostIds});
-  if(briefingContextKey!==contextKey){briefingMessages=[];briefingContextKey=contextKey;}
+  if(briefingContextKey!==contextKey){briefingMessages=[];briefingSavedResults={};briefingContextKey=contextKey;}
   if(!scopeLoaded||!checkScope()||!hostIds.length){box.innerHTML='<div class="empty">Save a target scope and approve hosts to see a briefing.</div>';$('#briefingUpdated').textContent='No approved hosts in the saved scope';$('#briefingAsk').disabled=true;return;}
   $('#briefingAsk').disabled=briefingBusy;
   $('#briefingUpdated').textContent=`${hostIds.length} approved host${hostIds.length===1?'':'s'} · ${findings.filter(f=>selected.has(f.id)||selected.has(f.hostId)).length} saved findings${group?' · comparison '+date(group.endedAt||group.startedAt):''}`;
@@ -312,15 +318,47 @@ function renderBriefing(){
   if(!found){const rows=findings.filter(f=>f.kind==='observation'&&selected.has(f.hostId)&&f.evidenceIds?.length).sort((a,b)=>String(b.lastSeen||'').localeCompare(String(a.lastSeen||''))).slice(0,3);found=rows.length?rows.map(f=>`<p><strong>${esc(f.title||'Observation')}</strong> · ${esc(recordLabel(findings.find(h=>h.id===f.hostId)||{title:f.hostId}))}: ${esc(f.detail||'Recorded observation')}</p>${briefingSources([f.id],f.evidenceIds.slice(0,1))}`).join(''):'<p>No linked observations have been recorded for these hosts yet.</p>';}
   const recentCommands=new Set(evidence.filter(e=>e.command&&e.output&&Number.isFinite(Date.parse(e.observedAt))&&Date.now()-Date.parse(e.observedAt)<86400000).map(e=>e.command));
   const candidateKeys=new Set(),candidates=map.candidates.filter(c=>selected.has(c.hostId)&&!recentCommands.has(c.command)).sort((a,b)=>Number(flags.some(f=>f.hostId===b.hostId))-Number(flags.some(f=>f.hostId===a.hostId))).filter(c=>{const key=c.hostId+'|'+c.title;if(candidateKeys.has(key))return false;candidateKeys.add(key);return true;}).slice(0,3);
-  const next=candidates.length?candidates.map(c=>`<p><strong>${esc(c.title)}</strong> · ${esc(recordLabel(findings.find(f=>f.id===c.hostId)||{title:c.hostId}))}<br>${esc(c.reason)}</p>${briefingSources(c.findingIds,c.evidenceIds)}`).join('')+'<p><a href="#checks">Review these in Next checks →</a></p>':'<p>No untried catalog check is currently available for this selection. Review the flagged findings, then describe a specific follow-up in <a href="#checks">Next checks</a> for human review.</p>';
+  briefingSavedCandidates=candidates;
+  const savedResults=Object.entries(briefingSavedResults).filter(([id])=>!candidates.some(c=>c.id===id)).map(([id,result])=>`<div class="briefing-check"><strong>${esc(result.title||'Completed check')}</strong><p class="status">${esc(checkOutcome(result))}</p><button class="btn" type="button" data-briefing-result="${esc(id)}" data-briefing-message="-1">View result</button></div>`).join('');
+  const next=(candidates.length?candidates.map(c=>briefingCandidateCard(c,-1,briefingSavedResults[c.id])+briefingSources(c.findingIds,c.evidenceIds)).join(''):'<p>No untried catalog check is currently available for this selection. Review the flagged findings, then describe a specific follow-up in <a href="#checks">Next checks</a> for human review.</p>')+savedResults;
   const recent=latest?`<p>${esc(date(latest.startedAt))}: ${esc(latest.status)} · ${(latest.events||[]).filter(e=>e.type==='check').length} recorded check(s).</p>${latest.stopReason?`<p>${esc(latest.stopReason)}</p>`:''}<p><a href="#autonomy">Open the full AI log →</a></p>`:'<p>No autonomous run has been recorded for these hosts yet.</p>';
-  box.innerHTML=briefingTurn('user','<p>What have we found so far?</p>')+briefingTurn('assistant',found)+briefingTurn('user','<p>What should we review next?</p>')+briefingTurn('assistant',next)+briefingTurn('user','<p>What happened in the latest run?</p>')+briefingTurn('assistant',recent)+briefingMessages.map(m=>briefingTurn('user',`<p>${esc(m.question)}</p>`)+briefingTurn('assistant',`<p>${esc(m.reply.answer)}</p>${m.reply.uncertainty?`<p class="briefing-meta">Uncertainty: ${esc(m.reply.uncertainty)}</p>`:''}${briefingSources(m.reply.findingIds,m.reply.evidenceIds)}${(m.reply.candidates||[]).map(c=>`<p class="briefing-meta">Possible next check for review: ${esc(c.title)} · ${esc(c.reason)}</p>`).join('')}`)).join('');
+  const follow=briefingNearBottom(),position=box.scrollTop;
+  box.innerHTML=briefingTurn('user','<p>What have we found so far?</p>')+briefingTurn('assistant',found)+briefingTurn('user','<p>What should we review next?</p>')+briefingTurn('assistant',next)+briefingTurn('user','<p>What happened in the latest run?</p>')+briefingTurn('assistant',recent)+briefingMessages.map((m,i)=>briefingTurn('user',`<p>${esc(m.question)}</p>`)+briefingTurn('assistant',`<p>${esc(m.reply.answer)}</p>${m.reply.uncertainty?`<p class="briefing-meta">Uncertainty: ${esc(m.reply.uncertainty)}</p>`:''}${briefingSources(m.reply.findingIds,m.reply.evidenceIds)}${(m.reply.candidates||[]).map(c=>briefingCandidateCard(c,i,m.results?.[c.id])).join('')}`)).join('');
   wireRefs(box);
+  box.querySelectorAll('[data-briefing-review]').forEach(button=>button.onclick=()=>reviewBriefingCandidate(Number(button.dataset.briefingMessage),button.dataset.briefingReview));
+  box.querySelectorAll('[data-briefing-result]').forEach(button=>button.onclick=()=>{const i=Number(button.dataset.briefingMessage),result=(i===-1?briefingSavedResults:briefingMessages[i]?.results)?.[button.dataset.briefingResult];if(result)showDialog('Check output',`<p class="mono">${esc(result.command)}</p><p class="status">${esc(checkOutcome(result))}${result.imported?' · Findings updated':''}</p><pre>${esc(result.output||result.stderr||'No output.')}</pre>`);});
+  box.scrollTop=follow?box.scrollHeight:position;
+  updateBriefingLatest();
 }
-$('#briefingHost').onchange=()=>{briefingMessages=[];renderBriefing();};
-$('#briefingRefresh').onclick=async()=>{const button=$('#briefingRefresh');button.disabled=true;$('#briefingState').textContent='Refreshing saved evidence…';try{briefingMessages=[];await refreshFindings();await loadAutonomyHistory();renderBriefing();$('#briefingState').textContent='Briefing refreshed from saved evidence.';}catch(e){$('#briefingState').textContent=e.message;}finally{button.disabled=false;}};
-$('#briefingAsk').onclick=async()=>{const question=$('#briefingQuestion').value.trim(),hostIds=briefingHostIds();if(question.length<3||!hostIds.length){$('#briefingState').textContent='Enter a question and choose approved hosts.';return;}const button=$('#briefingAsk'),contextKey=briefingContextKey;briefingBusy=true;button.disabled=true;$('#briefingState').textContent='Reading linked evidence…';try{const reply=await post('/api/briefing/ask',{question,hostIds,model:$('#briefingModel').value});if(contextKey===briefingContextKey){briefingMessages.push({question,reply});$('#briefingQuestion').value='';renderBriefing();$('#briefingState').textContent=reply.supported?'Citation links verified. Review the claims against each source.':'Saved evidence does not answer this question yet.';boxScroll();}}catch(e){$('#briefingState').textContent=e.message;}finally{briefingBusy=false;button.disabled=!briefingHostIds().length;}};
-function boxScroll(){const box=$('#briefingTranscript');box.lastElementChild?.scrollIntoView({block:'nearest'});}
+$('#briefingTranscript').addEventListener('scroll',updateBriefingLatest);
+$('#briefingLatest').onclick=boxScroll;
+$('#briefingHost').onchange=()=>{briefingMessages=[];briefingSavedResults={};renderBriefing();boxScroll();};
+$('#briefingRefresh').onclick=async()=>{const button=$('#briefingRefresh');button.disabled=true;$('#briefingState').textContent='Refreshing saved evidence…';try{briefingMessages=[];briefingSavedResults={};await refreshFindings();await loadAutonomyHistory();renderBriefing();$('#briefingState').textContent='Briefing refreshed from saved evidence.';}catch(e){$('#briefingState').textContent=e.message;}finally{button.disabled=false;}};
+$('#briefingAsk').onclick=async()=>{const question=$('#briefingQuestion').value.trim(),hostIds=briefingHostIds();if(question.length<3||!hostIds.length){$('#briefingState').textContent='Enter a question and choose approved hosts.';return;}const button=$('#briefingAsk'),contextKey=briefingContextKey;briefingBusy=true;button.disabled=true;$('#briefingState').textContent='Reading linked evidence…';try{const reply=await post('/api/briefing/ask',{question,hostIds,model:$('#briefingModel').value});if(contextKey===briefingContextKey){briefingMessages.push({question,reply,results:{}});$('#briefingQuestion').value='';renderBriefing();$('#briefingState').textContent=reply.supported?'Citation links verified. Review the claims against each source.':'Saved evidence does not answer this question yet.';}}catch(e){$('#briefingState').textContent=e.message;}finally{briefingBusy=false;button.disabled=!briefingHostIds().length;}};
+function boxScroll(){const box=$('#briefingTranscript');box.scrollTop=box.scrollHeight;updateBriefingLatest();}
+async function reviewBriefingCandidate(messageIndex,candidateId){
+  const message=briefingMessages[messageIndex],proposed=(messageIndex===-1?briefingSavedCandidates:message?.reply.candidates)?.find(c=>c.id===candidateId),contextKey=briefingContextKey;
+  if(!proposed||!checkScope()){$('#briefingState').textContent='This suggestion is no longer available. Ask again with the current scope.';return;}
+  $('#briefingState').textContent='Checking the current command and approved target…';
+  try{
+    const fresh=(await api('/api/workflow')).candidates.find(c=>c.id===candidateId&&c.hostId===proposed.hostId);
+    if(!fresh||contextKey!==briefingContextKey||messageIndex!==-1&&briefingMessages[messageIndex]!==message)throw new Error('The suggested check or conversation changed. Ask again before approving.');
+    const host=findings.find(f=>f.id===fresh.hostId);
+    if(!host)throw new Error('The approved host is no longer available.');
+    showDialog('Review suggested check',`<p class="notice">Review this current, validated check before running it. No command runs when you open this review.</p><p><strong>${esc(fresh.title)}</strong> · ${esc(recordLabel(host))}</p><p>${esc(fresh.reason)}</p><pre>${esc(fresh.command)}</pre><p class="status">Saved scope: ${esc(scopeLabel())}</p><label class="check"><input id="briefingCheckAuthorized" type="checkbox"><span>I approve this exact command against this host under the saved scope.</span></label><p class="status" id="briefingReviewState" role="status"></p><button class="btn primary" id="briefingRunCheck" type="button">Approve and run</button>`);
+    $('#briefingRunCheck').onclick=async()=>{
+      if(!$('#briefingCheckAuthorized').checked){$('#briefingReviewState').textContent='Review the command and confirm approval first.';return;}
+      const button=$('#briefingRunCheck');button.disabled=true;$('#briefingReviewState').textContent='Running the approved check…';
+      try{
+        const result=await post('/api/checks/run',{candidateId:fresh.id,expectedCommand:fresh.command,authorized:true,authorizedScope:checkScope()});
+        $('#reviewDialog').close();if(messageIndex===-1)briefingSavedResults[fresh.id]={...result,title:fresh.title};else message.results[fresh.id]=result;
+        if(result.imported)await refreshFindings();else renderBriefing();
+        $('#briefingState').textContent=`${checkOutcome(result)} · Review the result beside the suggested check.`;
+      }catch(e){$('#briefingReviewState').textContent=e.message;button.disabled=false;}
+    };
+    $('#briefingState').textContent='Review the exact command and target in the confirmation window.';
+  }catch(e){$('#briefingState').textContent=e.message;}
+}
 let checkProposals=[];
 function renderCheckProposals(){
   const box=$('#proposalList');

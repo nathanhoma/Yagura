@@ -260,7 +260,11 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True})[0], 400)
         self.call('/api/scope', 'PUT', {'cidr': '10.0.4.80/32'})
         self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True, 'authorizedCidr': '10.0.4.81/32'})[0], 400)
-        status, result = self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True, 'authorizedCidr': '10.0.4.80/32'})
+        self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True,
+            'authorizedCidr': '10.0.4.80/32', 'expectedCommand': candidate['command'] + ' --extra'})[0], 400)
+        self.assertEqual(self.calls, [])
+        status, result = self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True,
+            'authorizedCidr': '10.0.4.80/32', 'expectedCommand': candidate['command']})
         self.assertEqual(status, 200)
         self.assertEqual(self.calls, [('nmap', ['-n', '-Pn', '-sT', '--top-ports', '100', '10.0.4.80'])])
         self.assertEqual(result['command'], candidate['command'])
