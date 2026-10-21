@@ -27,6 +27,11 @@ class FakeLlm:
 
 
 class BackendTests(unittest.TestCase):
+    def test_llm_timeout_allows_three_minutes_and_remains_bounded(self):
+        self.assertEqual(LlmService(timeout_ms=180000).timeout, 180)
+        self.assertEqual(LlmService(timeout_ms=300000).timeout, 180)
+        self.assertEqual(LlmService().timeout, 30)
+
     def test_all_import_formats_link_records(self):
         for tool, filename, count in [('nmap', 'nmap.xml', 1), ('nmap', 'nmap.txt', 1), ('ip addr', 'addr.json', 2), ('ip addr', 'addr.txt', 4), ('ip neigh', 'neigh.json', 2), ('ip neigh', 'neigh.txt', 3), ('ping', 'ping.txt', 1)]:
             with self.subTest(filename=filename):
