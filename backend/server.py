@@ -598,6 +598,23 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     with workspace.lock:
                         scope = workspace.resolve_scope(body.get('authorizedScope'))
                     return self.send_json(202, workspace.autonomy.start_group(body['hostIds'], scope, body.get('model', '')))
+                if self.command == 'POST' and path == '/api/autonomy/discover-group':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) - {'resolvers', 'model', 'authorizedScope', 'authorized'} or
+                            body.get('authorized') is not True or not isinstance(body.get('resolvers'), list) or
+                            not isinstance(body.get('model', ''), str) or len(body.get('model', '')) > 200):
+                        raise ValueError('Confirm discovery of the saved scope and provide internal resolvers when domains are set.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body.get('authorizedScope'))
+                    return self.send_json(202, workspace.autonomy.start_discover_group(scope, body['resolvers'], body.get('model', '')))
+                if self.command == 'POST' and path == '/api/autonomy/resume-discovery':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) != {'runId', 'authorizedScope', 'authorized'} or
+                            body.get('authorized') is not True or not isinstance(body.get('runId'), str)):
+                        raise ValueError('Confirm continuation of the current scoped discovery run.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                    return self.send_json(202, workspace.autonomy.resume_discover_group(body['runId'], scope))
                 if self.command == 'POST' and path == '/api/autonomy/stop':
                     body = self.body(1000)
                     if not isinstance(body, dict) or set(body) != {'runId'} or not isinstance(body['runId'], str):

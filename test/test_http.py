@@ -129,6 +129,61 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(saved['status'], 'completed')
         self.assertEqual(self.calls, [])
 
+    def test_auto_discovery_waits_for_domain_host_approval_then_selects_hosts(self):
+        class CompareModel:
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, **kwargs):
+                return {'model': 'fake', 'data': {'flags': [], 'candidateId': None,
+                    'reason': 'No differentiated host yet.'}}
+        self.workspace.llm = CompareModel()
+        scope = self.call('/api/scope', 'PUT', {'cidrs': ['100.96.1.0/28'],
+            'domains': ['03.crimsonia.net']})[1]
+        commands = []
+        def runner(program, args, timeout):
+            commands.append((program, args))
+            if program == 'nmap':
+                addresses = ['100.96.1.1', '100.96.1.2'] if '-sn' in args else [args[-1]]
+                output = ''.join(f'Nmap scan report for {ip}\nHost is up.\n' for ip in addresses)
+                return {'ok': True, 'stdout': output +
+                    f'Nmap done: {len(addresses)} IP addresses ({len(addresses)} hosts up) scanned',
+                    'stderr': ''}
+            self.assertEqual(program, 'dig')
+            if '-x' in args:
+                ip = args[-1]
+                name = f'node{ip.split(".")[-1]}.03.crimsonia.net'
+                return {'ok': True, 'stdout': f'{ip}.in-addr.arpa. 60 IN PTR {name}.\n', 'stderr': ''}
+            name = args[-2]
+            ip = '100.96.1.' + name.split('.')[0][4:]
+            return {'ok': True, 'stdout': f'{name}. 60 IN A {ip}\n', 'stderr': ''}
+        self.workspace.runner = runner
+        body = {'resolvers': ['100.96.1.3'], 'authorizedScope': scope, 'authorized': True}
+        self.assertEqual(self.call('/api/autonomy/discover-group', 'POST',
+            {**body, 'resolvers': ['8.8.8.8']})[0], 400)
+        self.assertEqual(commands, [])
+        status, run = self.call('/api/autonomy/discover-group', 'POST', body)
+        self.assertEqual(status, 202)
+        self.workspace.autonomy.thread.join(3)
+        saved = self.call('/api/autonomy')[1]['runs'][0]
+        self.assertEqual(saved['status'], 'awaiting-host-review')
+        self.assertEqual(saved['hostIds'], [])
+        self.assertEqual(self.call('/api/findings')[1]['findings'], [])
+        rows = self.call('/api/discovery/pending')[1]['hosts']
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(len(row['dns']['candidates']), 1)
+            self.assertEqual(self.call('/api/discovery/approve', 'POST', {'ip': row['ip'],
+                'name': row['dns']['candidates'][0], 'authorized': True})[0], 200)
+        self.assertEqual(self.call('/api/autonomy/resume-discovery', 'POST',
+            {'runId': run['id'], 'authorizedScope': scope, 'authorized': False})[0], 400)
+        self.assertEqual(self.call('/api/autonomy/resume-discovery', 'POST',
+            {'runId': run['id'], 'authorizedScope': scope, 'authorized': True})[0], 202)
+        self.workspace.autonomy.thread.join(3)
+        saved = self.call('/api/autonomy')[1]['runs'][0]
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(len(saved['hostIds']), 2)
+        self.assertEqual(len([e for e in saved['events'] if e['type'] == 'selection']), 1)
+
     def test_import_review_analysis_and_export(self):
         output = (Path(__file__).parent / 'fixtures/nmap.xml').read_text()
         payload = {'tool': 'nmap', 'output': output}
@@ -576,7 +631,8 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/autonomy')[1],
                      {'runs': [], 'limits': {'maxChecks': 3, 'maxSeconds': 180,
                                               'groupMaxChecks': 12, 'groupMaxSeconds': 600,
-                                              'groupMaxHosts': 8}})
+                                              'groupMaxHosts': 8, 'discoveryMaxSeconds': 600,
+                                              'autoGroupHosts': 4}})
         output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\n'
                   'Host is up.\n80/tcp open http\nNmap done: 1 IP address (1 host up) scanned')
         doc = self.call('/api/import', 'POST', {'tool': 'nmap', 'output': output})[1]

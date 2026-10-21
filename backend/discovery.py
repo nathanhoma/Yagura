@@ -39,7 +39,8 @@ def resolver_allowed(ip, scope):
 
 
 def validate_resolvers(resolvers, scope):
-    if not isinstance(resolvers, list) or not 1 <= len(resolvers) <= 4 or len(resolvers) != len(set(resolvers)):
+    if (not isinstance(resolvers, list) or not 1 <= len(resolvers) <= 4 or
+            any(not isinstance(item, str) for item in resolvers) or len(resolvers) != len(set(resolvers))):
         raise ValueError('Choose one to four distinct internal resolver IPs.')
     if not all(resolver_allowed(item, scope) for item in resolvers):
         raise ValueError('Each resolver must be an IP inside the saved CIDRs; public DNS is not allowed.')

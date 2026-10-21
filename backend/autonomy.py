@@ -1,16 +1,19 @@
 """AI-led checks with a human gate for additional commands."""
 import json
 import itertools
+import ipaddress
 import os
 import threading
 import time
 
 from .analysis import build_context, fingerprint, scoped_document
 from . import findings as F
+from .discovery import discovery_chunks, discovery_progress, dns_review, validate_resolvers
 from .findings import now, uid
 from .llm import LlmError
 from .outbound import require_target
 from .reviewed_check import validate as validate_reviewed_check
+from .scope import ip_allowed
 from .sensitive import redact, sanitize_document
 from .workflow import workflow
 
@@ -20,6 +23,9 @@ MAX_SECONDS = 180
 GROUP_MAX_CHECKS = 12
 GROUP_MAX_SECONDS = 600
 MAX_RESPONSE_TOKENS = 6400
+MAX_DISCOVERY_SECONDS = 600
+MAX_DNS_REVIEWS = 8
+AUTO_GROUP_HOSTS = 4
 SAFE_KINDS = frozenset(('ping', 'nmap-ports', 'nmap-service', 'http-headers',
                         'web-inventory', 'web-exposure', 'ssh-hostkey'))
 SYSTEM_PROMPT = ("You select the next read-only check for ONE explicitly approved exercise host. "
@@ -69,7 +75,8 @@ class AutonomyController:
     def limits(self):
         return {'maxChecks': self.max_checks, 'maxSeconds': MAX_SECONDS,
                 'groupMaxChecks': GROUP_MAX_CHECKS, 'groupMaxSeconds': GROUP_MAX_SECONDS,
-                'groupMaxHosts': 8}
+                'groupMaxHosts': 8, 'discoveryMaxSeconds': MAX_DISCOVERY_SECONDS,
+                'autoGroupHosts': AUTO_GROUP_HOSTS}
 
     def _load(self):
         try:
@@ -130,7 +137,7 @@ class AutonomyController:
         with ws.lock:
             if self.thread and self.thread.is_alive():
                 raise ValueError('An AI run is already in progress.')
-            if any(r.get('status') == 'awaiting-approval' for r in self._load()['runs']):
+            if any(r.get('status') in ('awaiting-approval', 'awaiting-host-review', 'awaiting-discovery') for r in self._load()['runs']):
                 raise ValueError('Review or stop the pending command proposal before starting another run.')
             if not ws.scope_file.exists() or ws.load_scope() != scope or not scope['cidrs']:
                 raise ValueError('Save and confirm the current target scope first.')
@@ -164,7 +171,7 @@ class AutonomyController:
                 any(not isinstance(h, str) for h in host_ids) or len(host_ids) != len(set(host_ids))):
             raise ValueError('Choose two to eight distinct approved hosts.')
         with ws.lock:
-            if self.thread and self.thread.is_alive() or any(r.get('status') == 'awaiting-approval' for r in self._load()['runs']):
+            if self.thread and self.thread.is_alive() or any(r.get('status') in ('awaiting-approval', 'awaiting-host-review', 'awaiting-discovery') for r in self._load()['runs']):
                 raise ValueError('Review or stop the current AI run first.')
             if not ws.scope_file.exists() or ws.load_scope() != scope or not scope['cidrs']:
                 raise ValueError('Save and confirm the current target scope first.')
@@ -193,11 +200,63 @@ class AutonomyController:
             self.thread.start()
             return run
 
+    def start_discover_group(self, scope, resolvers, model=''):
+        ws = self.workspace
+        with ws.lock:
+            if self.thread and self.thread.is_alive() or any(r.get('status') in ('awaiting-approval', 'awaiting-host-review', 'awaiting-discovery') for r in self._load()['runs']):
+                raise ValueError('Review or stop the current AI run first.')
+            if not ws.scope_file.exists() or ws.load_scope() != scope or not scope['cidrs']:
+                raise ValueError('Save and confirm the current target scope first.')
+            if scope['domains']:
+                validate_resolvers(resolvers, scope)
+            elif resolvers:
+                raise ValueError('Resolvers are only needed when the scope contains domains.')
+            ws.llm.assert_configuration()
+            if model:
+                ws.llm.select_model(requested=model)
+            run = dict(id=uid('ai-run'), mode='discover-group', hostIds=[], surveyedHostIds=[],
+                       hostSnapshots={}, hostId='', hostName='Saved target scope', hostIp='',
+                       model=model or 'server default', scope=scope, resolvers=resolvers,
+                       status='running', startedAt=now(), endedAt=None, maxChecks=GROUP_MAX_CHECKS,
+                       stopReason='', flags=[], events=[])
+            data = self._load()
+            data['runs'] = [run] + data['runs'][:19]
+            self._save(data)
+            self.activity_ids[run['id']] = ws.activity.begin('ai-run', 'Discover scoped hosts',
+                target=', '.join(scope['cidrs']), detail='Scanning saved ranges in small segments.')
+            self.stop_event = threading.Event()
+            self.thread = threading.Thread(target=self._discover_group_worker,
+                args=(run['id'], scope, model, self.stop_event, False), daemon=True,
+                name='yagura-ai-discover-group')
+            self.thread.start()
+            return run
+
+    def resume_discover_group(self, run_id, scope):
+        ws = self.workspace
+        with ws.lock:
+            run = next((r for r in self._load()['runs'] if r['id'] == run_id), None)
+            if not run or run.get('mode') != 'discover-group' or run['status'] not in ('awaiting-host-review', 'awaiting-discovery'):
+                raise ValueError('No matching discovery run is waiting to continue.')
+            if ws.load_scope() != scope or run['scope'] != scope:
+                raise ValueError('Authorized scope changed.')
+            if self.thread and self.thread.is_alive():
+                raise ValueError('Another AI run is already in progress.')
+            self._update(run_id, status='running')
+            self.stop_event = threading.Event()
+            model = run['model'] if run['model'] != 'server default' else ''
+            self.activity_ids[run_id] = ws.activity.begin('ai-run', 'Continue scoped discovery',
+                target=', '.join(scope['cidrs']), detail='Checking saved discovery and approved hosts.')
+            self.thread = threading.Thread(target=self._discover_group_worker,
+                args=(run_id, scope, model, self.stop_event, True), daemon=True,
+                name='yagura-ai-discover-group')
+            self.thread.start()
+            return next(r for r in self._load()['runs'] if r['id'] == run_id)
+
     def stop(self, run_id):
         with self.workspace.lock:
             run = next((r for r in self._load()['runs'] if r['id'] == run_id), None)
-            if run and run['status'] == 'awaiting-approval':
-                self._finish(run_id, 'stopped', 'Operator declined the pending proposal.')
+            if run and run['status'] in ('awaiting-approval', 'awaiting-host-review', 'awaiting-discovery'):
+                self._finish(run_id, 'stopped', 'Operator stopped the pending review or discovery.')
                 return {'stopRequested': True, 'runId': run_id}
             if not run or run['status'] != 'running' or not self.thread or not self.thread.is_alive():
                 raise ValueError('No matching AI run is active.')
@@ -215,7 +274,7 @@ class AutonomyController:
                 raise ValueError('Approved host was removed.')
             require_target(host, scope)
             run = next(r for r in self._load()['runs'] if r['id'] == run_id)
-            selected = scoped_document(doc, None, scope, run['hostIds']) if run.get('mode') == 'group' else scoped_document(doc, host_id, scope)
+            selected = scoped_document(doc, None, scope, run['hostIds']) if run.get('mode') in ('group', 'discover-group') else scoped_document(doc, host_id, scope)
             context = build_context(selected, scope)
             context['candidates'] = []
         response = ws.llm.complete([{'role': 'system', 'content': PROPOSAL_PROMPT},
@@ -308,9 +367,9 @@ class AutonomyController:
                 raise ValueError('Authorized scope changed.')
             host = next((f for f in self.workspace.load()['findings'] if f['id'] == run['hostId'] and f['kind'] == 'host'), None)
             if not host or host['ip'] != run['hostIp']:
-                if not run.get('mode') == 'group' or not host or host['ip'] != run['hostSnapshots'][run['hostId']]['ip']:
+                if run.get('mode') not in ('group', 'discover-group') or not host or host['ip'] != run['hostSnapshots'][run['hostId']]['ip']:
                     raise ValueError('Approved host changed.')
-            if run.get('mode') == 'group' and host.get('name') != run['hostSnapshots'][run['hostId']]['name']:
+            if run.get('mode') in ('group', 'discover-group') and host.get('name') != run['hostSnapshots'][run['hostId']]['name']:
                 raise ValueError('Approved host changed.')
             require_target(host, scope)
             validate_reviewed_check(expected_command, host['ip'])
@@ -324,8 +383,9 @@ class AutonomyController:
             model = run['model'] if run['model'] != 'server default' else ''
             self.activity_ids[run_id] = self.workspace.activity.begin('ai-run', 'AI-led investigation',
                 target=host.get('name') or host['ip'], detail='Running the human-approved command.')
-            target = self._group_worker if run.get('mode') == 'group' else self._worker
-            args = (run_id, scope, model, self.stop_event, expected_command) if run.get('mode') == 'group' else (run_id, run['hostId'], scope, model, self.stop_event, expected_command)
+            group = run.get('mode') in ('group', 'discover-group')
+            target = self._group_worker if group else self._worker
+            args = (run_id, scope, model, self.stop_event, expected_command) if group else (run_id, run['hostId'], scope, model, self.stop_event, expected_command)
             self.thread = threading.Thread(target=target,
                 args=args,
                 daemon=True, name='yagura-ai-reviewed-check')
@@ -397,6 +457,218 @@ class AutonomyController:
             candidates = [c for c in workflow(doc, scope)['candidates'] if c['hostId'] in hosts and
                           c['catalogId'] in SAFE_KINDS and c['id'] not in tried]
             return run, doc, hosts, candidates
+
+    def _discover_segment(self, run_id, cidr, scope):
+        ws = self.workspace
+        with ws.lock:
+            if ws.load_scope() != scope or ws.active_discoveries:
+                raise ValueError('Scope changed or another discovery segment is running.')
+            data = ws.load_discovery()
+            run = next((r for r in data.get('runs', []) if r.get('cidr') == cidr and r.get('scope') == scope), None)
+            if run is None:
+                run = dict(cidr=cidr, scope=scope, chunks=[dict(cidr=part, state='pending') for part in discovery_chunks(cidr)])
+                data.setdefault('runs', []).append(run)
+                data['runs'] = data['runs'][-20:]
+            part = next((p for p in run['chunks'] if p['state'] != 'completed'), None)
+            if part is None:
+                return discovery_progress(run)
+            chunk = part['cidr']
+            part['state'] = 'running'
+            part.pop('error', None)
+            ws.save_discovery(data)
+            key = (json.dumps(scope, sort_keys=True), cidr)
+            ws.active_discoveries.add(key)
+        activity_id = ws.activity.begin('discovery', 'Discover scoped hosts',
+            f'nmap -n -sn --max-rate 5 --max-retries 1 -oX - {chunk}', cidr, f'Scanning {chunk}.')
+        try:
+            result = ws.runner('nmap', ['-n', '-sn', '--max-rate', '5', '--max-retries', '1', '-oX', '-', chunk], 90)
+            if not result.get('ok'):
+                raise ValueError(result.get('stderr') or 'Nmap discovery failed.')
+            observed = now()
+            parsed = F.parse_import(dict(tool='nmap', output=result.get('stdout', ''),
+                command=f'nmap -n -sn --max-rate 5 --max-retries 1 -oX - {chunk}', observedAt=observed))
+            network = ipaddress.ip_network(chunk)
+            parsed_hosts = [h for h in parsed['findings'] if h['kind'] == 'host']
+            if any(ipaddress.ip_address(h['ip']) not in network for h in parsed_hosts):
+                raise ValueError('Discovery output named a host outside the scanned segment.')
+            hosts = [h for h in parsed_hosts if h.get('state') == 'up']
+            with ws.lock:
+                if ws.load_scope() != scope:
+                    raise ValueError('Scope changed while discovery ran.')
+                data = ws.load_discovery()
+                run = next(r for r in data['runs'] if r['cidr'] == cidr and r['scope'] == scope)
+                part = next(p for p in run['chunks'] if p['cidr'] == chunk)
+                scan_id = uid('scan')
+                data.setdefault('scans', []).append(dict(id=scan_id, cidr=chunk, requestedCidr=cidr,
+                    observedAt=observed, command=parsed['evidence'][0]['command'],
+                    output=result.get('stdout', '')[:100000], scope=scope))
+                data['scans'] = data['scans'][-128:]
+                for host in hosts:
+                    row = next((h for h in data['hosts'] if h['ip'] == host['ip'] and h.get('scope') == scope), None)
+                    if row:
+                        row.update(status='up', lastSeen=observed, scanId=scan_id)
+                    else:
+                        data['hosts'].append(dict(ip=host['ip'], status='up', firstSeen=observed,
+                            lastSeen=observed, scanId=scan_id, scope=scope, dns=None, approved=False))
+                if not scope['domains'] and hosts:
+                    doc = ws.load()
+                    F.merge_parsed(doc, parsed)
+                    ws.save(doc)
+                part.update(state='completed', count=len(hosts), scanId=scan_id, updatedAt=observed)
+                ws.save_discovery(data)
+                progress = discovery_progress(run)
+            self._event(run_id, dict(type='discovery', cidr=chunk, count=len(hosts),
+                                     completed=progress['completed'], total=progress['total']))
+            ws.activity.finish(activity_id, 'completed', f'{len(hosts)} host(s) found in {chunk}.')
+            return progress
+        except (ValueError, OSError) as exc:
+            with ws.lock:
+                data = ws.load_discovery()
+                run = next(r for r in data['runs'] if r['cidr'] == cidr and r['scope'] == scope)
+                part = next(p for p in run['chunks'] if p['cidr'] == chunk)
+                part.update(state='failed', error=redact(str(exc))[:300], updatedAt=now())
+                ws.save_discovery(data)
+            ws.activity.finish(activity_id, 'failed', str(exc))
+            raise
+        finally:
+            with ws.lock:
+                ws.active_discoveries.discard(key)
+
+    def _auto_dns_review(self, run_id, scope, resolvers, deadline, stop_event):
+        ws = self.workspace
+        reviewed = 0
+        while reviewed < MAX_DNS_REVIEWS and time.monotonic() < deadline and not stop_event.is_set():
+            with ws.lock:
+                if ws.load_scope() != scope:
+                    raise ValueError('Authorized scope changed.')
+                row = next((h for h in ws.load_discovery()['hosts'] if h.get('scope') == scope and
+                            ip_allowed(h.get('ip'), scope) and
+                            h.get('status') == 'up' and not h.get('approved') and not h.get('dns')), None)
+            if row is None:
+                break
+            review = dns_review(row['ip'], resolvers, scope, ws.runner, row.get('seedName'))
+            with ws.lock:
+                if ws.load_scope() != scope:
+                    raise ValueError('Authorized scope changed during DNS review.')
+                data = ws.load_discovery()
+                current = next((h for h in data['hosts'] if h['ip'] == row['ip'] and h.get('scope') == scope), None)
+                if current and not current.get('approved'):
+                    current['dns'] = review
+                    ws.save_discovery(data)
+            self._event(run_id, dict(type='dns-review', hostIp=row['ip'],
+                candidates=review['candidates'], conflicting=review['conflicting']))
+            reviewed += 1
+        return reviewed
+
+    def _auto_group_hosts(self, scope):
+        ws = self.workspace
+        with ws.lock:
+            if ws.load_scope() != scope:
+                raise ValueError('Authorized scope changed.')
+            rows = [t for t in workflow(ws.load(), scope)['targets'] if t['eligible']]
+        def score(row):
+            return (3 * sum(s.get('state') == 'open' for s in row['services']) +
+                    len(row['observations']) + min(len(row['host'].get('evidenceIds', [])), 5))
+        ranked = sorted(rows, key=lambda t: (-score(t), int(ipaddress.ip_address(t['host']['ip']))))
+        chosen = []
+        for cidr in scope['cidrs']:
+            next_row = next((t for t in ranked if ipaddress.ip_address(t['host']['ip']) in ipaddress.ip_network(cidr)
+                             and t['host']['id'] not in chosen), None)
+            if next_row:
+                chosen.append(next_row['host']['id'])
+            if len(chosen) >= AUTO_GROUP_HOSTS:
+                break
+        chosen.extend(t['host']['id'] for t in ranked if t['host']['id'] not in chosen)
+        return chosen[:AUTO_GROUP_HOSTS]
+
+    def _promote_ip_only_discovery(self, scope):
+        if scope['domains']:
+            return
+        ws = self.workspace
+        with ws.lock:
+            if ws.load_scope() != scope:
+                raise ValueError('Authorized scope changed.')
+            doc = ws.load()
+            known = {h['ip'] for h in doc['findings'] if h['kind'] == 'host'}
+            for row in ws.load_discovery()['hosts']:
+                if (row.get('scope') != scope or row.get('status') != 'up' or
+                        not ip_allowed(row.get('ip'), scope) or row['ip'] in known):
+                    continue
+                parsed = F.parse_import(dict(tool='evidence', ip=row['ip'],
+                    title='Previously recorded scoped discovery',
+                    output=f"Scoped discovery recorded {row['ip']} as up at {row['lastSeen']} (scan {row.get('scanId', 'unknown')}).",
+                    observedAt=row['lastSeen']))
+                next(h for h in parsed['findings'] if h['kind'] == 'host')['state'] = 'up'
+                F.merge_parsed(doc, parsed)
+                known.add(row['ip'])
+            ws.save(doc)
+
+    def _pause_discovery(self, run_id, status, reason):
+        self._event(run_id, dict(type='pause', reason=reason))
+        self._update(run_id, status=status, stopReason=reason)
+        activity_id = self.activity_ids.pop(run_id, None)
+        if activity_id:
+            self.workspace.activity.finish(activity_id, 'stopped', reason)
+
+    def _discover_group_worker(self, run_id, scope, model, stop_event, resumed):
+        ws = self.workspace
+        deadline = time.monotonic() + MAX_DISCOVERY_SECONDS
+        try:
+            for cidr in scope['cidrs']:
+                while True:
+                    if stop_event.is_set():
+                        return self._finish(run_id, 'stopped', 'Stopped by operator after the current discovery segment.')
+                    if time.monotonic() >= deadline:
+                        return self._pause_discovery(run_id, 'awaiting-discovery',
+                            'Discovery time limit reached; completed segments are saved. Continue to resume.')
+                    try:
+                        progress = self._discover_segment(run_id, cidr, scope)
+                    except (ValueError, OSError) as exc:
+                        if ws.load_scope() != scope:
+                            raise ValueError('Authorized scope changed during discovery.') from exc
+                        return self._pause_discovery(run_id, 'awaiting-discovery',
+                            f'Discovery paused at {cidr}: {redact(str(exc))[:160]}. Continue to retry.')
+                    if progress['complete']:
+                        break
+            self._promote_ip_only_discovery(scope)
+            if scope['domains']:
+                run = next(r for r in self.history()['runs'] if r['id'] == run_id)
+                self._auto_dns_review(run_id, scope, run['resolvers'], deadline, stop_event)
+            if stop_event.is_set():
+                return self._finish(run_id, 'stopped', 'Stopped by operator after the current DNS review.')
+            selected = self._auto_group_hosts(scope)
+            with ws.lock:
+                pending = [h for h in ws.load_discovery()['hosts'] if h.get('scope') == scope and
+                           ip_allowed(h.get('ip'), scope) and
+                           h.get('status') == 'up' and not h.get('approved')]
+            if scope['domains'] and pending and (not resumed or len(selected) < 2):
+                return self._pause_discovery(run_id, 'awaiting-host-review',
+                    f'{len(pending)} discovered host(s) need DNS/name review; approve hosts in Scope, then continue.')
+            if len(selected) < 2:
+                return self._finish(run_id, 'completed', 'Fewer than two approved scoped hosts were available.')
+            with ws.lock:
+                if ws.load_scope() != scope:
+                    raise ValueError('Authorized scope changed.')
+                hosts = {h['id']: h for h in ws.load()['findings'] if h['kind'] == 'host' and h['id'] in selected}
+                if len(hosts) != len(selected):
+                    raise ValueError('Selected hosts changed during discovery.')
+                for host in hosts.values():
+                    require_target(host, scope)
+                data = self._load()
+                saved = next(r for r in data['runs'] if r['id'] == run_id)
+                saved.update(hostIds=selected,
+                    hostSnapshots={hid: {'ip': hosts[hid]['ip'], 'name': hosts[hid].get('name')} for hid in selected},
+                    hostId=selected[0], hostName=f'{len(selected)} automatically selected hosts',
+                    status='running', stopReason='')
+                saved['events'].append(dict(type='selection', at=now(), hostIds=selected,
+                    reason='One strong recorded host from each CIDR, then hosts with the most linked findings; approved hosts only.'))
+                self._save(data)
+            ws.activity.update(self.activity_ids[run_id], detail=f'Selected {len(selected)} approved hosts; surveying baseline checks.')
+            self._group_worker(run_id, scope, model, stop_event)
+        except (ValueError, LlmError, RuntimeError, OSError) as exc:
+            self._finish(run_id, 'stopped', f'Run stopped safely: {exc}')
+        except Exception:
+            self._finish(run_id, 'stopped', 'Unexpected error; review server logs before retrying.')
 
     def _group_compare(self, run_id, scope, model, doc, candidates):
         run = next(r for r in self.history()['runs'] if r['id'] == run_id)
