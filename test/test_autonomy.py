@@ -164,6 +164,95 @@ class AutonomyTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(ValueError):
                 validate_reviewed_check(command, '100.96.1.70')
 
+    def test_group_surveys_each_host_then_flags_and_deepens_with_citations(self):
+        second = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for api.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            '443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
+        other = next(f for f in second['findings'] if f['kind'] == 'host')
+        other['approval'] = {'ip': other['ip'], 'name': other['name'], 'scope': self.scope}
+        doc = self.ws.load()
+        F.merge_parsed(doc, second)
+        other = next(f for f in doc['findings'] if f['kind'] == 'host' and f['ip'] == other['ip'])
+        other['approval'] = {'ip': other['ip'], 'name': other['name'], 'scope': self.scope}
+        self.ws.save(doc)
+        def candidate(cid, hid, kind):
+            host = next(f for f in doc['findings'] if f['id'] == hid)
+            return dict(id=cid, hostId=hid, catalogId=kind, title=cid, reason='Recorded service',
+                        findingIds=[hid], evidenceIds=host['evidenceIds'], command=f'ping -c 1 {host["ip"]}')
+        rows = [candidate('baseline-1', self.host['id'], 'nmap-service'),
+                candidate('baseline-2', other['id'], 'nmap-service'),
+                candidate('deepen-1', self.host['id'], 'http-headers')]
+        class GroupLlm(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                user = json.loads(messages[1]['content'])
+                self.prompts.append(user)
+                if 'previousFlags' not in user:
+                    return {'model': 'fake', 'data': {'command': None, 'reason': 'No further check.',
+                        'expectedEvidence': '', 'reviewNotes': ''}}
+                options = {c['id'] for c in user['context']['candidates']}
+                flag = {'hostId': self_host, 'reason': 'More service detail than the peer host.',
+                        'uncertainty': 'The service response needs review.',
+                        'findingIds': [self_host], 'evidenceIds': [host_evidence]}
+                return {'model': 'fake', 'data': {'flags': [flag],
+                    'candidateId': 'deepen-1' if 'deepen-1' in options else None,
+                    'reason': 'Compare the detailed service response.'}}
+        self_host = self.host['id']
+        host_evidence = next(f for f in doc['findings'] if f['id'] == self_host)['evidenceIds'][0]
+        self.ws.llm = GroupLlm()
+        checks = []
+        def execute(cid, scope, **kwargs):
+            checks.append(cid)
+            return dict(outcome='completed', imported=True, warning='', evidenceIds=[], output='ok', stderr='')
+        with patch('backend.autonomy.workflow', return_value={'candidates': rows}), patch.object(self.ws, 'execute_candidate', side_effect=execute):
+            run = self.ws.autonomy.start_group([self_host, other['id']], self.scope)
+            self.ws.autonomy.thread.join(3)
+        saved = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(saved['id'], run['id'])
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(checks, ['baseline-1', 'baseline-2', 'deepen-1'])
+        self.assertEqual(saved['surveyedHostIds'], [self_host, other['id']])
+        self.assertEqual(saved['flags'][0]['findingIds'], [self_host])
+        self.assertEqual(saved['flags'][0]['evidenceIds'], [host_evidence])
+        self.assertEqual(len([e for e in saved['events'] if e['type'] == 'comparison']), 2)
+
+    def test_group_rejects_unapproved_host_before_any_check(self):
+        other = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for api.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            '443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
+        doc = self.ws.load()
+        F.merge_parsed(doc, other)
+        self.ws.save(doc)
+        other_id = next(f['id'] for f in doc['findings'] if f['kind'] == 'host' and f['ip'] == '100.96.1.71')
+        with self.assertRaises(ValueError):
+            self.ws.autonomy.start_group([self.host['id'], other_id], self.scope)
+        self.assertEqual(self.calls, [])
+
+    def test_group_rejects_cross_host_evidence_misattribution(self):
+        second = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for api.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            '443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
+        doc = self.ws.load()
+        F.merge_parsed(doc, second)
+        other = next(f for f in doc['findings'] if f['kind'] == 'host' and f['ip'] == '100.96.1.71')
+        other['approval'] = {'ip': other['ip'], 'name': other['name'], 'scope': self.scope}
+        self.ws.save(doc)
+        class BadComparison(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                return {'model': 'fake', 'data': {'flags': [{
+                    'hostId': self_host, 'reason': 'Wrong evidence source.',
+                    'uncertainty': 'Unknown.', 'findingIds': [self_host],
+                    'evidenceIds': [other_evidence]}], 'candidateId': None, 'reason': ''}}
+        self_host = self.host['id']
+        other_evidence = other['evidenceIds'][0]
+        self.ws.llm = BadComparison()
+        with patch('backend.autonomy.workflow', return_value={'candidates': []}):
+            self.ws.autonomy.start_group([self_host, other['id']], self.scope)
+            self.ws.autonomy.thread.join(3)
+        saved = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(saved['status'], 'stopped')
+        self.assertIn('linked evidence', saved['stopReason'])
+        self.assertEqual(self.calls, [])
+
 
 if __name__ == '__main__':
     unittest.main()
