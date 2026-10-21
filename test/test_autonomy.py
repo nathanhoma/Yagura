@@ -124,7 +124,7 @@ class AutonomyTests(unittest.TestCase):
             run = ws.autonomy.start_group([self.host['id'], other['id']], self.scope)
             ws.autonomy.thread.join(3)
         self.assertIsNone(run['maxChecks'])
-        self.assertEqual(ws.autonomy.limits()['groupMaxSeconds'], 600)
+        self.assertEqual(ws.autonomy.limits()['groupMaxSeconds'], 900)
 
     def test_exhausted_catalog_waits_for_review_and_revision_before_execution(self):
         class ProposalLlm(FakeLlm):

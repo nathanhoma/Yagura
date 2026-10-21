@@ -40,7 +40,7 @@ class LlmService:
         self.trusted_https_host = trusted_https_host
         self.resolved_model = ''
         try:
-            self.timeout = max(.1, min(180, int(timeout_ms) / 1000))
+            self.timeout = max(.1, min(300, int(timeout_ms) / 1000))
         except (TypeError, ValueError):
             self.timeout = 30
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)

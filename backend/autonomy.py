@@ -19,8 +19,8 @@ from .sensitive import redact, sanitize_document
 from .workflow import workflow
 
 
-MAX_SECONDS = 180
-GROUP_MAX_SECONDS = 600
+MAX_SECONDS = 600
+GROUP_MAX_SECONDS = 900
 MAX_RESPONSE_TOKENS = 8000
 GROUP_RESPONSE_TOKENS = 128 * 1024
 MAX_DISCOVERY_SECONDS = 600
