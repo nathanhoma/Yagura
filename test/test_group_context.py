@@ -180,7 +180,7 @@ class GroupContextTests(unittest.TestCase):
         self.assertEqual(repair['submittedRequests'][0]['hostId'], 'unselected')
         self.assertEqual(sum(e['type'] == 'context-read' for e in saved['events']), 1)
 
-    def test_truncated_group_response_retries_with_larger_limit(self):
+    def test_group_response_uses_128k_limit_without_same_limit_retry(self):
         class TruncatedModel:
             def __init__(self):
                 self.limits = []
@@ -188,19 +188,16 @@ class GroupContextTests(unittest.TestCase):
                 pass
             def complete(self, messages, max_tokens=400, model=''):
                 self.limits.append(max_tokens)
-                if len(self.limits) == 1:
-                    raise LlmError('invalid-response', 'The local model response was truncated.')
-                return {'model': 'fake', 'data': {'flags': [], 'candidateId': None,
-                                                'reason': 'No supported flag.'}}
+                raise LlmError('invalid-response', 'The local model response was truncated.')
         model = TruncatedModel()
         self.ws.llm = model
         with patch('backend.autonomy.workflow', return_value={'candidates': []}):
             self.ws.autonomy.start_group([h['id'] for h in self.hosts], self.scope)
             self.ws.autonomy.thread.join(3)
         saved = self.ws.autonomy.history()['runs'][0]
-        self.assertEqual(saved['status'], 'completed')
-        self.assertEqual(model.limits, [3600, 6400])
-        self.assertEqual(sum(e['type'] == 'model-retry' for e in saved['events']), 1)
+        self.assertEqual(saved['status'], 'stopped')
+        self.assertEqual(model.limits, [131072])
+        self.assertEqual(sum(e['type'] == 'model-retry' for e in saved['events']), 0)
 
 
 if __name__ == '__main__':

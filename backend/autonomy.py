@@ -22,8 +22,7 @@ from .workflow import workflow
 MAX_SECONDS = 180
 GROUP_MAX_SECONDS = 600
 MAX_RESPONSE_TOKENS = 6400
-GROUP_RESPONSE_TOKENS = 3600
-GROUP_RETRY_TOKENS = 6400
+GROUP_RESPONSE_TOKENS = 128 * 1024
 MAX_DISCOVERY_SECONDS = 600
 MAX_DNS_REVIEWS = 8
 AUTO_GROUP_HOSTS = 4
@@ -695,17 +694,8 @@ class AutonomyController:
             {'role': 'user', 'content': json.dumps({'hostIds': run['hostIds'], 'context': context,
                 'previousFlags': run.get('flags', [])}, ensure_ascii=False)}]
         def complete_group():
-            try:
-                return self.workspace.llm.complete(messages,
-                    max_tokens=GROUP_RESPONSE_TOKENS, model=model)
-            except LlmError as exc:
-                if exc.code != 'invalid-response' or 'truncated' not in str(exc).lower():
-                    raise
-                self._event(run_id, dict(type='model-retry', snapshotId=snapshot,
-                    reason='Model response reached its output limit.',
-                    maxTokens=GROUP_RETRY_TOKENS))
-                return self.workspace.llm.complete(messages,
-                    max_tokens=GROUP_RETRY_TOKENS, model=model)
+            return self.workspace.llm.complete(messages,
+                max_tokens=GROUP_RESPONSE_TOKENS, model=model)
 
         for round_number in range(MAX_READ_ROUNDS + 1):
             response = complete_group()
