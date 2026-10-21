@@ -52,6 +52,21 @@ class BriefingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'outside the supplied context'):
             answer_question(self.ws, 'What is recorded?', [self.host['id']])
 
+    def test_invalid_citations_are_retried_once_with_verified_references(self):
+        class Model:
+            calls = 0
+            def complete(self, messages, max_tokens=0, model=''):
+                self.calls += 1
+                finding = json.loads(messages[1]['content'])['context']['findings'][0]
+                return {'model': 'fake', 'data': {'supported': True, 'answer': 'Recorded host.',
+                    'uncertainty': '', 'findingIds': [finding['id']],
+                    'evidenceIds': ['invented'] if self.calls == 1 else finding['evidenceIds'],
+                    'candidateIds': []}}
+        self.ws.llm = Model()
+        result = answer_question(self.ws, 'What is recorded?', [self.host['id']])
+        self.assertEqual(self.ws.llm.calls, 2)
+        self.assertTrue(result['supported'])
+
     def test_unsupported_answer_does_not_echo_model_claim(self):
         class Model:
             def complete(self, messages, max_tokens=0, model=''):

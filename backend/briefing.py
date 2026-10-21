@@ -41,7 +41,20 @@ def answer_question(workspace, question, host_ids, model=''):
         {'role': 'user', 'content': json.dumps({'question': question.strip(), 'hostIds': host_ids,
                                               'context': context}, ensure_ascii=False)},
     ]
-    response = workspace.llm.complete(messages, max_tokens=1600, model=model)
+    for attempt in range(2):
+        response = workspace.llm.complete(messages, max_tokens=1600, model=model)
+        try:
+            return _validated_response(response, context)
+        except ValueError:
+            if attempt:
+                raise
+            messages.append({'role': 'user', 'content':
+                'The previous answer failed citation validation. Retry with only finding, evidence, '
+                'and candidate IDs in the supplied context. Every cited finding needs one linked '
+                'cited evidence ID. If unsure, set supported to false. Return short JSON only.'})
+
+
+def _validated_response(response, context):
     value = response['data']
     if not isinstance(value, dict) or not isinstance(value.get('supported'), bool):
         raise ValueError('The model returned an invalid briefing answer.')
