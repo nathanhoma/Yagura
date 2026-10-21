@@ -13,6 +13,7 @@ from .workflow import workflow
 
 MAX_CHECKS = 3
 MAX_SECONDS = 180
+MAX_RESPONSE_TOKENS = 1600
 SAFE_KINDS = frozenset(('ping', 'nmap-ports', 'nmap-service', 'http-headers',
                         'web-inventory', 'web-exposure', 'ssh-hostkey'))
 SYSTEM_PROMPT = ("You select the next read-only check for ONE explicitly approved exercise host. "
@@ -159,7 +160,7 @@ class AutonomyController:
                                              for c in candidates]
                 response = ws.llm.complete([{'role': 'system', 'content': SYSTEM_PROMPT},
                                             {'role': 'user', 'content': json.dumps({'context': context, 'lastResult': last}, ensure_ascii=False)}],
-                                           max_tokens=400, model=model)
+                                           max_tokens=MAX_RESPONSE_TOKENS, model=model)
                 decision = response['data']
                 if not isinstance(decision, dict) or not isinstance(decision.get('reason'), str) or not decision['reason'].strip() or len(decision['reason']) > 500:
                     return self._finish(run_id, 'stopped', 'AI response format was invalid; no check was run.')
