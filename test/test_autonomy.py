@@ -253,6 +253,59 @@ class AutonomyTests(unittest.TestCase):
         self.assertIn('linked evidence', saved['stopReason'])
         self.assertEqual(self.calls, [])
 
+    def test_scope_discovery_selects_ip_only_hosts_and_starts_group_loop(self):
+        scope = self.ws.save_scope({'cidrs': ['100.96.1.0/28'], 'domains': []})
+        class EmptyComparison(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                return {'model': 'fake', 'data': {'flags': [], 'candidateId': None,
+                    'reason': 'No differentiated host yet.'}}
+        self.ws.llm = EmptyComparison()
+        def runner(program, args, timeout):
+            self.calls.append((program, args, timeout))
+            addresses = ['100.96.1.1', '100.96.1.2'] if '-sn' in args else [args[-1]]
+            output = ''.join(f'Nmap scan report for {ip}\nHost is up.\n' for ip in addresses)
+            return {'ok': True, 'stdout': output +
+                    f'Nmap done: {len(addresses)} IP addresses ({len(addresses)} hosts up) scanned',
+                    'stderr': ''}
+        self.ws.runner = runner
+        run = self.ws.autonomy.start_discover_group(scope, [])
+        self.ws.autonomy.thread.join(3)
+        saved = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(saved['id'], run['id'])
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(saved['mode'], 'discover-group')
+        self.assertEqual(len(saved['hostIds']), 2)
+        self.assertEqual(len([e for e in saved['events'] if e['type'] == 'discovery']), 1)
+        self.assertEqual(len([e for e in saved['events'] if e['type'] == 'comparison']), 1)
+        self.assertTrue(all(call[0] == 'nmap' for call in self.calls))
+
+    def test_scope_discovery_retries_failed_segment_on_resume(self):
+        scope = self.ws.save_scope({'cidrs': ['100.96.1.0/28'], 'domains': []})
+        class EmptyComparison(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                return {'model': 'fake', 'data': {'flags': [], 'candidateId': None, 'reason': 'Done.'}}
+        self.ws.llm = EmptyComparison()
+        attempts = []
+        def runner(program, args, timeout):
+            if '-sn' in args:
+                attempts.append(args[-1])
+                if len(attempts) == 1:
+                    return {'ok': False, 'stdout': '', 'stderr': 'temporary tool failure'}
+                return {'ok': True, 'stdout':
+                    'Nmap scan report for 100.96.1.1\nHost is up.\n'
+                    'Nmap scan report for 100.96.1.2\nHost is up.\n'
+                    'Nmap done: 2 IP addresses (2 hosts up) scanned', 'stderr': ''}
+            return {'ok': True, 'stdout': f'Nmap scan report for {args[-1]}\nHost is up.\n'
+                'Nmap done: 1 IP address (1 host up) scanned', 'stderr': ''}
+        self.ws.runner = runner
+        run = self.ws.autonomy.start_discover_group(scope, [])
+        self.ws.autonomy.thread.join(3)
+        self.assertEqual(self.ws.autonomy.history()['runs'][0]['status'], 'awaiting-discovery')
+        self.ws.autonomy.resume_discover_group(run['id'], scope)
+        self.ws.autonomy.thread.join(3)
+        self.assertEqual(self.ws.autonomy.history()['runs'][0]['status'], 'completed')
+        self.assertEqual(attempts, ['100.96.1.0/28', '100.96.1.0/28'])
+
 
 if __name__ == '__main__':
     unittest.main()
