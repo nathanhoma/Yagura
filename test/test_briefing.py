@@ -36,7 +36,7 @@ class BriefingTests(unittest.TestCase):
         self.ws.llm = Model()
         result = answer_question(self.ws, 'What is recorded?', [self.host['id']])
         self.assertTrue(result['supported'])
-        self.assertEqual(self.ws.llm.max_tokens, 1600)
+        self.assertEqual(self.ws.llm.max_tokens, 32768)
         self.assertEqual(result['findingIds'], [self.host['id']])
 
     def test_unapproved_host_and_invented_evidence_are_rejected(self):

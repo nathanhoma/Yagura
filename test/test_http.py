@@ -97,6 +97,7 @@ class HttpTests(unittest.TestCase):
         self.workspace.save(doc)
         class Model:
             def complete(self, messages, max_tokens=0, model=''):
+                self.max_tokens = max_tokens
                 context = json.loads(messages[1]['content'])['context']
                 finding = context['findings'][0]
                 return {'model': 'fake', 'data': {'supported': True,
@@ -109,6 +110,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(answer['supported'])
         self.assertEqual(answer['findingIds'], [host['id']])
+        self.assertEqual(self.workspace.llm.max_tokens, 32768)
         self.assertEqual(self.calls, [])
 
     def test_autonomy_proposal_requires_exact_human_approval(self):
