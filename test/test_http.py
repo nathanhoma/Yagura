@@ -59,8 +59,8 @@ class HttpTests(unittest.TestCase):
             def assert_configuration(self):
                 pass
             def complete(self, messages, **kwargs):
-                return {'model': 'fake', 'data': {'command': 'nmap -n -Pn -sT -p 8443 100.96.1.70',
-                    'reason': 'Check another TCP port.', 'expectedEvidence': 'Open or closed state.'}}
+                return {'model': 'fake', 'data': {'command': 'nxc smb 100.96.1.70',
+                    'reason': 'Inspect the approved host.', 'expectedEvidence': 'SMB response.'}}
         self.workspace.llm = ProposalModel()
         output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\n'
                   'Host is up.\nNmap done: 1 IP address (1 host up) scanned')
@@ -92,6 +92,7 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(self.call('/api/autonomy/approve', 'POST', {**body, 'authorized': True})[0], 202)
             self.workspace.autonomy.thread.join(3)
             self.assertEqual(len(self.calls), 1)
+            self.assertEqual(self.calls[0], ('nxc', ['smb', '100.96.1.70']))
 
     def test_import_review_analysis_and_export(self):
         output = (Path(__file__).parent / 'fixtures/nmap.xml').read_text()
