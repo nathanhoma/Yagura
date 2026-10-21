@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from unittest.mock import patch
 
+from backend import findings as F
 from backend.llm import LlmService
 from backend.server import Workspace, create_server
 
@@ -53,6 +54,30 @@ class HttpTests(unittest.TestCase):
     def test_health_accepts_explicit_https_gateway(self):
         self.workspace.llm = LlmService('https://llm-gateway.xs.network/v1', trusted_https_host='llm-gateway.xs.network')
         self.assertEqual(self.call('/api/health')[1]['llm'], 'configured')
+
+    def test_briefing_question_reads_approved_evidence_without_running_a_check(self):
+        scope = self.workspace.save_scope({'cidrs': ['100.96.1.0/24'], 'domains': ['lab.test']})
+        doc = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for web.lab.test (100.96.1.70)\nHost is up.\n'
+            '443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        self.workspace.save(doc)
+        class Model:
+            def complete(self, messages, max_tokens=0, model=''):
+                context = json.loads(messages[1]['content'])['context']
+                finding = context['findings'][0]
+                return {'model': 'fake', 'data': {'supported': True,
+                    'answer': 'Recorded host evidence exists.', 'uncertainty': 'Recheck if needed.',
+                    'findingIds': [finding['id']], 'evidenceIds': finding['evidenceIds'],
+                    'candidateIds': []}}
+        self.workspace.llm = Model()
+        status, answer = self.call('/api/briefing/ask', 'POST',
+                                   {'question': 'What is recorded?', 'hostIds': [host['id']], 'model': ''})
+        self.assertEqual(status, 200)
+        self.assertTrue(answer['supported'])
+        self.assertEqual(answer['findingIds'], [host['id']])
+        self.assertEqual(self.calls, [])
 
     def test_autonomy_proposal_requires_exact_human_approval(self):
         class ProposalModel:
