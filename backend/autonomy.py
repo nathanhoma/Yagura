@@ -13,7 +13,7 @@ from .workflow import workflow
 
 MAX_CHECKS = 3
 MAX_SECONDS = 180
-MAX_RESPONSE_TOKENS = 1600
+MAX_RESPONSE_TOKENS = 3200
 SAFE_KINDS = frozenset(('ping', 'nmap-ports', 'nmap-service', 'http-headers',
                         'web-inventory', 'web-exposure', 'ssh-hostkey'))
 SYSTEM_PROMPT = ("You select the next read-only check for ONE explicitly approved exercise host. "
