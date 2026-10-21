@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from backend import findings as F
 from backend.autonomy import MAX_RESPONSE_TOKENS
+from backend.reviewed_check import validate as validate_reviewed_check
 from backend.server import Workspace
 
 
@@ -109,6 +110,58 @@ class AutonomyTests(unittest.TestCase):
         self.assertIsNone(run['maxChecks'])
         self.assertEqual(len([e for e in run['events'] if e['type'] == 'check']), 4)
         self.assertEqual(len(self.calls), 4)
+
+    def test_exhausted_catalog_waits_for_review_and_revision_before_execution(self):
+        class ProposalLlm(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                self.prompts.append(json.loads(messages[1]['content']))
+                if len(self.prompts) == 1:
+                    command = 'nmap -n -Pn -sT -p 8443 100.96.1.70'
+                elif len(self.prompts) == 2:
+                    command = 'nmap -n -Pn -sT -p 9443 100.96.1.70'
+                else:
+                    command = None
+                return {'model': 'fake', 'data': {'command': command,
+                        'reason': 'Check another approved TCP port.',
+                        'expectedEvidence': 'Open or closed port state.'}}
+
+        self.ws.llm = ProposalLlm()
+        self.ws.runner = lambda program, args, timeout: self.calls.append((program, args, timeout)) or {
+            'ok': True, 'stdout': 'Nmap scan report for web.03.crimsonia.net (100.96.1.70)\nHost is up.\n9443/tcp open ssl/https\nNmap done: 1 IP address (1 host up) scanned', 'stderr': ''}
+        with patch('backend.autonomy.workflow', return_value={'candidates': []}):
+            run = self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+            pending = self.ws.autonomy.history()['runs'][0]
+            self.assertEqual(pending['status'], 'awaiting-approval')
+            self.assertEqual(self.calls, [])
+            old = pending['pendingProposal']
+            revised = self.ws.autonomy.revise(run['id'], old['id'], old['revision'],
+                                               'Use TCP port 9443 instead.', self.scope)
+            new = revised['pendingProposal']
+            self.assertEqual(new['revision'], old['revision'] + 1)
+            self.assertIn('9443', new['command'])
+            with self.assertRaisesRegex(ValueError, 'changed'):
+                self.ws.autonomy.approve(run['id'], old['id'], old['revision'], old['command'], self.scope)
+            self.assertEqual(self.calls, [])
+            self.ws.autonomy.approve(run['id'], new['id'], new['revision'], new['command'], self.scope)
+            self.ws.autonomy.thread.join(3)
+            saved = self.ws.autonomy.history()['runs'][0]
+            self.assertEqual(saved['status'], 'completed')
+            self.assertEqual(len(self.calls), 1)
+            self.assertEqual(self.calls[0][0], 'nmap')
+            self.assertEqual([e['type'] for e in saved['events']],
+                             ['proposal', 'proposal', 'approval', 'check', 'stop'])
+
+    def test_reviewed_command_grammar_blocks_extra_destinations_and_scripts(self):
+        good, args = validate_reviewed_check('nmap -n -Pn -sT -p 80,443 100.96.1.70', '100.96.1.70')
+        self.assertEqual(good, 'nmap -n -Pn -sT -p 80,443 100.96.1.70')
+        self.assertEqual(args[-1], '100.96.1.70')
+        for command in ('nmap -n -Pn -sT --script vuln -p 80 100.96.1.70',
+                        'nmap -n -Pn -sT -p 80 100.96.1.71',
+                        'nmap -n -Pn -sT -p 80 100.96.1.70; whoami',
+                        'nmap -n -Pn -sT -p 80 100.96.1.70 8.8.8.8'):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                validate_reviewed_check(command, '100.96.1.70')
 
 
 if __name__ == '__main__':
