@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from backend import findings as F
+from backend.autonomy import MAX_RESPONSE_TOKENS
 from backend.server import Workspace
 
 
@@ -11,11 +12,13 @@ class FakeLlm:
     def __init__(self, invalid=False):
         self.prompts = []
         self.invalid = invalid
+        self.response_limits = []
 
     def assert_configuration(self):
         pass
 
     def complete(self, messages, max_tokens=400, model=''):
+        self.response_limits.append(max_tokens)
         user = json.loads(messages[1]['content'])
         self.prompts.append(user)
         if self.invalid:
@@ -53,6 +56,7 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(saved['status'], 'completed')
         self.assertEqual([e['type'] for e in saved['events']], ['decision', 'check', 'decision', 'stop'])
         self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.llm.response_limits, [MAX_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS])
         self.assertEqual(self.llm.prompts[1]['lastResult']['outcome'], 'completed')
         self.assertIn('[REDACTED]', json.dumps(self.llm.prompts[1]))
         self.assertNotIn('very-secret', json.dumps(self.llm.prompts[1]))

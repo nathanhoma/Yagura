@@ -206,6 +206,48 @@ class PathAnalysisTests(unittest.TestCase):
         self.assertTrue(excerpt.endswith('END'))
         self.assertTrue(context['evidence'])
 
+    def test_dense_high_priority_evidence_keeps_host_anchors_and_observations(self):
+        hosts = [f for f in self.doc['findings'] if f['kind'] == 'host']
+        for host in hosts:
+            service = next(f for f in self.doc['findings'] if f['kind'] == 'service' and f['hostId'] == host['id'])
+            for index in range(10):
+                ev = dict(id=F.uid('evidence'), tool='web-exposure', command=f'probe {index}',
+                          output='response ' + 'x' * 800, observedAt=F.now(), format='json')
+                self.doc['evidence'].append(ev)
+                self.doc['findings'].append(F.record('observation',
+                    dict(hostId=host['id'], serviceId=service['id'], title=f'Web probe {index}', detail='Recorded response'),
+                    ev['id'], ev['observedAt']))
+        context = build_context(self.doc, '192.168.56.0/24')
+        self.assertEqual({h['id'] for h in hosts},
+                         {f['id'] for f in context['findings'] if f['kind'] == 'host'})
+        self.assertEqual(2, len([f for f in context['findings'] if f['kind'] == 'service']))
+        self.assertTrue(any(f['kind'] == 'observation' for f in context['findings']))
+        self.assertTrue(context['evidence'])
+        self.assertLessEqual(len(encoded(context)), MAX_CONTEXT)
+
+    def test_analysis_does_not_claim_model_completion_with_empty_context(self):
+        doc = F.empty()
+        doc['findings'].append(F.record('host', dict(ip='192.168.56.10', name='', state='unknown',
+            local=False, title='192.168.56.10', detail=''), None, F.now()))
+        llm = Mock()
+        result = analyze(doc, {}, llm)
+        self.assertEqual(result['status'], 'no-context')
+        self.assertEqual(result['source'], 'built-in')
+        llm.complete.assert_not_called()
+
+    def test_dns_approval_anchor_is_compact(self):
+        doc = F.empty()
+        ev = dict(id=F.uid('evidence'), tool='dns-review', command='Explicit host approval',
+                  output=json.dumps(dict(ip='192.168.56.10', name='web.lab.test', review='x' * 10000)),
+                  observedAt=F.now(), format='json')
+        doc['evidence'].append(ev)
+        doc['findings'].append(F.record('host', dict(ip='192.168.56.10', name='web.lab.test',
+            state='unknown', local=False, title='192.168.56.10', detail=''), ev['id'], ev['observedAt']))
+        context = build_context(doc)
+        self.assertEqual(len(context['findings']), 1)
+        self.assertEqual(json.loads(context['evidence'][0]['output']),
+                         {'ip': '192.168.56.10', 'name': 'web.lab.test'})
+
     def test_authorized_range_excludes_unrelated_and_local_hosts(self):
         outside = F.parse_import(dict(tool='evidence', ip='10.0.9.20', output='Unrelated host'))
         F.merge_parsed(self.doc, outside)
