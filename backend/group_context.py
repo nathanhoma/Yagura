@@ -126,8 +126,18 @@ def read_requests(requests, doc, host_ids, candidates, run_events):
                 rows = [f for f in doc['findings'] if _host_id(f) == host_id and
                         (kind is None or f['kind'] == kind)]
                 rows.sort(key=lambda f: (f.get('lastSeen', ''), f['id']), reverse=True)
+                page = rows[offset:offset + 6]
+                shown_evidence = {}
+                shown_findings = []
+                for finding in page:
+                    linked = [evidence[eid] for eid in finding['evidenceIds'] if eid in evidence]
+                    chosen = max(linked, key=lambda e: e.get('observedAt', '')) if linked else None
+                    shown_findings.append(_finding(finding, [chosen['id']] if chosen else []))
+                    if chosen:
+                        shown_evidence[chosen['id']] = chosen
                 results.append({'tool': tool, 'hostId': host_id, 'offset': offset,
-                                'total': len(rows), 'items': [_finding(f) for f in rows[offset:offset + 6]]})
+                                'total': len(rows), 'items': shown_findings,
+                                'evidence': [_evidence(e, 220) for e in shown_evidence.values()]})
             elif tool == 'list_candidates':
                 rows = [c for c in candidates if c['hostId'] == host_id]
                 selected = rows[offset:offset + 4]

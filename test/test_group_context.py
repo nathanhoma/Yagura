@@ -53,6 +53,9 @@ class GroupContextTests(unittest.TestCase):
                                 {'tool': 'get_evidence', 'evidenceIds': [evidence_id]}],
                                self.selected, [first['id']], [], [])
         self.assertEqual(result[0]['hostId'], first['id'])
+        shown_evidence = {e['id'] for e in result[0]['evidence']}
+        self.assertTrue(shown_evidence)
+        self.assertTrue(all(set(f['evidenceIds']) <= shown_evidence for f in result[0]['items']))
         self.assertEqual(result[1]['items'][0]['id'], evidence_id)
         with self.assertRaisesRegex(ValueError, 'unselected'):
             read_requests([{'tool': 'list_findings', 'hostId': self.hosts[1]['id']}],
@@ -143,6 +146,8 @@ class GroupContextTests(unittest.TestCase):
         self.assertEqual(saved['status'], 'completed')
         self.assertEqual(model.calls, 2)
         self.assertEqual(sum(e['type'] == 'context-repair' for e in saved['events']), 1)
+        repair = next(e for e in saved['events'] if e['type'] == 'context-repair')
+        self.assertEqual(repair['submittedFlags'][0]['evidenceIds'], ['invented'])
 
     def test_invalid_context_host_gets_one_bounded_correction(self):
         host_id = self.hosts[0]['id']

@@ -57,7 +57,7 @@ GROUP_PROMPT = ("Compare saved evidence across the selected approved exercise ho
                 "list_candidates or get_check_history with hostId and optional offset. "
                 "These operations only read saved data; they do not execute commands. "
                 "Use only selected hostIds and supplied IDs. After at most three read rounds, "
-                "return a final JSON answer. Cite a supplied findingId and its linked evidenceId "
+                "return a final JSON answer. Cite only findingId/evidenceId pairs whose evidence excerpt was supplied "
                 "for each flagged host. Explain the difference, uncertainty and useful next check. "
                 "An open port or banner does not establish access. Choose at most one supplied "
                 "candidateId for a flagged host, or null. Empty flags are valid. Return ONLY JSON: "
@@ -808,7 +808,14 @@ class AutonomyController:
                 pairs = [{'hostId': f.get('hostId', f['id']), 'findingId': f['id'], 'evidenceId': eid}
                          for f in visible.values() for eid in f['evidenceIds'] if eid in evidence][:32]
                 self._event(run_id, dict(type='context-repair', snapshotId=snapshot,
-                                         reason=str(exc)[:160]))
+                    reason=str(exc)[:160], submittedFlags=[{
+                        'hostId': redact(str(item.get('hostId', '')))[:100],
+                        'findingIds': [redact(str(fid))[:100] for fid in item.get('findingIds', [])[:3]]
+                            if isinstance(item.get('findingIds'), list) else [],
+                        'evidenceIds': [redact(str(eid))[:100] for eid in item.get('evidenceIds', [])[:3]]
+                            if isinstance(item.get('evidenceIds'), list) else []}
+                        for item in answer.get('flags', [])[:3] if isinstance(item, dict)]
+                        if isinstance(answer.get('flags'), list) else []))
                 messages.append({'role': 'user', 'content': json.dumps({
                     'validationError': str(exc), 'allowedCitationPairs': pairs,
                     'shownCandidateIds': sorted(shown_candidates),
