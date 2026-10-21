@@ -308,9 +308,10 @@ function renderBriefing(){
   const hostIds=briefingHostIds(),selected=new Set(hostIds),latest=autonomyRuns.find(r=>r.scope&&JSON.stringify(r.scope)===JSON.stringify(savedScope)&&(r.hostIds||[r.hostId]).some(id=>selected.has(id)));
   const contextKey=JSON.stringify({scope:savedScope,hostIds});
   if(briefingContextKey!==contextKey){briefingMessages=[];briefingSavedResults={};briefingContextKey=contextKey;}
-  if(!scopeLoaded||!checkScope()||!hostIds.length){box.innerHTML='<div class="empty">Save a target scope and approve hosts to see a briefing.</div>';$('#briefingUpdated').textContent='No approved hosts in the saved scope';$('#briefingAsk').disabled=true;return;}
+  if(!scopeLoaded||!checkScope()||!hostIds.length){box.innerHTML='<div class="empty">Save a target scope and approve hosts to see a briefing.</div>';$('#briefingUpdated').textContent='Choose approved hosts in Settings';$('#briefingAsk').disabled=true;return;}
   $('#briefingAsk').disabled=briefingBusy;
-  $('#briefingUpdated').textContent=`${hostIds.length} approved host${hostIds.length===1?'':'s'} · ${findings.filter(f=>selected.has(f.id)||selected.has(f.hostId)).length} saved findings${group?' · comparison '+date(group.endedAt||group.startedAt):''}`;
+  const briefLabel=hostSelect.value==='group'?`${group?'Comparison':'Approved'} · ${hostIds.length} host${hostIds.length===1?'':'s'}`:hostSelect.selectedOptions[0]?.textContent||'Selected host';
+  $('#briefingUpdated').textContent=`${briefLabel} · ${findings.filter(f=>selected.has(f.id)||selected.has(f.hostId)).length} findings`;
   const flags=(group?.flags||[]).filter(f=>selected.has(f.hostId)&&f.findingIds?.some(id=>findings.some(row=>row.id===id))&&f.evidenceIds?.some(id=>evidence.some(row=>row.id===id)));
   let found='';
   if(flags.length){const changed=findings.some(f=>selected.has(f.id)||selected.has(f.hostId)?Date.parse(f.lastSeen)>Date.parse(group.endedAt||group.startedAt):false);found=`<p class="briefing-meta">AI comparison from ${esc(date(group.endedAt||group.startedAt))} · hypotheses for review${changed?' · findings changed since this comparison':''}</p>`+flags.slice(0,3).map(f=>`<p><strong>${esc(recordLabel(findings.find(h=>h.id===f.hostId)||{title:f.hostId}))}</strong>: ${esc(f.reason)}</p><p class="briefing-meta">Still uncertain: ${esc(f.uncertainty)}</p>${briefingSources(f.findingIds,f.evidenceIds)}`).join('');}
@@ -323,7 +324,10 @@ function renderBriefing(){
   const next=(candidates.length?candidates.map(c=>briefingCandidateCard(c,-1,briefingSavedResults[c.id])+briefingSources(c.findingIds,c.evidenceIds)).join(''):'<p>No untried catalog check is currently available for this selection. Review the flagged findings, then describe a specific follow-up in <a href="#checks">Next checks</a> for human review.</p>')+savedResults;
   const recent=latest?`<p>${esc(date(latest.startedAt))}: ${esc(latest.status)} · ${(latest.events||[]).filter(e=>e.type==='check').length} recorded check(s).</p>${latest.stopReason?`<p>${esc(latest.stopReason)}</p>`:''}<p><a href="#autonomy">Open the full AI log →</a></p>`:'<p>No autonomous run has been recorded for these hosts yet.</p>';
   const follow=briefingNearBottom(),position=box.scrollTop;
-  box.innerHTML=briefingTurn('user','<p>What have we found so far?</p>')+briefingTurn('assistant',found)+briefingTurn('user','<p>What should we review next?</p>')+briefingTurn('assistant',next)+briefingTurn('user','<p>What happened in the latest run?</p>')+briefingTurn('assistant',recent)+briefingMessages.map((m,i)=>briefingTurn('user',`<p>${esc(m.question)}</p>`)+briefingTurn('assistant',`<p>${esc(m.reply.answer)}</p>${m.reply.uncertainty?`<p class="briefing-meta">Uncertainty: ${esc(m.reply.uncertainty)}</p>`:''}${briefingSources(m.reply.findingIds,m.reply.evidenceIds)}${(m.reply.candidates||[]).map(c=>briefingCandidateCard(c,i,m.results?.[c.id])).join('')}`)).join('');
+  const openSections=new Set([...box.querySelectorAll('details[data-briefing-section][open]')].map(row=>row.dataset.briefingSection));
+  const section=(id,label,content)=>`<details data-briefing-section="${id}" ${openSections.has(id)?'open':''}><summary>${label}</summary><div class="briefing-section-body">${content}</div></details>`;
+  const overview=section('found','Current picture',found)+section('next',`Suggested checks · ${candidates.length}`,next)+section('recent','Latest run',recent);
+  box.innerHTML=briefingTurn('assistant',`<div class="briefing-overview">${overview}</div>`)+briefingMessages.map((m,i)=>briefingTurn('user',`<p>${esc(m.question)}</p>`)+briefingTurn('assistant',`<p>${esc(m.reply.answer)}</p>${m.reply.uncertainty?`<p class="briefing-meta">Uncertainty: ${esc(m.reply.uncertainty)}</p>`:''}${briefingSources(m.reply.findingIds,m.reply.evidenceIds)}${(m.reply.candidates||[]).map(c=>briefingCandidateCard(c,i,m.results?.[c.id])).join('')}`)).join('');
   wireRefs(box);
   box.querySelectorAll('[data-briefing-review]').forEach(button=>button.onclick=()=>reviewBriefingCandidate(Number(button.dataset.briefingMessage),button.dataset.briefingReview));
   box.querySelectorAll('[data-briefing-result]').forEach(button=>button.onclick=()=>{const i=Number(button.dataset.briefingMessage),result=(i===-1?briefingSavedResults:briefingMessages[i]?.results)?.[button.dataset.briefingResult];if(result)showDialog('Check output',`<p class="mono">${esc(result.command)}</p><p class="status">${esc(checkOutcome(result))}${result.imported?' · Findings updated':''}</p><pre>${esc(result.output||result.stderr||'No output.')}</pre>`);});
@@ -332,9 +336,11 @@ function renderBriefing(){
 }
 $('#briefingTranscript').addEventListener('scroll',updateBriefingLatest);
 $('#briefingLatest').onclick=boxScroll;
+$('#briefingSettingsOpen').onclick=()=>$('#briefingSettingsDialog').showModal();
+$('#briefingSettingsClose').onclick=()=>$('#briefingSettingsDialog').close();
 $('#briefingHost').onchange=()=>{briefingMessages=[];briefingSavedResults={};renderBriefing();boxScroll();};
-$('#briefingRefresh').onclick=async()=>{const button=$('#briefingRefresh');button.disabled=true;$('#briefingState').textContent='Refreshing saved evidence…';try{briefingMessages=[];briefingSavedResults={};await refreshFindings();await loadAutonomyHistory();renderBriefing();$('#briefingState').textContent='Briefing refreshed from saved evidence.';}catch(e){$('#briefingState').textContent=e.message;}finally{button.disabled=false;}};
-$('#briefingAsk').onclick=async()=>{const question=$('#briefingQuestion').value.trim(),hostIds=briefingHostIds();if(question.length<3||!hostIds.length){$('#briefingState').textContent='Enter a question and choose approved hosts.';return;}const button=$('#briefingAsk'),contextKey=briefingContextKey;briefingBusy=true;button.disabled=true;$('#briefingState').textContent='Reading linked evidence…';try{const reply=await post('/api/briefing/ask',{question,hostIds,model:$('#briefingModel').value});if(contextKey===briefingContextKey){briefingMessages.push({question,reply,results:{}});$('#briefingQuestion').value='';renderBriefing();$('#briefingState').textContent=reply.supported?'Citation links verified. Review the claims against each source.':'Saved evidence does not answer this question yet.';}}catch(e){$('#briefingState').textContent=e.message;}finally{briefingBusy=false;button.disabled=!briefingHostIds().length;}};
+$('#briefingRefresh').onclick=async()=>{const button=$('#briefingRefresh');button.disabled=true;$('#briefingState').textContent='Refreshing saved evidence…';try{briefingMessages=[];briefingSavedResults={};await refreshFindings();await loadAutonomyHistory();renderBriefing();$('#briefingState').textContent='';}catch(e){$('#briefingState').textContent=e.message;}finally{button.disabled=false;}};
+$('#briefingAsk').onclick=async()=>{const question=$('#briefingQuestion').value.trim(),hostIds=briefingHostIds();if(question.length<3||!hostIds.length){$('#briefingState').textContent='Enter a question and choose approved hosts.';return;}const button=$('#briefingAsk'),contextKey=briefingContextKey;briefingBusy=true;button.disabled=true;$('#briefingState').textContent='Reading linked evidence…';try{const reply=await post('/api/briefing/ask',{question,hostIds,model:$('#briefingModel').value});if(contextKey===briefingContextKey){briefingMessages.push({question,reply,results:{}});$('#briefingQuestion').value='';renderBriefing();$('#briefingState').textContent='';}}catch(e){$('#briefingState').textContent=e.message;}finally{briefingBusy=false;button.disabled=!briefingHostIds().length;}};
 function boxScroll(){const box=$('#briefingTranscript');box.scrollTop=box.scrollHeight;updateBriefingLatest();}
 async function reviewBriefingCandidate(messageIndex,candidateId){
   const message=briefingMessages[messageIndex],proposed=(messageIndex===-1?briefingSavedCandidates:message?.reply.candidates)?.find(c=>c.id===candidateId),contextKey=briefingContextKey;
@@ -353,10 +359,10 @@ async function reviewBriefingCandidate(messageIndex,candidateId){
         const result=await post('/api/checks/run',{candidateId:fresh.id,expectedCommand:fresh.command,authorized:true,authorizedScope:checkScope()});
         $('#reviewDialog').close();if(messageIndex===-1)briefingSavedResults[fresh.id]={...result,title:fresh.title};else message.results[fresh.id]=result;
         if(result.imported)await refreshFindings();else renderBriefing();
-        $('#briefingState').textContent=`${checkOutcome(result)} · Review the result beside the suggested check.`;
+        $('#briefingState').textContent='';
       }catch(e){$('#briefingReviewState').textContent=e.message;button.disabled=false;}
     };
-    $('#briefingState').textContent='Review the exact command and target in the confirmation window.';
+    $('#briefingState').textContent='';
   }catch(e){$('#briefingState').textContent=e.message;}
 }
 let checkProposals=[];
