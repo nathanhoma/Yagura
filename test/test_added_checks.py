@@ -32,6 +32,29 @@ class AddedChecksTests(unittest.TestCase):
         self.assertTrue(any(f['title'] == 'HTTP response headers' and f['serviceId'] == headers['serviceIds'][0] for f in self.doc['findings']))
         self.assertEqual(self.doc['evidence'][-1]['output'], 'HTTP/1.1 200 OK\nServer: lab\n')
 
+    def test_cheatsheet_enumeration_checks_are_scoped_and_fixed(self):
+        extra = F.parse_import({'tool': 'nmap', 'output': (
+            'Nmap scan report for www.lab.test (192.168.56.10)\nHost is up.\n'
+            '161/udp open snmp\n389/tcp open ldap\nNmap done: 1 IP address (1 host up) scanned')})
+        F.merge_parsed(self.doc, extra)
+        self.assertEqual(workflow(self.doc, '192.168.56.11/32')['candidates'], [])
+        checks = {c['catalogId']: c for c in workflow(self.doc, '192.168.56.10/32')['candidates']}
+        self.assertTrue({'nmap-ports-extended', 'snmp-system', 'ldap-rootdse'} <= checks.keys())
+        self.assertEqual(invocation(checks['nmap-ports-extended'], self.doc),
+                         ('nmap', ['-n', '-Pn', '-sT', '--top-ports', '1000', '--max-retries', '1', '-oX', '-', '192.168.56.10'], 'nmap'))
+        self.assertEqual(invocation(checks['snmp-system'], self.doc),
+                         ('snmpwalk', ['-v2c', '-c', 'public', '-t', '2', '-r', '0', '-On', '192.168.56.10', '1.3.6.1.2.1.1'], 'snmp-system'))
+        self.assertEqual(invocation(checks['ldap-rootdse'], self.doc),
+                         ('nmap', ['-n', '-Pn', '-sT', '-p', '389', '--script', 'ldap-rootdse', '-oX', '-', '192.168.56.10'], 'nmap'))
+        with self.assertRaises(ValueError):
+            edited_invocation(checks['snmp-system'], self.doc, checks['snmp-system']['command'].replace('public', 'private'))
+        with self.assertRaises(ValueError):
+            edited_invocation(checks['nmap-ports-extended'], self.doc, checks['nmap-ports-extended']['command'] + ' 192.168.56.11')
+        snmp = parse_check_result(checks['snmp-system'], 'snmp-system', '.1.3.6.1.2.1.1.1.0 = STRING: "Lab"\n')
+        self.assertEqual(snmp['findings'][0]['serviceId'], checks['snmp-system']['serviceIds'][0])
+        with self.assertRaises(ValueError):
+            parse_check_result(checks['snmp-system'], 'snmp-system', '.1.3.6.1.2.1.2.1.0 = STRING: "Outside"\n')
+
     def test_nxc_smb_is_fixed_to_recorded_445_and_links_evidence(self):
         candidates = workflow(self.doc, '192.168.56.10/32')['candidates']
         checks = {c['catalogId']: c for c in candidates if c['catalogId'].startswith('nxc-')}

@@ -70,6 +70,8 @@ def invocation(candidate, doc):
         return 'ping', ['-c', '3', ip], 'ping'
     if kind == 'nmap-ports':
         return 'nmap', ['-n', '-Pn', '-sT', '--top-ports', '100', ip], 'nmap'
+    if kind == 'nmap-ports-extended' and not services:
+        return 'nmap', ['-n', '-Pn', '-sT', '--top-ports', '1000', '--max-retries', '1', '-oX', '-', ip], 'nmap'
     if kind == 'nmap-service':
         return 'nmap', ['-n', '-Pn', '-sT', '-sV', '--version-light', '-p', ','.join(str(s['port']) for s in sorted(services, key=lambda s: s['port'])), ip], 'nmap'
     if kind == 'nmap-os':
@@ -95,6 +97,10 @@ def invocation(candidate, doc):
     if kind in ('ssh-hostkey', 'smb-security', 'nfs-exports'):
         script = {'ssh-hostkey': 'ssh-hostkey', 'smb-security': 'smb2-security-mode', 'nfs-exports': 'nfs-showmount'}[kind]
         return 'nmap', ['-n', '-Pn', '-sT', '-p', str(services[0]['port']), '--script', script, '-oX', '-', ip], 'nmap'
+    if kind == 'ldap-rootdse' and len(services) == 1 and services[0].get('port') == 389 and services[0].get('protocol') == 'tcp' and services[0].get('state') == 'open':
+        return 'nmap', ['-n', '-Pn', '-sT', '-p', '389', '--script', 'ldap-rootdse', '-oX', '-', ip], 'nmap'
+    if kind == 'snmp-system' and len(services) == 1 and services[0].get('port') == 161 and services[0].get('protocol') == 'udp' and services[0].get('state') == 'open':
+        return 'snmpwalk', ['-v2c', '-c', 'public', '-t', '2', '-r', '0', '-On', ip, '1.3.6.1.2.1.1'], 'snmp-system'
     if kind == 'nuclei-git':
         service = services[0]
         scheme = 'https' if service.get('tunnel') == 'ssl' or 'https' in service.get('name', '').lower() or service['port'] in (443, 8443) else 'http'
@@ -195,6 +201,11 @@ def parse_check_result(candidate, tool, output):
         if not output.lstrip().startswith('HTTP/'):
             raise ValueError('No HTTP response headers found.')
         add('HTTP response headers', output)
+    elif tool == 'snmp-system':
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if not lines or len(lines) > 100 or any(not re.match(r'^\.1\.3\.6\.1\.2\.1\.1\.\d+(?:\.\d+)*\s*=', line) for line in lines):
+            raise ValueError('No bounded SNMP system subtree response from the selected host.')
+        add('SNMP system information', '\n'.join(lines), service_id)
     elif tool == 'smb-shares':
         if not re.search(r'\bSharename\b|\bDisk\b|\bIPC\b', output, re.I):
             raise ValueError('No SMB share listing found.')
