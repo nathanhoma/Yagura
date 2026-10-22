@@ -696,6 +696,10 @@ function renderActivity(){
   if(autoRunning&&autoPlan)local.push({kind:'browser run',title:'Short automatic check run',target:autonomyHostLabel(autoPlan.hostId),detail:$('#autoState').textContent,progress:{completed:$('#autoResults').children.length,total:autoPlan.checks.length,unit:'checks'},startedAt:autoStartedAt});
   if(!$('#stopScanBtn').disabled)local.push({kind:'browser run',title:'Scoped discovery sequence',target:$('#scanTarget').value,detail:$('#scanState').textContent});
   const active=[...local,...activityData.active],unread=finished.filter(r=>!inboxRead.has(inboxKey(r))).length;
+  const idle=autonomyLoaded&&scopeLoaded&&!!checkScope()&&!pending.length&&!active.length&&!autonomyRuns.some(r=>r.status==='running')&&!activityError&&!inboxError;
+  $('#inboxIdle').hidden=!idle;
+  $('#inboxActionsSection').hidden=idle;
+  $('#inboxRunningSection').hidden=idle;
   $('#activityToggleText').textContent=pending.length?pending.length+' review'+(unread?' · '+unread+' new':''):inboxError?'Inbox ?':unread?unread+' new':'Inbox';
   $('#activityPulse').classList.toggle('running',!!active.length&&!pending.length&&!activityError);
   $('#activityPulse').classList.toggle('error',!!pending.length||!!activityError||!!inboxError);
@@ -723,6 +727,7 @@ async function refreshActivity(){if(activityLoading)return;activityLoading=true;
 function openActivity(){activityFocus=document.activeElement;$('#activityBackdrop').hidden=false;$('#activityDrawer').hidden=false;document.body.classList.add('activity-open');$('#activityToggle').setAttribute('aria-expanded','true');renderActivity();$('#activityClose').focus();}
 function closeActivity(){$('#activityBackdrop').hidden=true;$('#activityDrawer').hidden=true;document.body.classList.remove('activity-open');$('#activityToggle').setAttribute('aria-expanded','false');(activityFocus||$('#activityToggle')).focus();}
 $('#activityToggle').onclick=()=>$('#activityDrawer').hidden?openActivity():closeActivity();
+$('#inboxNewInvestigation').onclick=()=>{closeActivity();location.hash='#autonomy';showView();openAutonomyNewRun();};
 $('#activityClose').onclick=closeActivity;
 $('#activityBackdrop').onclick=closeActivity;
 document.addEventListener('keydown',event=>{if($('#activityDrawer').hidden||$('#reviewDialog').open)return;if(event.key==='Escape'){event.preventDefault();closeActivity();return;}if(event.key!=='Tab')return;const controls=[...$('#activityDrawer').querySelectorAll('button:not([disabled]),input:not([disabled]),summary')].filter(node=>node.getClientRects().length);if(!controls.length)return;const first=controls[0],last=controls.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}});
