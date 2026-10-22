@@ -364,11 +364,13 @@ function renderAutonomyGroupHosts(){
     const meta=`${flags.length} flag${flags.length===1?'':'s'} · ${services.length} service${services.length===1?'':'s'}`;
     return `<label class="autonomy-host-row"><input type="checkbox" data-autonomy-host="${esc(host.id)}" ${autonomySelectedHosts.has(host.id)?'checked':''}><span><strong>${esc(recordLabel(host))}</strong><small>${esc(meta)} · ${esc(autonomyHostGroup(host))}</small><small class="${flags.length?'host-lead':''}">${esc(lead)}</small></span></label>`;
   }).join(''):'<div class="empty">No approved host matches these filters.</div>';
-  $('#autonomyGroupCount').textContent=filter==='leads'&&!search&&!segmentSelect.value?`Showing ${visible.length} evidence leads of ${choices.length} approved hosts`:`${visible.length} of ${choices.length} approved hosts shown`;
+  $('#autonomyGroupCount').textContent=filter==='leads'&&!search&&!segmentSelect.value?`Top ${visible.length} by flags, then services · ${choices.length} approved`:`${visible.length} of ${choices.length} approved hosts shown`;
   const available=visible.filter(choice=>!autonomySelectedHosts.has(choice.host.id));
   $('#autonomyGroupSelectVisible').disabled=!available.length||available.length>8-autonomySelectedHosts.size;
+  $('#autonomyGroupSelectVisible').textContent=available.length>8-autonomySelectedHosts.size?'Narrow to ≤8':'Select shown';
   $('#autonomyGroupSelectVisible').title=available.length>8-autonomySelectedHosts.size?'Narrow the list to fit the eight-host limit.':'';
   $('#autonomyGroupClear').disabled=!autonomySelectedHosts.size;
+  $('#autonomyGroupStart').disabled=autonomySelectedHosts.size<2||autonomyRuns.some(run=>['running','awaiting-approval','awaiting-host-review','awaiting-discovery'].includes(run.status));
   const chosen=choices.filter(choice=>autonomySelectedHosts.has(choice.host.id));
   $('#autonomyGroupSelected').innerHTML=`${chosen.length} of 8 hosts selected`+(chosen.length?'<div>'+chosen.map(({host})=>`<button type="button" data-remove-autonomy-host="${esc(host.id)}" aria-label="Remove ${esc(recordLabel(host))}">${esc(recordLabel(host))} ×</button>`).join('')+'</div>':'');
 }
@@ -497,7 +499,7 @@ function renderAutonomy(){
   if(active)reviewAction.textContent=active.status==='awaiting-approval'?'Review proposed command':active.status==='awaiting-host-review'?'Review host names in Scope':'Continue discovery';
   $('#autonomyStop').disabled=!active;now.classList.toggle('idle',!active);
   $('#autonomyStart').disabled=!!active;
-  $('#autonomyGroupStart').disabled=!!active;
+  $('#autonomyGroupStart').disabled=!!active||autonomySelectedHosts.size<2;
   $('#autonomyDiscoverStart').disabled=!!active;
   $('#autonomyDiscoverResume').disabled=!active||!['awaiting-host-review','awaiting-discovery'].includes(active.status);
   $('#autonomyNewRunOpen').disabled=!!active;
