@@ -28,7 +28,7 @@ class FakeLlm:
         if self.invalid:
             candidate_id = 'outside-scope:invented'
         elif len(self.prompts) == 1:
-            candidate_id = next(c['id'] for c in user['context']['candidates'] if c['catalogId'] == 'http-headers')
+            candidate_id = next((c['id'] for c in user['context']['candidates'] if c['catalogId'] == 'http-headers'), None)
         else:
             candidate_id = None
         return {'model': 'fake', 'data': {'candidateId': candidate_id,
@@ -185,7 +185,7 @@ class AutonomyTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(ValueError):
                 validate_reviewed_check(command, '100.96.1.70')
 
-    def test_group_surveys_each_host_without_cross_host_comparison(self):
+    def test_group_surveys_each_host_then_selects_approved_deep_dive(self):
         second = F.parse_import({'tool': 'nmap', 'output':
             'Nmap scan report for api.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
             '443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
@@ -208,15 +208,19 @@ class AutonomyTests(unittest.TestCase):
         def execute(cid, scope, **kwargs):
             checks.append(cid)
             return dict(outcome='completed', imported=True, warning='', evidenceIds=[], output='ok', stderr='')
-        with patch('backend.autonomy.workflow', return_value={'candidates': rows}), patch.object(self.ws, 'execute_candidate', side_effect=execute):
+        with patch('backend.autonomy.workflow', return_value={'candidates': rows}), patch.object(self.ws, 'execute_candidate', side_effect=execute), patch.object(self.ws.autonomy, '_worker') as deep_dive:
             run = self.ws.autonomy.start_group([self_host, other['id']], self.scope)
             self.ws.autonomy.thread.join(3)
         saved = self.ws.autonomy.history()['runs'][0]
         self.assertEqual(saved['id'], run['id'])
-        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(saved['phase'], 'deep-dive')
+        self.assertEqual(saved['deepDiveHostId'], self_host)
+        self.assertIn('imported evidence', saved['deepDiveReason'])
+        self.assertEqual(deep_dive.call_args.args[1], self_host)
         self.assertEqual(checks, ['baseline-1', 'baseline-2'])
         self.assertEqual(saved['surveyedHostIds'], [self_host, other['id']])
         self.assertEqual(saved['flags'], [])
+        self.assertEqual(len([e for e in saved['events'] if e['type'] == 'deep-dive-selection']), 1)
         self.assertFalse(any(e['type'] == 'comparison' for e in saved['events']))
 
     def test_group_rejects_unapproved_host_before_any_check(self):
@@ -230,6 +234,21 @@ class AutonomyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ws.autonomy.start_group([self.host['id'], other_id], self.scope)
         self.assertEqual(self.calls, [])
+
+    def test_group_deep_dive_approval_resumes_one_host_worker(self):
+        command = 'nmap -n -Pn -sT -p 80 100.96.1.70'
+        run = dict(id='group-review', mode='group', phase='deep-dive', status='awaiting-approval',
+            hostId=self.host['id'], hostIp='', hostName='2 selected hosts',
+            hostSnapshots={self.host['id']: {'ip': self.host['ip'], 'name': self.host['name']}},
+            scope=self.scope, model='server default', events=[],
+            pendingProposal=dict(id='proposal-1', revision=1, command=command))
+        self.ws.autonomy._save({'runs': [run]})
+        with patch.object(self.ws.autonomy, '_worker') as worker, patch.object(self.ws.autonomy, '_group_worker') as group_worker:
+            self.ws.autonomy.approve('group-review', 'proposal-1', 1, command, self.scope)
+            self.ws.autonomy.thread.join(3)
+        worker.assert_called_once()
+        self.assertEqual(worker.call_args.args[1], self.host['id'])
+        group_worker.assert_not_called()
 
     def test_check_review_rejects_cross_host_evidence_misattribution(self):
         second = F.parse_import({'tool': 'nmap', 'output':
