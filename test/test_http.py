@@ -51,6 +51,21 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(data['flags'][0]['kind'], 'software')
         self.assertEqual(len(data['flags'][0]['evidenceIds']), 1)
 
+    def test_tool_export_import_requires_current_approved_host_and_keeps_metadata_only(self):
+        scope = self.workspace.save_scope({'cidrs': ['192.168.56.0/24'], 'domains': []})
+        self.workspace.save(F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for www.lab.test (192.168.56.10)\nHost is up.\n80/tcp open http\nNmap done: 1 IP address (1 host up) scanned'}))
+        host_id = next(f['id'] for f in self.workspace.load()['findings'] if f['kind'] == 'host')
+        payload = {'tool': 'wappalyzer', 'hostId': host_id, 'authorizedScope': scope,
+                   'output': json.dumps({'url': 'http://www.lab.test/?token=secret',
+                       'technologies': [{'name': 'Example CMS', 'versions': ['1.2.3']}]})}
+        self.assertEqual(self.call('/api/import/preview', 'POST', {**payload, 'authorizedScope': None})[0], 400)
+        status, preview = self.call('/api/import/preview', 'POST', payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(preview['findings'][-1]['title'], 'Web technology: Example CMS')
+        self.assertEqual(self.call('/api/import', 'POST', payload)[0], 201)
+        self.assertNotIn('secret', json.dumps(self.workspace.load()))
+
     def test_llm_metrics_endpoint_returns_only_measurements(self):
         self.workspace.llm_metrics.record({'model': 'test-model', 'status': 'completed',
             'finishReason': 'stop', 'inputChars': 120, 'outputChars': 30,

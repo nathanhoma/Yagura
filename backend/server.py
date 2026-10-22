@@ -31,6 +31,7 @@ from .check_proposals import CheckProposals
 from .activity import ActivityTracker
 from .attention import review_flags
 from .vulnerabilities import match_versions
+from .tool_imports import TOOLS as EXPORT_TOOLS, parse_export
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -745,10 +746,32 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     data = csv_export(doc) if as_csv else json.dumps(doc, ensure_ascii=False, indent=2) + '\n'
                     return self.send_bytes(200, data.encode(), 'text/csv; charset=utf-8' if as_csv else 'application/json; charset=utf-8', f"yagura-findings.{'csv' if as_csv else 'json'}")
                 if self.command == 'POST' and path == '/api/import/preview':
-                    return self.send_json(200, sanitize_document(F.parse_import(self.body())))
+                    data = self.body()
+                    if data.get('tool') in EXPORT_TOOLS:
+                        with workspace.lock:
+                            scope = workspace.load_scope()
+                            if data.get('authorizedScope') != scope:
+                                raise ValueError('Saved target scope changed. Refresh and review the import.')
+                            host = next((h for h in workspace.load()['findings'] if h['kind'] == 'host' and h['id'] == data.get('hostId')), None)
+                            if host is None:
+                                raise ValueError('Select a recorded approved host.')
+                            parsed = parse_export(data, host, scope)
+                    else:
+                        parsed = F.parse_import(data)
+                    return self.send_json(200, sanitize_document(parsed))
                 if self.command == 'POST' and path == '/api/import':
-                    parsed = F.parse_import(self.body())
+                    data = self.body()
                     with workspace.lock:
+                        if data.get('tool') in EXPORT_TOOLS:
+                            scope = workspace.load_scope()
+                            if data.get('authorizedScope') != scope:
+                                raise ValueError('Saved target scope changed. Refresh and review the import.')
+                            host = next((h for h in workspace.load()['findings'] if h['kind'] == 'host' and h['id'] == data.get('hostId')), None)
+                            if host is None:
+                                raise ValueError('Select a recorded approved host.')
+                            parsed = parse_export(data, host, scope)
+                        else:
+                            parsed = F.parse_import(data)
                         doc = workspace.load()
                         summary = F.merge_parsed(doc, parsed)
                         workspace.save(doc)
