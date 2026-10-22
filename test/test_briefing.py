@@ -34,14 +34,12 @@ class BriefingTests(unittest.TestCase):
                     'findingIds': [finding['id']], 'evidenceIds': finding['evidenceIds'],
                     'candidateIds': []}}
         self.ws.llm = Model()
-        result = answer_question(self.ws, 'What is recorded?', [self.host['id']])
+        result = answer_question(self.ws, 'What is recorded?')
         self.assertTrue(result['supported'])
         self.assertEqual(self.ws.llm.max_tokens, 32768)
         self.assertEqual(result['findingIds'], [self.host['id']])
 
-    def test_unapproved_host_and_invented_evidence_are_rejected(self):
-        with self.assertRaisesRegex(ValueError, 'outside'):
-            answer_question(self.ws, 'What is recorded?', ['invented'])
+    def test_invented_evidence_is_rejected(self):
         class Model:
             def complete(self, messages, max_tokens=0, model=''):
                 context = json.loads(messages[1]['content'])['context']
@@ -50,7 +48,7 @@ class BriefingTests(unittest.TestCase):
                     'evidenceIds': ['invented'], 'candidateIds': []}}
         self.ws.llm = Model()
         with self.assertRaisesRegex(ValueError, 'outside the supplied context'):
-            answer_question(self.ws, 'What is recorded?', [self.host['id']])
+            answer_question(self.ws, 'What is recorded?')
 
     def test_invalid_citations_are_retried_once_with_verified_references(self):
         class Model:
@@ -63,7 +61,7 @@ class BriefingTests(unittest.TestCase):
                     'evidenceIds': ['invented'] if self.calls == 1 else finding['evidenceIds'],
                     'candidateIds': []}}
         self.ws.llm = Model()
-        result = answer_question(self.ws, 'What is recorded?', [self.host['id']])
+        result = answer_question(self.ws, 'What is recorded?')
         self.assertEqual(self.ws.llm.calls, 2)
         self.assertTrue(result['supported'])
 
@@ -73,7 +71,7 @@ class BriefingTests(unittest.TestCase):
                 return {'model': 'fake', 'data': {'supported': False,
                     'answer': 'Invented access.', 'findingIds': [], 'evidenceIds': [], 'candidateIds': []}}
         self.ws.llm = Model()
-        result = answer_question(self.ws, 'Can I access it?', [self.host['id']])
+        result = answer_question(self.ws, 'Can I access it?')
         self.assertFalse(result['supported'])
         self.assertNotIn('Invented', result['answer'])
 
@@ -95,7 +93,43 @@ class BriefingTests(unittest.TestCase):
         F.merge_parsed(doc, second)
         self.ws.save(doc)
         with self.assertRaisesRegex(ValueError, 'outside the supplied context'):
-            answer_question(self.ws, 'What is recorded?', [self.host['id']])
+            answer_question(self.ws, 'What is recorded?')
+
+    def test_reads_all_approved_hosts_then_fetches_relevant_detail(self):
+        doc = self.ws.load()
+        for number in range(71, 81):
+            imported = F.parse_import({'tool': 'nmap', 'output':
+                f'Nmap scan report for node{number}.lab.test (100.96.1.{number})\n'
+                'Host is up.\n443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
+            for finding in imported['findings']:
+                if finding['kind'] == 'host' and number != 80:
+                    finding['approval'] = {'ip': finding['ip'], 'name': finding['name'], 'scope': self.scope}
+            doc['findings'].extend(imported['findings'])
+            doc['evidence'].extend(imported['evidence'])
+        self.ws.save(doc)
+        class Model:
+            def __init__(self):
+                self.calls = []
+            def complete(self, messages, max_tokens=0, model=''):
+                payload = json.loads(messages[1]['content'])
+                self.calls.append(payload)
+                if 'context' not in payload:
+                    self.max_selection_tokens = max_tokens
+                    self.assert_inventory = payload['inventory']
+                    return {'model': 'fake', 'data': {'hostIds': [payload['inventory']['hosts'][-1]['id']]}}
+                finding = payload['context']['findings'][0]
+                return {'model': 'fake', 'data': {'supported': True,
+                    'answer': 'The selected host has a saved response.', 'uncertainty': '',
+                    'findingIds': [finding['id']], 'evidenceIds': finding['evidenceIds'],
+                    'candidateIds': []}}
+        self.ws.llm = Model()
+        result = answer_question(self.ws, 'What was seen on node79?')
+        self.assertTrue(result['supported'])
+        self.assertEqual(len(self.ws.llm.calls), 2)
+        self.assertEqual(self.ws.llm.max_selection_tokens, 2048)
+        self.assertEqual(self.ws.llm.assert_inventory['approvedHosts'], 10)
+        self.assertNotIn('node80.lab.test', str(self.ws.llm.assert_inventory))
+        self.assertEqual(self.ws.llm.calls[1]['detailHostIds'], [self.ws.llm.assert_inventory['hosts'][-1]['id']])
 
 
 if __name__ == '__main__':

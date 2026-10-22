@@ -564,9 +564,9 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(200, {**workspace.autonomy.history(), 'limits': workspace.autonomy.limits()})
                 if self.command == 'POST' and path == '/api/briefing/ask':
                     body = self.body(4000)
-                    if not isinstance(body, dict) or set(body) != {'question', 'hostIds', 'model'}:
-                        raise ValueError('Supply a question, approved hostIds, and optional model.')
-                    return self.send_json(200, answer_question(workspace, body['question'], body['hostIds'], body['model']))
+                    if not isinstance(body, dict) or set(body) != {'question', 'model'}:
+                        raise ValueError('Supply a question and optional model.')
+                    return self.send_json(200, answer_question(workspace, body['question'], body['model']))
                 if self.command == 'GET' and path == '/api/check-proposals':
                     return self.send_json(200, workspace.check_proposals.list())
                 if self.command == 'POST' and path == '/api/check-proposals':

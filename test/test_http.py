@@ -106,7 +106,7 @@ class HttpTests(unittest.TestCase):
                     'candidateIds': []}}
         self.workspace.llm = Model()
         status, answer = self.call('/api/briefing/ask', 'POST',
-                                   {'question': 'What is recorded?', 'hostIds': [host['id']], 'model': ''})
+                                   {'question': 'What is recorded?', 'model': ''})
         self.assertEqual(status, 200)
         self.assertTrue(answer['supported'])
         self.assertEqual(answer['findingIds'], [host['id']])
