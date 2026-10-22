@@ -232,6 +232,52 @@ class AutonomyController:
             self.thread.start()
             return run
 
+    def start_inventory_survey(self, scope, model=''):
+        """Survey every currently approved, DNS-verified inventory host."""
+        ws = self.workspace
+        with ws.lock:
+            if self.thread and self.thread.is_alive() or any(r.get('status') in
+                    ('awaiting-approval', 'awaiting-host-review', 'awaiting-discovery') for r in self._load()['runs']):
+                raise ValueError('Review or stop the current AI run first.')
+            if not ws.scope_file.exists() or ws.load_scope() != scope:
+                raise ValueError('Save and confirm the current target scope first.')
+            records = ws.load_discovery()
+            approved = {(r.get('ip'), r.get('approvedName')) for r in records['hosts'] if
+                        r.get('scope') == scope and r.get('approved')}
+            pairs = {(r['ip'], r['name']) for r in records.get('inventory', []) if
+                     r.get('scope') == scope and r.get('status') == 'verified' and
+                     (r['ip'], r['name']) in approved}
+            hosts = [h for h in ws.load()['findings'] if h['kind'] == 'host' and
+                     (h['ip'], h.get('name')) in pairs]
+            if len(hosts) < 2:
+                raise ValueError('Approve at least two DNS-verified inventory hosts first.')
+            for host in hosts:
+                require_target(host, scope)
+            ws.llm.assert_configuration()
+            if model:
+                ws.llm.select_model(requested=model)
+            ordered = sorted(hosts, key=lambda h: int(ipaddress.ip_address(h['ip'])))
+            ids = [h['id'] for h in ordered]
+            run = dict(id=uid('ai-run'), mode='discover-group', source='inventory', phase='survey',
+                       hostIds=ids, surveyedHostIds=[], hostSnapshots={h['id']:
+                       {'ip': h['ip'], 'name': h.get('name')} for h in ordered},
+                       hostId=ids[0], hostName=f'{len(ids)} approved inventory hosts', hostIp='',
+                       model=model or 'server default', scope=scope, status='running',
+                       startedAt=now(), endedAt=None, maxChecks=self.group_max_checks,
+                       stopReason='', flags=[], events=[dict(type='selection', at=now(), hostIds=ids,
+                       reason='All DNS-verified and explicitly approved inventory hosts.')])
+            data = self._load()
+            data['runs'] = [run] + data['runs'][:19]
+            self._save(data)
+            self.activity_ids[run['id']] = ws.activity.begin('ai-run', 'Survey approved inventory',
+                target=f'{len(ids)} hosts', detail='Surveying approved hosts in batches of four.')
+            self.stop_event = threading.Event()
+            self.thread = threading.Thread(target=self._group_worker,
+                args=(run['id'], scope, model, self.stop_event), daemon=True,
+                name='yagura-ai-inventory-survey')
+            self.thread.start()
+            return run
+
     def resume_discover_group(self, run_id, scope):
         ws = self.workspace
         with ws.lock:
@@ -247,8 +293,10 @@ class AutonomyController:
             model = run['model'] if run['model'] != 'server default' else ''
             self.activity_ids[run_id] = ws.activity.begin('ai-run', 'Continue scoped discovery',
                 target=', '.join(scope['cidrs']), detail='Checking saved discovery and approved hosts.')
-            self.thread = threading.Thread(target=self._discover_group_worker,
-                args=(run_id, scope, model, self.stop_event, True), daemon=True,
+            worker = self._group_worker if run.get('hostIds') and run.get('phase') == 'survey' else self._discover_group_worker
+            args = (run_id, scope, model, self.stop_event) if worker == self._group_worker else (run_id, scope, model, self.stop_event, True)
+            self.thread = threading.Thread(target=worker,
+                args=args, daemon=True,
                 name='yagura-ai-discover-group')
             self.thread.start()
             return next(r for r in self._load()['runs'] if r['id'] == run_id)
@@ -738,7 +786,7 @@ class AutonomyController:
             if len(chosen) >= AUTO_GROUP_HOSTS:
                 break
         chosen.extend(t['host']['id'] for t in ranked if t['host']['id'] not in chosen)
-        return chosen[:AUTO_GROUP_HOSTS]
+        return chosen
 
     def _promote_ip_only_discovery(self, scope):
         if scope['domains']:
@@ -820,7 +868,7 @@ class AutonomyController:
                     hostId=selected[0], hostName=f'{len(selected)} automatically selected hosts',
                     status='running', stopReason='')
                 saved['events'].append(dict(type='selection', at=now(), hostIds=selected,
-                    reason='One strong recorded host from each CIDR, then hosts with the most linked findings; approved hosts only.'))
+                    reason='All approved hosts, with one from each CIDR first and then hosts ranked by linked findings.'))
                 self._save(data)
             ws.activity.update(self.activity_ids[run_id], detail=f'Selected {len(selected)} approved hosts; surveying baseline checks.')
             self._group_worker(run_id, scope, model, stop_event)
@@ -848,6 +896,9 @@ class AutonomyController:
                 count = sum(e['type'] == 'check' for e in run['events'])
                 remaining = GROUP_MAX_SECONDS - (time.monotonic() - started)
                 if remaining <= 0:
+                    if run.get('mode') == 'discover-group' and run.get('phase') == 'survey':
+                        return self._pause_discovery(run_id, 'awaiting-discovery',
+                            'Survey time limit reached; completed hosts are saved. Continue to survey the rest.')
                     return self._finish(run_id, 'stopped', 'Group time limit reached.')
                 unvisited = [hid for hid in run['hostIds'] if hid not in run['surveyedHostIds']]
                 if not unvisited:
@@ -857,28 +908,29 @@ class AutonomyController:
                     ws.activity.update(self.activity_ids[run_id], detail='Survey complete; deep-diving into a selected approved host.')
                     return self._worker(run_id, hid, scope, model, stop_event)
                 hid = unvisited[0]
+                if run.get('mode') == 'discover-group' and len(run['surveyedHostIds']) % AUTO_GROUP_HOSTS == 0:
+                    self._event(run_id, dict(type='survey-batch',
+                        completed=len(run['surveyedHostIds']), total=len(run['hostIds']),
+                        size=min(AUTO_GROUP_HOSTS, len(unvisited))))
                 options = [c for c in candidates if c['hostId'] == hid]
                 priority = ('nmap-service', 'nmap-ports', 'web-inventory', 'http-headers',
                             'nmap-ports-extended', 'web-exposure', 'tls-certificate', 'ssh-hostkey', 'ping')
                 candidate = min(options, key=lambda c: priority.index(c['catalogId'])) if options else None
-                with ws.lock:
-                    data = self._load()
-                    saved = next(r for r in data['runs'] if r['id'] == run_id)
-                    saved['surveyedHostIds'].append(hid)
-                    saved['events'].append(dict(type='survey', at=now(), hostId=hid,
-                        candidateId=candidate['id'] if candidate else None,
-                        reason='One baseline catalog check on this host.' if candidate else 'No current catalog check for this host.'))
-                    self._save(data)
                 if candidate is None:
+                    self._mark_survey(run_id, hid, None)
                     continue
                 if stop_event.is_set():
                     return self._finish(run_id, 'stopped', 'Stopped before the selected check.')
                 remaining = GROUP_MAX_SECONDS - (time.monotonic() - started)
                 if remaining <= 0:
+                    if run.get('mode') == 'discover-group':
+                        return self._pause_discovery(run_id, 'awaiting-discovery',
+                            'Survey time limit reached; completed hosts are saved. Continue to survey the rest.')
                     return self._finish(run_id, 'stopped', 'Group time limit reached before the check.')
                 rule_flags_before = self._rule_flags(candidate['hostId'], scope)
                 result = ws.execute_candidate(candidate['id'], scope, expected_command=candidate['command'],
                                               timeout=max(1, min(45, int(remaining))))
+                self._mark_survey(run_id, hid, candidate)
                 result['ruleFlagsBefore'] = rule_flags_before
                 self._event(run_id, dict(type='check', step=count + 1, hostId=candidate['hostId'],
                                          candidateId=candidate['id'], outcome=result['outcome'],
@@ -892,6 +944,18 @@ class AutonomyController:
             self._finish(run_id, 'stopped', f'Run stopped safely: {exc}')
         except Exception:
             self._finish(run_id, 'stopped', 'Unexpected error; review server logs before retrying.')
+
+    def _mark_survey(self, run_id, host_id, candidate):
+        with self.workspace.lock:
+            data = self._load()
+            saved = next(r for r in data['runs'] if r['id'] == run_id)
+            if host_id not in saved['surveyedHostIds']:
+                saved['surveyedHostIds'].append(host_id)
+                saved['events'].append(dict(type='survey', at=now(), hostId=host_id,
+                    candidateId=candidate['id'] if candidate else None,
+                    reason='One baseline catalog check on this host.' if candidate else
+                           'No current catalog check for this host.'))
+                self._save(data)
 
     def _worker(self, run_id, host_id, scope, model, stop_event, reviewed_command=None):
         ws = self.workspace

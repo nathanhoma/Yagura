@@ -22,6 +22,7 @@ from .workflow import COMMAND_CATALOG, is_local_ip, is_tls_service, workflow
 from .web_contacts import website_url
 from .scope import normalize_scope, valid_cidr
 from .discovery import contained_range, discovery_chunks, discovery_progress, dns_review, name_discovery, approval_name
+from .inventory import parse_inventory, verify_inventory_host
 from .sensitive import redact, sanitize_document
 from .outbound import require_target, require_web_origin
 from .autonomy import AutonomyController
@@ -309,7 +310,8 @@ class Workspace:
             return {'hosts': []}
 
     def save_discovery(self, data):
-        if len(data.get('hosts', [])) > 10000 or len(data.get('scans', [])) > 128 or len(data.get('runs', [])) > 20:
+        if (len(data.get('hosts', [])) > 10000 or len(data.get('scans', [])) > 128 or
+                len(data.get('runs', [])) > 20 or len(data.get('inventory', [])) > 512):
             raise ValueError('Discovery capacity reached; start a new workspace before scanning more.')
         self.discovery_file.parent.mkdir(parents=True, exist_ok=True)
         temp = self.discovery_file.with_name(self.discovery_file.name + '.tmp')
@@ -634,6 +636,15 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     with workspace.lock:
                         scope = workspace.resolve_scope(body.get('authorizedScope'))
                     return self.send_json(202, workspace.autonomy.start_discover_group(scope, body['resolvers'], body.get('model', '')))
+                if self.command == 'POST' and path == '/api/autonomy/survey-inventory':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) != {'model', 'authorizedScope', 'authorized'} or
+                            body.get('authorized') is not True or not isinstance(body.get('model'), str) or
+                            len(body['model']) > 200):
+                        raise ValueError('Confirm a survey of the approved inventory hosts.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                    return self.send_json(202, workspace.autonomy.start_inventory_survey(scope, body['model']))
                 if self.command == 'POST' and path == '/api/autonomy/resume-discovery':
                     body = self.body(4000)
                     if (not isinstance(body, dict) or set(body) != {'runId', 'authorizedScope', 'authorized'} or
@@ -775,7 +786,126 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         saved = workspace.load_discovery()
                         rows = [h for h in saved['hosts'] if normalize_scope(h.get('scope')) == scope]
                         runs = [discovery_progress(run) for run in saved.get('runs', []) if normalize_scope(run.get('scope')) == scope]
-                    return self.send_json(200, {'hosts': rows, 'runs': runs})
+                        inventory = [h for h in saved.get('inventory', []) if normalize_scope(h.get('scope')) == scope]
+                        inventory_issues = saved.get('inventoryIssues', []) if saved.get('inventoryIssuesScope') == scope else []
+                    return self.send_json(200, {'hosts': rows, 'runs': runs, 'inventory': inventory,
+                                                'inventoryIssues': inventory_issues})
+                if self.command == 'POST' and path == '/api/discovery/inventory':
+                    body = self.body(3_000_000)
+                    if (not isinstance(body, dict) or set(body) !=
+                            {'content', 'teamNumber', 'suffix', 'resolvers', 'authorizedScope', 'authorized'} or
+                            body['authorized'] is not True):
+                        raise ValueError('Supply the inventory, team number, hostname suffix, and internal resolvers.')
+                    with workspace.lock:
+                        scope = workspace.load_scope()
+                        if normalize_scope(body['authorizedScope']) != scope:
+                            raise ValueError('Saved target scope changed. Review it before importing.')
+                    parsed = parse_inventory(body['content'], body['teamNumber'], body['suffix'], scope)
+                    activity_id = workspace.activity.begin('discovery', 'Verify inventory hosts',
+                        target=body['suffix'], detail=f"Checking DNS for {len(parsed['hosts'])} inventory host(s).")
+                    try:
+                        checked = []
+                        for host in parsed['hosts']:
+                            result = verify_inventory_host(host, body['resolvers'], scope, workspace.runner)
+                            checked.append({**host, **result, 'scope': scope, 'reviewedAt': F.now()})
+                        with workspace.lock:
+                            if workspace.load_scope() != scope:
+                                raise ValueError('Saved target scope changed during inventory verification.')
+                            data = workspace.load_discovery()
+                            doc = workspace.load()
+                            approval_changed = False
+                            for item in checked:
+                                current = next((h for h in data['hosts'] if h['ip'] == item['ip'] and
+                                    normalize_scope(h.get('scope')) == scope), None)
+                                if current and current.get('approved') and current.get('approvedName') != item['name']:
+                                    item['status'] = 'host-conflict'
+                                if (current and current.get('approved') and current.get('approvedName') == item['name']
+                                        and item['status'] != 'verified'):
+                                    current['approved'] = False
+                                    current['dns'] = item['dns']
+                                    host = next((h for h in doc['findings'] if h['kind'] == 'host' and
+                                        h['ip'] == item['ip'] and h.get('name') == item['name']), None)
+                                    if host:
+                                        host.pop('approval', None)
+                                        approval_changed = True
+                            keys = {(h['name'], h['ip']) for h in checked}
+                            data['inventory'] = [h for h in data.get('inventory', []) if
+                                (h.get('name'), h.get('ip')) not in keys or normalize_scope(h.get('scope')) != scope] + checked
+                            data['inventoryIssues'] = parsed['issues']
+                            data['inventoryIssuesScope'] = scope
+                            for item in checked:
+                                if item['status'] not in ('verified', 'dns-review-needed'):
+                                    continue
+                                row = next((h for h in data['hosts'] if h['ip'] == item['ip'] and
+                                    normalize_scope(h.get('scope')) == scope), None)
+                                if row is None:
+                                    row = {'ip': item['ip'], 'status': 'unknown', 'firstSeen': item['reviewedAt'],
+                                           'approved': False, 'scope': scope}
+                                    data['hosts'].append(row)
+                                if row.get('approved') and row.get('approvedName') != item['name']:
+                                    continue
+                                row.update(seedName=item['name'], seedQueries=item['queries'],
+                                           dns=item['dns'], lastSeen=item['reviewedAt'], inventoryName=item['name'])
+                            if approval_changed:
+                                workspace.save(doc)
+                            workspace.save_discovery(data)
+                        workspace.activity.finish(activity_id, 'completed',
+                            f"Verified {sum(h['status'] == 'verified' for h in checked)} inventory host(s).")
+                    except Exception as exc:
+                        workspace.activity.finish(activity_id, 'failed', str(exc))
+                        raise
+                    return self.send_json(200, {'inventory': checked, 'issues': parsed['issues'],
+                                                'totalRows': parsed['totalRows']})
+                if self.command == 'POST' and path == '/api/discovery/inventory/approve':
+                    body = self.body(20000)
+                    if (not isinstance(body, dict) or set(body) != {'hosts', 'authorizedScope', 'authorized'} or
+                            body['authorized'] is not True or not isinstance(body['hosts'], list) or
+                            not 1 <= len(body['hosts']) <= 64):
+                        raise ValueError('Choose one to 64 verified inventory hosts for approval.')
+                    with workspace.lock:
+                        scope = workspace.load_scope()
+                        if normalize_scope(body['authorizedScope']) != scope:
+                            raise ValueError('Saved target scope changed. Review it before approving.')
+                        data = workspace.load_discovery()
+                        selected = []
+                        seen = set()
+                        for item in body['hosts']:
+                            if not isinstance(item, dict) or set(item) != {'ip', 'name'} or (item['ip'], item['name']) in seen:
+                                raise ValueError('Supply unique exact IP/name pairs.')
+                            seen.add((item['ip'], item['name']))
+                            inv = next((h for h in data.get('inventory', []) if h.get('ip') == item['ip'] and
+                                h.get('name') == item['name'] and h.get('scope') == scope and
+                                h.get('status') == 'verified'), None)
+                            row = next((h for h in data['hosts'] if h.get('ip') == item['ip'] and
+                                h.get('inventoryName') == item['name'] and h.get('scope') == scope), None)
+                            if not inv or not row or row.get('approved'):
+                                raise ValueError('Inventory host is unverified, changed, or already approved.')
+                            approval_name(row, item['name'], scope)
+                            selected.append((row, inv))
+                        doc = workspace.load()
+                        approved = []
+                        for row, inv in selected:
+                            when = F.now()
+                            ev = dict(id=F.uid('evidence'), tool='dns-review', command='Inventory host approval',
+                                output=json.dumps({'ip': row['ip'], 'name': inv['name'],
+                                    'seedQueries': row['seedQueries'], 'review': row['dns']}),
+                                observedAt=when, importedAt=when, format='json')
+                            host = next((h for h in doc['findings'] if h['kind'] == 'host' and h['ip'] == row['ip']), None)
+                            if host is None:
+                                host = F.record('host', dict(ip=row['ip'], aliases=[], name=inv['name'],
+                                    state=row['status'], local=False, title=row['ip'],
+                                    detail='Approved after inventory and DNS review.'), ev['id'], when)
+                                doc['findings'].append(host)
+                            else:
+                                host['name'] = inv['name']
+                                host['evidenceIds'] = list(dict.fromkeys(host['evidenceIds'] + [ev['id']]))
+                            host['approval'] = dict(ip=row['ip'], name=inv['name'], scope=scope, approvedAt=when)
+                            doc['evidence'].append(ev)
+                            row.update(approved=True, approvedName=inv['name'], approvedAt=when)
+                            approved.append({'ip': row['ip'], 'name': inv['name'], 'hostId': host['id']})
+                        workspace.save(doc)
+                        workspace.save_discovery(data)
+                    return self.send_json(200, {'approved': approved})
                 if self.command == 'POST' and path == '/api/discovery/name':
                     body = self.body(4000)
                     if (not isinstance(body, dict) or set(body) != {'name', 'resolvers', 'authorized'} or

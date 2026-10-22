@@ -374,6 +374,55 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(self.ws.autonomy.history()['runs'][0]['status'], 'completed')
         self.assertEqual(attempts, ['100.96.1.0/28', '100.96.1.0/28'])
 
+    def test_scope_discovery_selects_all_approved_hosts_not_first_four(self):
+        doc = self.ws.load()
+        for number in range(71, 80):
+            parsed = F.parse_import({'tool': 'nmap', 'output':
+                f'Nmap scan report for host{number}.03.crimsonia.net (100.96.1.{number})\n'
+                'Host is up.\nNmap done: 1 IP address (1 host up) scanned'})
+            F.merge_parsed(doc, parsed)
+        for host in (f for f in doc['findings'] if f['kind'] == 'host'):
+            host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': self.scope}
+        self.ws.save(doc)
+        selected = self.ws.autonomy._auto_group_hosts(self.scope)
+        self.assertEqual(len(selected), 10)
+        self.assertEqual(set(selected), {f['id'] for f in doc['findings'] if f['kind'] == 'host'})
+
+    def test_scope_survey_resume_keeps_completed_hosts(self):
+        run = {'id': 'resume-survey', 'mode': 'discover-group', 'phase': 'survey',
+            'status': 'awaiting-discovery', 'scope': self.scope, 'model': 'server default',
+            'hostIds': ['one', 'two'], 'surveyedHostIds': ['one'], 'events': []}
+        self.ws.autonomy._save({'runs': [run]})
+        with patch.object(self.ws.autonomy, '_group_worker') as group_worker, \
+                patch.object(self.ws.autonomy, '_discover_group_worker') as discovery_worker:
+            self.ws.autonomy.resume_discover_group(run['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        group_worker.assert_called_once()
+        discovery_worker.assert_not_called()
+        self.assertEqual(self.ws.autonomy.history()['runs'][0]['surveyedHostIds'], ['one'])
+
+    def test_inventory_survey_uses_all_approved_inventory_hosts(self):
+        doc = self.ws.load()
+        for number in range(71, 80):
+            parsed = F.parse_import({'tool': 'nmap', 'output':
+                f'Nmap scan report for host{number}.03.crimsonia.net (100.96.1.{number})\n'
+                'Host is up.\nNmap done: 1 IP address (1 host up) scanned'})
+            F.merge_parsed(doc, parsed)
+        hosts = [h for h in doc['findings'] if h['kind'] == 'host']
+        for host in hosts:
+            host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': self.scope}
+        self.ws.save(doc)
+        self.ws.save_discovery({'hosts': [{'ip': h['ip'], 'scope': self.scope,
+            'approved': True, 'approvedName': h['name']} for h in hosts],
+            'inventory': [{'ip': h['ip'], 'name': h['name'], 'scope': self.scope,
+            'status': 'verified'} for h in hosts]})
+        with patch.object(self.ws.autonomy, '_group_worker') as worker:
+            run = self.ws.autonomy.start_inventory_survey(self.scope)
+            self.ws.autonomy.thread.join(3)
+        self.assertEqual(len(run['hostIds']), 10)
+        self.assertEqual(run['source'], 'inventory')
+        worker.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()
