@@ -1072,7 +1072,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         return fallback('Local model unavailable or returned invalid checks. Showing built-in checks.')
                 if self.command not in ('GET', 'HEAD'):
                     return self.send_json(405, {'error': 'Method not allowed.'})
-                files = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js'}
+                files = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/inventory-stats.js': 'inventory-stats.js'}
                 if path not in files:
                     return self.send_json(404, {'error': 'Not found.'})
                 filename = files[path]
