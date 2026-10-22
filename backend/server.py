@@ -102,6 +102,10 @@ def invocation(candidate, doc):
         return sys.executable, [str(ROOT / 'backend/web_inventory.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-inventory'
     if kind == 'web-fingerprint':
         return sys.executable, [str(ROOT / 'backend/web_fingerprint.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-fingerprint'
+    if kind in ('whatweb', 'gobuster', 'sslscan') and len(services) == 1 and services[0].get('state') == 'open' and services[0].get('protocol') == 'tcp':
+        return sys.executable, [str(ROOT / 'backend/kali_recon.py'), kind, '--url', website_url(host, services[0]), '--ip', ip], kind
+    if kind == 'dnsrecon' and len(services) == 1 and services[0].get('state') == 'open' and services[0].get('protocol') == 'tcp' and services[0].get('port') == 53 and host.get('name'):
+        return sys.executable, [str(ROOT / 'backend/kali_recon.py'), kind, '--name', host['name'], '--ip', ip], kind
     if kind == 'tls-certificate' and len(services) == 1 and is_tls_service(services[0]):
         return 'nmap', ['-n', '-Pn', '-sT', '-p', str(services[0]['port']), '--script', 'ssl-cert', '-oX', '-', ip], 'nmap'
     if kind in ('ssh-hostkey', 'smb-security', 'nfs-exports'):
@@ -160,7 +164,7 @@ def parse_check_result(candidate, tool, output):
         return F.parse_import(dict(tool=tool, output=output, command=candidate['command'], observedAt=F.now()))
     time = F.now()
     ev = dict(id=F.uid('evidence'), tool=tool, command=candidate['command'], output=output,
-              observedAt=time, importedAt=time, format='json' if tool in ('web-contacts', 'web-inventory', 'web-exposure', 'web-fingerprint') else 'jsonl' if tool == 'nuclei-git' else 'text')
+              observedAt=time, importedAt=time, format='json' if tool in ('web-contacts', 'web-inventory', 'web-exposure', 'web-fingerprint', 'whatweb', 'gobuster', 'sslscan', 'dnsrecon') else 'jsonl' if tool == 'nuclei-git' else 'text')
     host_id = candidate['hostId']
     service_id = candidate['serviceIds'][0] if candidate['serviceIds'] else None
     observations = []
@@ -225,6 +229,44 @@ def parse_check_result(candidate, tool, output):
                 raise ValueError('Invalid web technology signal.')
             labels.append(item['name'] + ('/' + item['version'] if item['version'] else ''))
         add('Web technologies', ', '.join(labels) if labels else 'No curated technology signals detected on the root page.')
+    elif tool in ('whatweb', 'gobuster', 'sslscan', 'dnsrecon'):
+        report = json.loads(output)
+        args = shlex.split(candidate['command'])
+        expected_ip = args[args.index('--ip') + 1]
+        expected_target = args[args.index('--name' if tool == 'dnsrecon' else '--url') + 1]
+        target_key = 'name' if tool == 'dnsrecon' else 'url'
+        if not isinstance(report, dict) or report.get('tool') != tool or report.get('ip') != expected_ip or report.get(target_key) != expected_target:
+            raise ValueError('Kali tool result target differs from the selected check.')
+        if tool == 'whatweb':
+            technologies = report.get('technologies')
+            if not isinstance(technologies, list) or len(technologies) > 60 or not all(
+                    isinstance(item, dict) and re.fullmatch(r'[A-Za-z0-9_.+ -]{1,64}', str(item.get('name') or '')) and
+                    re.fullmatch(r'[0-9A-Za-z._+-]{0,40}', str(item.get('version') or '')) for item in technologies):
+                raise ValueError('Invalid WhatWeb technologies.')
+            detail = ', '.join(item['name'] + ('/' + item['version'] if item.get('version') else '') for item in technologies)
+            add('WhatWeb technologies', detail or 'No technology signatures detected.')
+        elif tool == 'gobuster':
+            paths = report.get('paths')
+            if not isinstance(paths, list) or len(paths) > 20 or report.get('checked') != 7 or not all(
+                    isinstance(item, dict) and re.fullmatch(r'/[A-Za-z0-9./_-]{1,100}', str(item.get('path') or '')) and
+                    isinstance(item.get('status'), int) and 100 <= item['status'] <= 599 and
+                    isinstance(item.get('size'), int) and item['size'] >= 0 for item in paths):
+                raise ValueError('Invalid Gobuster path report.')
+            add('Gobuster paths', '\n'.join(f"{p['path']} · HTTP {p['status']} · {p['size']} bytes" for p in paths) or 'No bundled paths returned a distinct response.')
+        elif tool == 'sslscan':
+            protocols = report.get('protocols')
+            if not isinstance(protocols, list) or len(protocols) > 20 or not all(
+                    isinstance(p, str) and re.fullmatch(r'(?:TLS|SSL) [0-9.]{1,8}', p) for p in protocols):
+                raise ValueError('Invalid sslscan protocol report.')
+            add('sslscan protocols', ', '.join(protocols) or 'No enabled TLS protocol reported.')
+        else:
+            records = report.get('records')
+            if not isinstance(records, list) or len(records) > 100 or not all(
+                    isinstance(r, dict) and r.get('type') in ('A', 'AAAA', 'MX', 'NS', 'SOA', 'CNAME', 'SRV') and
+                    isinstance(r.get('name'), str) and re.fullmatch(r'[a-z0-9.-]{1,253}', r['name']) and
+                    isinstance(r.get('value'), str) and re.fullmatch(r'[A-Za-z0-9.:_-]{1,253}', r['value']) for r in records):
+                raise ValueError('Invalid dnsrecon record report.')
+            add('dnsrecon records', '\n'.join(f"{r['type']} {r['name']} {r['value']}" for r in records) or 'No records returned.', service_id)
     elif tool == 'http-headers':
         if not output.lstrip().startswith('HTTP/'):
             raise ValueError('No HTTP response headers found.')
@@ -405,7 +447,7 @@ class Workspace:
                 raise ValueError('The selected check changed before execution.')
             host = next(f for f in doc['findings'] if f['id'] == candidate['hostId'])
             require_target(host, scope)
-            if candidate['catalogId'] in ('http-headers', 'web-contacts', 'web-exposure', 'web-inventory', 'web-fingerprint'):
+            if candidate['catalogId'] in ('http-headers', 'web-contacts', 'web-exposure', 'web-inventory', 'web-fingerprint', 'whatweb', 'gobuster', 'sslscan'):
                 service = next(f for f in doc['findings'] if f['id'] == candidate['serviceIds'][0])
                 require_web_origin(website_url(host, service), host, scope)
             if candidate['id'] in self.active_checks:
