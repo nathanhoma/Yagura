@@ -43,6 +43,17 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual([f['kind'] for f in flags], ['os'])
         self.assertIn('Linux 5.x', flags[0]['reason'])
 
+    def test_same_scan_os_guesses_choose_highest_accuracy(self):
+        doc = F.empty()
+        for name, accuracy in [('Linux 6.x', 94), ('FreeBSD 12', 89)]:
+            xml = ('<nmaprun><host><status state="up"/><address addrtype="ipv4" addr="192.168.56.10"/>'
+                   f'<os><osmatch name="{name}" accuracy="{accuracy}"/></os></host></nmaprun>')
+            F.merge_parsed(doc, F.parse_import({'tool': 'nmap', 'output': xml,
+                                                'observedAt': '2026-10-22T00:00:00Z'}))
+        os_flags = [flag for flag in review_flags(doc, SCOPE) if flag['kind'] == 'os']
+        self.assertEqual(len(os_flags), 1)
+        self.assertIn('Linux 6.x', os_flags[0]['reason'])
+
     def test_unapproved_domain_host_is_not_flagged(self):
         doc = F.empty()
         import_nmap(doc, '192.168.56.10', '1.20')

@@ -38,11 +38,15 @@ def review_flags(doc, scope, host_id=None):
             add('software', item, f'Software identified: {label}',
                 f'{item["port"]}/{item["protocol"]} reports {label}. Confirm the version and assess relevance; identification alone does not establish a vulnerability.')
 
+    def os_accuracy(item):
+        match = re.search(r'\((\d+)% accuracy\)', str(item.get('detail') or ''))
+        return int(match.group(1)) if match else 0
+
     latest_os = {}
     for item in observations:
         if item.get('title') == 'Nmap OS guess' and item.get('detail') and 'No exact OS matches' not in item['detail']:
             previous = latest_os.get(item['hostId'])
-            if not previous or str(item.get('lastSeen') or '') >= str(previous.get('lastSeen') or ''):
+            if not previous or (str(item.get('lastSeen') or ''), os_accuracy(item)) >= (str(previous.get('lastSeen') or ''), os_accuracy(previous)):
                 latest_os[item['hostId']] = item
 
     for item in observations:

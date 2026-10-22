@@ -14,7 +14,8 @@ const InventoryStats=(()=>{
     const observations=records.filter(row=>row.kind==='observation');
     const evidenceById=new Map(evidence.map(row=>[row.id,row]));
     const osByHost=new Map();
-    for(const row of observations.filter(row=>row.title==='Nmap OS guess').sort((a,b)=>String(b.lastSeen||'').localeCompare(String(a.lastSeen||''))))if(!osByHost.has(row.hostId))osByHost.set(row.hostId,family(row.detail));
+    const osAccuracy=row=>Number(String(row.detail||'').match(/\((\d+)% accuracy\)/)?.[1]||0);
+    for(const row of observations.filter(row=>row.title==='Nmap OS guess'&&!String(row.detail||'').includes('No exact OS matches')).sort((a,b)=>String(b.lastSeen||'').localeCompare(String(a.lastSeen||''))||osAccuracy(b)-osAccuracy(a)))if(!osByHost.has(row.hostId))osByHost.set(row.hostId,family(row.detail));
     const hostEvidence=new Map(hosts.map(host=>[host.id,new Set(host.evidenceIds||[])]));
     for(const row of records)for(const id of row.evidenceIds||[])hostEvidence.get(row.hostId)?.add(id);
     const portsScanned=new Set();

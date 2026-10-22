@@ -13,7 +13,8 @@ test('inventory statistics count only eligible hosts and confirmed open services
     {id:'s1',kind:'service',hostId:'h1',port:443,protocol:'tcp',state:'open',name:'https',product:'nginx',version:'1.27',evidenceIds:['e1']},
     {id:'s2',kind:'service',hostId:'h2',port:443,protocol:'tcp',state:'closed',name:'https',evidenceIds:[]},
     {id:'s3',kind:'service',hostId:'h3',port:22,protocol:'tcp',state:'open',name:'ssh',evidenceIds:[]},
-    {id:'o1',kind:'observation',hostId:'h1',title:'Nmap OS guess',detail:'Linux (95% accuracy)',evidenceIds:['e1']},
+    {id:'o2',kind:'observation',hostId:'h1',title:'Nmap OS guess',detail:'FreeBSD (89% accuracy)',lastSeen:'2026-10-20T00:00:00Z',evidenceIds:['e1']},
+    {id:'o1',kind:'observation',hostId:'h1',title:'Nmap OS guess',detail:'Linux (95% accuracy)',lastSeen:'2026-10-20T00:00:00Z',evidenceIds:['e1']},
   ];
   const evidence=[{id:'e1',tool:'nmap',command:'nmap -n -Pn -sT -p 443 10.0.0.1',observedAt:'2026-10-20T00:00:00Z',output:'443/tcp open https'}];
   const map={targets:hosts.map((host,i)=>({host,eligible:i<2}))};

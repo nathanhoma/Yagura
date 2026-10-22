@@ -200,11 +200,11 @@ def parse_import(data):
                             observe(h, script.get('id') or 'Nmap script', script.get('output') or '', s)
                 for script in node.findall('./hostscript/script'):
                     observe(h, script.get('id') or 'Nmap host script', script.get('output') or '')
-                for match in node.findall('./os/osmatch'):
-                    name = match.get('name', '').strip()
-                    if name:
-                        accuracy = match.get('accuracy', '')
-                        observe(h, 'Nmap OS guess', f"{name} ({accuracy}% accuracy)" if accuracy else name)
+                matches = [match for match in node.findall('./os/osmatch') if match.get('name', '').strip()]
+                if matches:
+                    match = max(matches, key=lambda item: int(item.get('accuracy', '0')) if str(item.get('accuracy', '')).isdigit() else 0)
+                    name, accuracy = match.get('name', '').strip(), match.get('accuracy', '')
+                    observe(h, 'Nmap OS guess', f"{name} ({accuracy}% accuracy)" if accuracy else name)
         else:
             h = current = status_observation = None
             for line in output.splitlines():

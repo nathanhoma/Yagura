@@ -99,10 +99,10 @@ class BackendTests(unittest.TestCase):
     def test_os_scan_xml_saves_an_os_guess(self):
         xml = ('<nmaprun><host><status state="up"/><address addr="192.168.56.10" addrtype="ipv4"/>'
                '<ports><port protocol="tcp" portid="80"><state state="open"/></port></ports>'
-               '<os><osmatch name="Linux 5.x" accuracy="92"/></os></host></nmaprun>')
+               '<os><osmatch name="Linux 5.x" accuracy="92"/><osmatch name="FreeBSD 12" accuracy="89"/></os></host></nmaprun>')
         parsed = F.parse_import({'tool': 'nmap', 'command': 'sudo -n nmap -n -Pn -O --top-ports 100 --max-retries 1 -oX - 192.168.56.10', 'output': xml})
-        self.assertTrue(any(f.get('title') == 'Nmap OS guess' and f.get('detail') == 'Linux 5.x (92% accuracy)'
-                            for f in parsed['findings']))
+        guesses = [f for f in parsed['findings'] if f.get('title') == 'Nmap OS guess']
+        self.assertEqual([f['detail'] for f in guesses], ['Linux 5.x (92% accuracy)'])
 
     def test_storage_and_scope(self):
         with tempfile.TemporaryDirectory() as directory:
