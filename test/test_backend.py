@@ -138,6 +138,14 @@ class BackendTests(unittest.TestCase):
         text = 'Nmap scan report for 192.168.56.10\nHost is up.\nAll 100 scanned ports on 192.168.56.10 are filtered\nNmap done: 1 IP address (1 host up) scanned\n'
         parsed = F.parse_import({'tool': 'nmap', 'command': 'nmap -n -Pn -sT --top-ports 100 192.168.56.10', 'output': text})
         self.assertEqual(next(f['state'] for f in parsed['findings'] if f['kind'] == 'host'), 'unknown')
+        open_text = ('Nmap scan report for 192.168.56.10\nHost is up.\n'
+                     'PORT    STATE SERVICE\n443/tcp open  https\n'
+                     'Nmap done: 1 IP address (1 host up) scanned\n')
+        opened_text = F.parse_import({'tool': 'nmap', 'command': 'nmap -n -Pn -sT -p 443 192.168.56.10',
+                                      'output': open_text})
+        self.assertEqual(next(f['state'] for f in opened_text['findings'] if f['kind'] == 'host'), 'up')
+        self.assertEqual(next(f['detail'] for f in opened_text['findings'] if f['kind'] == 'observation'),
+                         'Host responded on an open port.')
 
     def test_model_adapter_selects_advertised_ids(self):
         llm = LlmService('http://127.0.0.1:11434/v1')
