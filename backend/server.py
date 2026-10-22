@@ -18,7 +18,7 @@ from .email_drafts import DraftStore, DraftConflict, discovered_contacts, export
 from .analysis import analyze, fingerprint, scoped_document
 from .llm import LlmService, private_url
 from .llm_metrics import LlmMetrics
-from .workflow import COMMAND_CATALOG, is_local_ip, workflow
+from .workflow import COMMAND_CATALOG, is_local_ip, is_tls_service, workflow
 from .web_contacts import website_url
 from .scope import normalize_scope, valid_cidr
 from .discovery import contained_range, discovery_chunks, discovery_progress, dns_review, name_discovery, approval_name
@@ -96,6 +96,8 @@ def invocation(candidate, doc):
         return sys.executable, [str(ROOT / 'backend/web_exposure.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-exposure'
     if kind == 'web-inventory':
         return sys.executable, [str(ROOT / 'backend/web_inventory.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-inventory'
+    if kind == 'tls-certificate' and len(services) == 1 and is_tls_service(services[0]):
+        return 'nmap', ['-n', '-Pn', '-sT', '-p', str(services[0]['port']), '--script', 'ssl-cert', '-oX', '-', ip], 'nmap'
     if kind in ('ssh-hostkey', 'smb-security', 'nfs-exports'):
         script = {'ssh-hostkey': 'ssh-hostkey', 'smb-security': 'smb2-security-mode', 'nfs-exports': 'nfs-showmount'}[kind]
         return 'nmap', ['-n', '-Pn', '-sT', '-p', str(services[0]['port']), '--script', script, '-oX', '-', ip], 'nmap'

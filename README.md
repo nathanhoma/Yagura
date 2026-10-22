@@ -91,6 +91,8 @@ For an explicitly trusted gateway DNS name, set `LLM_BASE_URL` to its HTTPS `/v1
 
 ## Published website contacts
 
+For a recorded open TLS service, **Inspect TLS certificate** runs the fixed Nmap `ssl-cert` script on the recorded TCP port, imports its XML output as linked evidence, and is no longer suggested after a certificate result is saved. Certificate names are observations, not newly approved targets.
+
 For a recorded open HTTP(S) service inside the authorized check range, **Next checks** can suggest **Inspect published website contacts**. Set the host record's **Hostname** to the exercise site's actual name (for example `www.exercise.test`) when it uses virtual hosting. The command keeps that name for HTTP Host and TLS SNI but pins the connection to the recorded, scoped IP. HTTPS certificate verification remains enabled.
 
 The executable command is `python3 -m backend.web_contacts --url <website-url> --ip <recorded-ip>`. The app constructs its arguments from the stored host and service; it does not accept arbitrary URLs or commands in the execution request. The standalone command accepts only private, shared, or local IPv4 addresses. The app additionally enforces the saved CIDRs and domains before invoking it.
