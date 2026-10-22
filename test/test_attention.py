@@ -14,14 +14,13 @@ def import_nmap(doc, ip, version, *, os_name=''):
 
 
 class AttentionTests(unittest.TestCase):
-    def test_flags_versions_os_and_cross_host_difference_with_evidence(self):
+    def test_flags_versions_and_os_with_evidence(self):
         doc = F.empty()
         import_nmap(doc, '192.168.56.10', '1.20', os_name='Linux 5.x')
         import_nmap(doc, '192.168.56.11', '1.24')
         flags = review_flags(doc, SCOPE)
         self.assertEqual([f['kind'] for f in flags].count('software'), 2)
         self.assertEqual([f['kind'] for f in flags].count('os'), 1)
-        self.assertEqual([f['kind'] for f in flags].count('version-difference'), 2)
         self.assertTrue(all(f['findingIds'] and f['evidenceIds'] for f in flags))
         self.assertTrue(all('vulnerability' not in f['title'].lower() for f in flags))
 

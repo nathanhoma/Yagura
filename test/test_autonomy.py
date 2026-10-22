@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from backend import findings as F
-from backend.autonomy import MAX_RESPONSE_TOKENS
+from backend.autonomy import FLAG_PROMPT, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS
 from backend.reviewed_check import validate as validate_reviewed_check
 from backend.server import Workspace
 
@@ -21,6 +21,8 @@ class FakeLlm:
 
     def complete(self, messages, max_tokens=400, model=''):
         self.response_limits.append(max_tokens)
+        if messages[0]['content'] == FLAG_PROMPT:
+            return {'model': 'fake', 'data': {'flag': None}}
         user = json.loads(messages[1]['content'])
         self.prompts.append(user)
         if self.invalid:
@@ -56,9 +58,9 @@ class AutonomyTests(unittest.TestCase):
         saved = self.ws.autonomy.history()['runs'][0]
         self.assertEqual(saved['id'], run['id'])
         self.assertEqual(saved['status'], 'completed')
-        self.assertEqual([e['type'] for e in saved['events']], ['decision', 'check', 'decision', 'stop'])
+        self.assertEqual([e['type'] for e in saved['events']], ['decision', 'check', 'flag-review', 'decision', 'stop'])
         self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.llm.response_limits, [MAX_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS])
+        self.assertEqual(self.llm.response_limits, [MAX_RESPONSE_TOKENS, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS])
         self.assertEqual(self.llm.prompts[1]['lastResult']['outcome'], 'completed')
         self.assertIn('[REDACTED]', json.dumps(self.llm.prompts[1]))
         self.assertNotIn('very-secret', json.dumps(self.llm.prompts[1]))
@@ -83,6 +85,8 @@ class AutonomyTests(unittest.TestCase):
     def test_ai_mode_runs_more_than_three_checks_without_count_limit(self):
         class RepeatedHeaders(FakeLlm):
             def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
                 user = json.loads(messages[1]['content'])
                 self.prompts.append(user)
                 choice = next((c['id'] for c in user['context']['candidates']
@@ -129,6 +133,8 @@ class AutonomyTests(unittest.TestCase):
     def test_exhausted_catalog_waits_for_review_and_revision_before_execution(self):
         class ProposalLlm(FakeLlm):
             def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
                 self.prompts.append(json.loads(messages[1]['content']))
                 if len(self.prompts) == 1:
                     command = 'nxc smb 100.96.1.70'
@@ -167,7 +173,7 @@ class AutonomyTests(unittest.TestCase):
             self.assertEqual(self.calls[0][0], 'smbclient')
             self.assertEqual(self.calls[0][1], ['-L', '//100.96.1.70', '-N'])
             self.assertEqual([e['type'] for e in saved['events']],
-                             ['proposal', 'proposal', 'approval', 'check', 'stop'])
+                     ['proposal', 'proposal', 'approval', 'check', 'flag-review', 'stop'])
 
     def test_reviewed_command_parser_accepts_any_program_without_implicit_shell(self):
         good, program, args = validate_reviewed_check('nxc smb 100.96.1.70 --shares', '100.96.1.70')
@@ -179,7 +185,7 @@ class AutonomyTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(ValueError):
                 validate_reviewed_check(command, '100.96.1.70')
 
-    def test_group_surveys_each_host_then_flags_and_deepens_with_citations(self):
+    def test_group_surveys_each_host_without_cross_host_comparison(self):
         second = F.parse_import({'tool': 'nmap', 'output':
             'Nmap scan report for api.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
             '443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
@@ -197,23 +203,7 @@ class AutonomyTests(unittest.TestCase):
         rows = [candidate('baseline-1', self.host['id'], 'nmap-service'),
                 candidate('baseline-2', other['id'], 'nmap-service'),
                 candidate('deepen-1', self.host['id'], 'http-headers')]
-        class GroupLlm(FakeLlm):
-            def complete(self, messages, max_tokens=400, model=''):
-                user = json.loads(messages[1]['content'])
-                self.prompts.append(user)
-                if 'previousFlags' not in user:
-                    return {'model': 'fake', 'data': {'command': None, 'reason': 'No further check.',
-                        'expectedEvidence': '', 'reviewNotes': ''}}
-                options = {c['id'] for c in user['context']['candidates']}
-                flag = {'hostId': self_host, 'reason': 'More service detail than the peer host.',
-                        'uncertainty': 'The service response needs review.',
-                        'findingIds': [self_host], 'evidenceIds': [host_evidence]}
-                return {'model': 'fake', 'data': {'flags': [flag],
-                    'candidateId': 'deepen-1' if 'deepen-1' in options else None,
-                    'reason': 'Compare the detailed service response.'}}
         self_host = self.host['id']
-        host_evidence = next(f for f in doc['findings'] if f['id'] == self_host)['evidenceIds'][0]
-        self.ws.llm = GroupLlm()
         checks = []
         def execute(cid, scope, **kwargs):
             checks.append(cid)
@@ -224,11 +214,10 @@ class AutonomyTests(unittest.TestCase):
         saved = self.ws.autonomy.history()['runs'][0]
         self.assertEqual(saved['id'], run['id'])
         self.assertEqual(saved['status'], 'completed')
-        self.assertEqual(checks, ['baseline-1', 'baseline-2', 'deepen-1'])
+        self.assertEqual(checks, ['baseline-1', 'baseline-2'])
         self.assertEqual(saved['surveyedHostIds'], [self_host, other['id']])
-        self.assertEqual(saved['flags'][0]['findingIds'], [self_host])
-        self.assertEqual(saved['flags'][0]['evidenceIds'], [host_evidence])
-        self.assertEqual(len([e for e in saved['events'] if e['type'] == 'comparison']), 2)
+        self.assertEqual(saved['flags'], [])
+        self.assertFalse(any(e['type'] == 'comparison' for e in saved['events']))
 
     def test_group_rejects_unapproved_host_before_any_check(self):
         other = F.parse_import({'tool': 'nmap', 'output':
@@ -242,7 +231,7 @@ class AutonomyTests(unittest.TestCase):
             self.ws.autonomy.start_group([self.host['id'], other_id], self.scope)
         self.assertEqual(self.calls, [])
 
-    def test_group_rejects_cross_host_evidence_misattribution(self):
+    def test_check_review_rejects_cross_host_evidence_misattribution(self):
         second = F.parse_import({'tool': 'nmap', 'output':
             'Nmap scan report for api.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
             '443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
@@ -251,30 +240,42 @@ class AutonomyTests(unittest.TestCase):
         other = next(f for f in doc['findings'] if f['kind'] == 'host' and f['ip'] == '100.96.1.71')
         other['approval'] = {'ip': other['ip'], 'name': other['name'], 'scope': self.scope}
         self.ws.save(doc)
-        class BadComparison(FakeLlm):
+        class BadReview(FakeLlm):
             def complete(self, messages, max_tokens=400, model=''):
-                return {'model': 'fake', 'data': {'flags': [{
-                    'hostId': self_host, 'reason': 'Wrong evidence source.',
-                    'uncertainty': 'Unknown.', 'findingIds': [self_host],
-                    'evidenceIds': [other_evidence]}], 'candidateId': None, 'reason': ''}}
+                user = json.loads(messages[1]['content'])
+                return {'model': 'fake', 'data': {'flag': {
+                    'reason': 'Wrong evidence source.', 'uncertainty': 'Unknown.',
+                    'findingIds': [user['findings'][0]['id']], 'evidenceIds': [other_evidence]}}}
         self_host = self.host['id']
         other_evidence = other['evidenceIds'][0]
-        self.ws.llm = BadComparison()
-        with patch('backend.autonomy.workflow', return_value={'candidates': []}):
-            self.ws.autonomy.start_group([self_host, other['id']], self.scope)
-            self.ws.autonomy.thread.join(3)
+        self.ws.llm = BadReview()
+        self.ws.autonomy._save({'runs': [dict(id='review-run', status='running', events=[], flags=[])]})
+        self.ws.autonomy._review_check_result('review-run', self_host, self.scope, '',
+            dict(outcome='completed', imported=True, evidenceIds=self.host['evidenceIds']))
         saved = self.ws.autonomy.history()['runs'][0]
-        self.assertEqual(saved['status'], 'stopped')
-        self.assertIn('without a linked cited finding', saved['stopReason'])
-        self.assertEqual(self.calls, [])
+        self.assertEqual(saved['flags'], [])
+        self.assertEqual(saved['events'][0]['type'], 'flag-review-error')
+        self.assertIn('unlinked evidence', saved['events'][0]['reason'])
+
+    def test_check_review_flags_only_new_linked_evidence(self):
+        class NotableReview(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                user = json.loads(messages[1]['content'])
+                finding = user['findings'][0]
+                return {'model': 'fake', 'data': {'flag': {
+                    'reason': 'Review this recorded service.', 'uncertainty': 'Access is unverified.',
+                    'findingIds': [finding['id']], 'evidenceIds': [finding['evidenceIds'][0]]}}}
+        self.ws.llm = NotableReview()
+        self.ws.autonomy._save({'runs': [dict(id='review-run', status='running', events=[], flags=[])]})
+        self.ws.autonomy._review_check_result('review-run', self.host['id'], self.scope, '',
+            dict(outcome='completed', imported=True, evidenceIds=self.host['evidenceIds']))
+        saved = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(saved['events'][0]['type'], 'flag-review')
+        self.assertEqual(saved['flags'][0]['hostId'], self.host['id'])
+        self.assertEqual(saved['flags'][0]['evidenceIds'], [self.host['evidenceIds'][0]])
 
     def test_scope_discovery_selects_ip_only_hosts_and_starts_group_loop(self):
         scope = self.ws.save_scope({'cidrs': ['100.96.1.0/28'], 'domains': []})
-        class EmptyComparison(FakeLlm):
-            def complete(self, messages, max_tokens=400, model=''):
-                return {'model': 'fake', 'data': {'flags': [], 'candidateId': None,
-                    'reason': 'No differentiated host yet.'}}
-        self.ws.llm = EmptyComparison()
         def runner(program, args, timeout):
             self.calls.append((program, args, timeout))
             addresses = ['100.96.1.1', '100.96.1.2'] if '-sn' in args else [args[-1]]
@@ -291,15 +292,11 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(saved['mode'], 'discover-group')
         self.assertEqual(len(saved['hostIds']), 2)
         self.assertEqual(len([e for e in saved['events'] if e['type'] == 'discovery']), 1)
-        self.assertEqual(len([e for e in saved['events'] if e['type'] == 'comparison']), 1)
+        self.assertFalse(any(e['type'] == 'comparison' for e in saved['events']))
         self.assertTrue(all(call[0] == 'nmap' for call in self.calls))
 
     def test_scope_discovery_retries_failed_segment_on_resume(self):
         scope = self.ws.save_scope({'cidrs': ['100.96.1.0/28'], 'domains': []})
-        class EmptyComparison(FakeLlm):
-            def complete(self, messages, max_tokens=400, model=''):
-                return {'model': 'fake', 'data': {'flags': [], 'candidateId': None, 'reason': 'Done.'}}
-        self.ws.llm = EmptyComparison()
         attempts = []
         def runner(program, args, timeout):
             if '-sn' in args:

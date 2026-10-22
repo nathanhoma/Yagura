@@ -73,19 +73,4 @@ def review_flags(doc, scope):
             add('web-software', item, 'Web server version to review',
                 'A web response reported a server version. Verify the header and product in the linked evidence.')
 
-    by_port = {}
-    for item in services:
-        product, version = str(item.get('product') or '').strip().lower(), str(item.get('version') or '').strip()
-        if product and version:
-            by_port.setdefault((item.get('port'), item.get('protocol'), product), []).append(item)
-    for group in by_port.values():
-        if len({item['hostId'] for item in group}) < 2 or len({item.get('version') for item in group}) < 2:
-            continue
-        for item in group:
-            peers = [peer for peer in group if peer['hostId'] != item['hostId'] and peer.get('version') != item.get('version')]
-            if peers:
-                add('version-difference', item, 'Version differs across hosts',
-                    f'{item.get("product")} {item.get("version")} differs from the same service on another scoped host. Compare deployment and patch state; no version is assumed unsafe.',
-                    [peers[0]['id']])
-
     return sorted(flags, key=lambda f: (f['hostId'], f['kind'], f['id']))[:500]
