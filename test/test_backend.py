@@ -45,10 +45,11 @@ class BackendTests(unittest.TestCase):
                          ('invalid-response', 'length', len('{"partial":true}')))
         self.assertIsNone(rows[1]['promptTokens'])
 
-    def test_llm_timeout_allows_five_minutes_and_remains_bounded(self):
+    def test_llm_timeout_allows_ten_minutes_and_remains_bounded(self):
         self.assertEqual(LlmService(timeout_ms=180000).timeout, 180)
         self.assertEqual(LlmService(timeout_ms=300000).timeout, 300)
-        self.assertEqual(LlmService(timeout_ms=600000).timeout, 300)
+        self.assertEqual(LlmService(timeout_ms=600000).timeout, 600)
+        self.assertEqual(LlmService(timeout_ms=900000).timeout, 600)
         self.assertEqual(LlmService().timeout, 30)
 
     def test_all_import_formats_link_records(self):

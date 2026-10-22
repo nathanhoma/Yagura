@@ -729,8 +729,8 @@ class HttpTests(unittest.TestCase):
                 return {'model': 'fake', 'data': {'candidateId': None, 'reason': 'Enough evidence for now.', 'expectedEvidence': ''}}
         self.workspace.llm = StopModel()
         self.assertEqual(self.call('/api/autonomy')[1],
-                     {'runs': [], 'limits': {'maxChecks': None, 'maxSeconds': 600,
-                                              'groupMaxChecks': None, 'groupMaxSeconds': 900,
+                     {'runs': [], 'limits': {'maxChecks': None, 'maxSeconds': 1200,
+                                              'groupMaxChecks': None, 'groupMaxSeconds': 1800,
                                               'groupMaxHosts': 8, 'discoveryMaxSeconds': 600,
                                               'autoGroupHosts': 4}})
         output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\n'

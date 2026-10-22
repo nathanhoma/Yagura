@@ -21,8 +21,8 @@ from .workflow import workflow
 from .vulnerabilities import match_versions
 
 
-MAX_SECONDS = 600
-GROUP_MAX_SECONDS = 900
+MAX_SECONDS = 1200
+GROUP_MAX_SECONDS = 1800
 MAX_RESPONSE_TOKENS = 32000
 FLAG_RESPONSE_TOKENS = 8000
 MAX_DISCOVERY_SECONDS = 600
