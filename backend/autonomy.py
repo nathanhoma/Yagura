@@ -275,7 +275,7 @@ class AutonomyController:
                 raise ValueError('Approved host was removed.')
             require_target(host, scope)
             run = next(r for r in self._load()['runs'] if r['id'] == run_id)
-            selected = scoped_document(doc, None, scope, run['hostIds']) if run.get('mode') in ('group', 'discover-group') else scoped_document(doc, host_id, scope)
+            selected = scoped_document(doc, None, scope, run['hostIds']) if run.get('mode') in ('group', 'discover-group') and run.get('phase') != 'deep-dive' else scoped_document(doc, host_id, scope)
             context = build_context(selected, scope)
             context['candidates'] = []
         response = ws.llm.complete([{'role': 'system', 'content': PROPOSAL_PROMPT},
