@@ -22,9 +22,12 @@ import xml.etree.ElementTree as ET
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backend.outbound import require_private_pin
+from backend.scope import DOMAIN_LABEL
 from backend.web_contacts import origin
 
-PATHS = ('robots.txt', 'sitemap.xml', '.well-known/security.txt', 'login', 'admin', 'api', 'docs')
+PATHS = ('login', 'admin', 'api', 'docs', 'swagger', 'swagger-ui', 'openapi.json',
+         'graphql', 'health', 'status', 'dashboard', 'auth', 'assets', 'static',
+         'uploads', 'backup', 'backups', 'metrics', '.well-known/security.txt')
 MAX_OUTPUT = 250_000
 
 
@@ -58,7 +61,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _permit_request(self):
         with self.server.request_lock:
-            if self.server.request_count >= 12:
+            if self.server.request_count >= len(PATHS) + 4:
                 self.send_error(429)
                 return False
             self.server.request_count += 1
@@ -166,8 +169,8 @@ def _web(tool, url, ip):
             wordlist = Path(directory) / 'paths.txt'
             wordlist.write_text('\n'.join(PATHS) + '\n')
             output = _run(['gobuster', 'dir', '-u', url, '-w', str(wordlist), '-t', '1',
-                           '--timeout', '5s', '--no-progress', '--no-color', '--quiet',
-                           '--proxy', proxy_url], 45)
+                           '--timeout', '2s', '--no-progress', '--no-color', '--quiet',
+                           '--proxy', proxy_url], 42)
             paths = []
             for line in output.splitlines():
                 match = re.fullmatch(r'\s*/?([^\s]+)\s+\(Status:\s*(\d{3})\)\s*\[Size:\s*(\d+)\].*', line)
@@ -191,15 +194,26 @@ def _sslscan(url, ip):
         raise ValueError('sslscan result target differs from selected service.')
     protocols = sorted({f"{p.get('type', '').upper()} {p.get('version', '')}".strip()
                         for p in row.findall('protocol') if p.get('enabled') == '1'})
-    return {'tool': 'sslscan', 'url': url, 'ip': ip, 'protocols': protocols[:20]}
+    ciphers = []
+    for cipher in row.findall('cipher'):
+        if cipher.get('status') not in ('accepted', 'preferred'):
+            continue
+        version, name, bits = (cipher.get(key, '') for key in ('sslversion', 'cipher', 'bits'))
+        if (re.fullmatch(r'(?:TLS|SSL)v?[0-9.]{1,8}', version) and
+                re.fullmatch(r'[A-Za-z0-9_+-]{1,100}', name) and
+                re.fullmatch(r'[0-9]{1,4}', bits)):
+            ciphers.append({'protocol': version, 'name': name, 'bits': int(bits),
+                            'preferred': cipher.get('status') == 'preferred'})
+    return {'tool': 'sslscan', 'url': url, 'ip': ip, 'protocols': protocols[:20],
+            'cipherCount': len(ciphers), 'ciphers': ciphers[:100]}
 
 
-def _dnsrecon(name, ip):
-    if not re.fullmatch(r'(?=.{1,253}$)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+', name):
-        raise ValueError('A recorded DNS hostname is required.')
+def _dnsrecon(zone, ip):
+    if len(zone) > 253 or len(zone.split('.')) < 2 or not all(DOMAIN_LABEL.fullmatch(label) for label in zone.split('.')):
+        raise ValueError('A selected DNS zone is required.')
     with tempfile.TemporaryDirectory(prefix='yagura-dns-') as directory:
         path = Path(directory) / 'records.json'
-        _run(['dnsrecon', '-d', name, '-n', ip, '-t', 'std', '--tcp', '--threads', '1', '--lifetime', '3',
+        _run(['dnsrecon', '-d', zone, '-n', ip, '-t', 'std', '--tcp', '--threads', '1', '--lifetime', '3',
               '--disable_check_recursion', '--disable_check_bindversion', '-j', str(path)], 40)
         rows = json.loads(path.read_text()) if path.exists() else []
     if not isinstance(rows, list) or len(rows) > 200:
@@ -215,20 +229,20 @@ def _dnsrecon(name, ip):
                 re.fullmatch(r'[a-z0-9.-]{1,253}', record_name) and
                 re.fullmatch(r'[A-Za-z0-9.:_-]{1,253}', value)):
             records.append({'type': kind, 'name': record_name[:253], 'value': value})
-    return {'tool': 'dnsrecon', 'name': name, 'ip': ip, 'records': records[:100]}
+    return {'tool': 'dnsrecon', 'zone': zone, 'ip': ip, 'records': records[:100]}
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('tool', choices=('whatweb', 'sslscan', 'dnsrecon', 'gobuster'))
     parser.add_argument('--url')
-    parser.add_argument('--name')
+    parser.add_argument('--zone')
     parser.add_argument('--ip', required=True)
     args = parser.parse_args()
     try:
         ip = require_private_pin(args.ip)
         if args.tool == 'dnsrecon':
-            report = _dnsrecon(args.name or '', ip)
+            report = _dnsrecon(args.zone or '', ip)
         elif args.tool == 'sslscan':
             report = _sslscan(args.url or '', ip)
         else:

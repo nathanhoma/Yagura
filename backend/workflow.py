@@ -4,7 +4,7 @@ from urllib.parse import urlsplit
 
 from .web_contacts import website_url
 from .investigation_catalog import REFERENCE_CHECKS
-from .scope import LOCAL_NETWORKS, approved_host, host_allowed, normalize_scope
+from .scope import LOCAL_NETWORKS, DOMAIN_LABEL, approved_host, host_allowed, normalize_scope
 
 
 def is_local_ip(value):
@@ -40,10 +40,12 @@ COMMAND_CATALOG = [
     dict(id='web-inventory', title='Inventory web pages and routes', command='python3 -m backend.web_inventory --url {url} --ip {host}', when='Record HTTP status, title, server, and up to 50 same-origin links from five pages.'),
     dict(id='web-fingerprint', title='Identify web technologies', command='python3 -m backend.web_fingerprint --url {url} --ip {host}', when='Inspect one IP-pinned root-page response for curated server, framework, and CMS signals without a browser or external API.'),
     dict(id='whatweb', title='Fingerprint site with WhatWeb', command='python3 -m backend.kali_recon whatweb --url {url} --ip {host}', when='Run a single-threaded WhatWeb fingerprint through an IP-pinned proxy without following redirects.'),
-    dict(id='gobuster', title='Check common web paths with Gobuster', command='python3 -m backend.kali_recon gobuster --url {url} --ip {host}', when='Check a small bundled path list on one recorded web service through an IP-pinned proxy.'),
-    dict(id='sslscan', title='Inspect TLS with sslscan', command='python3 -m backend.kali_recon sslscan --url {url} --ip {host}', when='Record supported TLS protocols on one recorded open TLS service.'),
-    dict(id='dnsrecon', title='Inspect DNS records with dnsrecon', command='python3 -m backend.kali_recon dnsrecon --name {name} --ip {host}', when='Query one approved open DNS resolver for records of its recorded hostname; results remain observations.'),
+    dict(id='gobuster', title='Check selected web paths with Gobuster', command='python3 -m backend.kali_recon gobuster --url {url} --ip {host}', when='Check a bounded bundled path list after saved web evidence identifies routes, forms, or discovery hints.'),
+    dict(id='sslscan', title='Inspect TLS with sslscan', command='python3 -m backend.kali_recon sslscan --url {url} --ip {host}', when='Record supported TLS protocols and accepted cipher suites on one open TLS service.'),
+    dict(id='dnsrecon', title='Inspect DNS zone with dnsrecon', command='python3 -m backend.kali_recon dnsrecon --zone {zone} --ip {host}', when='Query one approved open DNS resolver for a selected zone within its recorded hostname and saved domain scope; results remain observations.'),
     dict(id='ssh-hostkey', title='Inspect SSH host key', command='nmap -n -Pn -sT -p {port} --script ssh-hostkey -oX - {host}', when='Read the SSH host key on a recorded open SSH service.'),
+    dict(id='ssh-algorithms', title='Inspect SSH algorithms', command='nmap -n -Pn -sT -p {port} --script ssh2-enum-algos --max-retries 1 -oX - {host}', when='Record offered SSH key-exchange, host-key, cipher, MAC, and compression algorithms on a recorded SSH service.'),
+    dict(id='rdp-encryption', title='Inspect RDP security negotiation', command='nmap -n -Pn -sT -p 3389 --script rdp-enum-encryption --max-retries 1 -oX - {host}', when='Record supported RDP security layers and encryption levels on a recorded 3389/tcp service.'),
     dict(id='tls-certificate', title='Inspect TLS certificate', command='nmap -n -Pn -sT -p {port} --script ssl-cert -oX - {host}', when='Read the certificate on a recorded open TLS service.'),
     dict(id='smb-security', title='Inspect SMB security mode', command='nmap -n -Pn -sT -p {port} --script smb2-security-mode -oX - {host}', when='Read SMB signing configuration on a recorded open SMB service.'),
     dict(id='nfs-exports', title='List NFS exports', command='nmap -n -Pn -sT -p {port} --script nfs-showmount -oX - {host}', when='List exports on a recorded open NFS service.'),
@@ -74,8 +76,10 @@ def workflow(doc, authorized_scope=None):
             return
         values = dict(host=host['ip'], **values)
         command = re.sub(r'\{(\w+)\}', lambda m: str(values.get(m[1], m[0])), catalog[catalog_id]['command'])
-        candidates.append(dict(id=f"{catalog_id}:{host['id']}:{','.join(s['id'] for s in services)}", catalogId=catalog_id,
-                               title=catalog[catalog_id]['title'], command=command, hostId=host['id'],
+        variant = ':' + values['zone'] if catalog_id == 'dnsrecon' else ''
+        title = f"Inspect DNS zone {values['zone']}" if catalog_id == 'dnsrecon' else catalog[catalog_id]['title']
+        candidates.append(dict(id=f"{catalog_id}:{host['id']}:{','.join(s['id'] for s in services)}{variant}", catalogId=catalog_id,
+                               title=title, command=command, hostId=host['id'],
                                serviceIds=[s['id'] for s in services], findingIds=ids, evidenceIds=evidence_ids, reason=reason))
 
     for host in (f for f in rows if f['kind'] == 'host'):
@@ -113,8 +117,10 @@ def workflow(doc, authorized_scope=None):
                         add('web-fingerprint', host, [s], f"Identify curated web technologies on recorded service {port}/tcp.", url=website_url(host, s))
                     if scheme == 'http' and not any(o.get('title') == 'WhatWeb technologies' and o.get('serviceId') == s['id'] for o in observations):
                         add('whatweb', host, [s], 'Fingerprint this web service with bounded, pinned WhatWeb.', url=website_url(host, s))
-                    if not any(o.get('title') == 'Gobuster paths' and o.get('serviceId') == s['id'] for o in observations):
-                        add('gobuster', host, [s], 'Check a small fixed path list on this web service.', url=website_url(host, s))
+                    leads = [o for o in observations if o.get('serviceId') == s['id'] and
+                             o.get('title') in ('Web routes', 'Web discovery hints', 'Web form metadata')]
+                    if leads and not any(o.get('title') == 'Gobuster paths' and o.get('serviceId') == s['id'] for o in observations):
+                        add('gobuster', host, [s], 'Saved web routes, form metadata, or discovery hints warrant a bounded path follow-up.', url=website_url(host, s))
                 if port == 445 or name in ('microsoft-ds', 'netbios-ssn', 'smb'):
                     add('smb-shares', host, [s], f"Recorded open {port}/tcp ({name or 'SMB-associated port'}) supports share enumeration.")
                     if not any(o.get('title') == 'smb2-security-mode' and o.get('serviceId') == s['id'] for o in observations):
@@ -127,14 +133,29 @@ def workflow(doc, authorized_scope=None):
                 if port == 22 or name == 'ssh':
                     if not any(o.get('title') == 'ssh-hostkey' and o.get('serviceId') == s['id'] for o in observations):
                         add('ssh-hostkey', host, [s], f"Read the host key on recorded SSH service {port}/tcp.", port=port)
+                    if not any(o.get('title') == 'ssh2-enum-algos' and o.get('serviceId') == s['id'] for o in observations):
+                        add('ssh-algorithms', host, [s], f"Record offered SSH algorithms on {port}/tcp.", port=port)
+                if port == 3389:
+                    if not any(o.get('title') == 'rdp-enum-encryption' and o.get('serviceId') == s['id'] for o in observations):
+                        add('rdp-encryption', host, [s], 'Record RDP security layers and encryption levels on 3389/tcp.')
                 if is_tls_service(s):
-                    if not any(o.get('title') == 'sslscan protocols' and o.get('serviceId') == s['id'] for o in observations):
-                        add('sslscan', host, [s], f'Inspect supported TLS protocols on {port}/tcp.', url=website_url(host, s))
+                    if not any(o.get('title') == 'sslscan TLS configuration' and o.get('serviceId') == s['id'] for o in observations):
+                        add('sslscan', host, [s], f'Inspect supported TLS protocols and ciphers on {port}/tcp.', url=website_url(host, s))
                     if not any(o.get('title') == 'ssl-cert' and o.get('serviceId') == s['id'] for o in observations):
                         add('tls-certificate', host, [s], f"Read the certificate on recorded TLS service {port}/tcp.", port=port)
-                if port == 53 and s.get('protocol') == 'tcp' and re.fullmatch(r'[A-Za-z0-9.-]{1,253}', str(host.get('name') or '')):
-                    if not any(o.get('title') == 'dnsrecon records' and o.get('serviceId') == s['id'] for o in observations):
-                        add('dnsrecon', host, [s], 'Query this approved DNS resolver for its recorded hostname.', name=host['name'])
+                if port == 53 and s.get('protocol') == 'tcp':
+                    name = str(host.get('name') or '').lower().rstrip('.')
+                    labels = name.split('.')
+                    zones = []
+                    if len(labels) >= 3 and all(DOMAIN_LABEL.fullmatch(label) for label in labels):
+                        zones.append('.'.join(labels[1:]))
+                    zones.extend(domain for domain in scope['domains'] if name == domain or name.endswith('.' + domain))
+                    for zone in dict.fromkeys(zones):
+                        if len(zone.split('.')) < 2 or (scope['domains'] and not any(
+                                zone == domain or zone.endswith('.' + domain) for domain in scope['domains'])):
+                            continue
+                        if not any(o.get('title') == f'dnsrecon records: {zone}' and o.get('serviceId') == s['id'] for o in observations):
+                            add('dnsrecon', host, [s], f'Query approved resolver {host["ip"]} for zone {zone}.', zone=zone)
                 if port == 2049 or name == 'nfs':
                     if not any(o.get('title') == 'nfs-showmount' and o.get('serviceId') == s['id'] for o in observations):
                         add('nfs-exports', host, [s], f"List exports on recorded NFS service {port}/tcp.", port=port)

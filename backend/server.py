@@ -20,7 +20,7 @@ from .llm import LlmService, private_url
 from .llm_metrics import LlmMetrics
 from .workflow import COMMAND_CATALOG, is_local_ip, is_tls_service, workflow
 from .web_contacts import website_url
-from .scope import normalize_scope, valid_cidr
+from .scope import DOMAIN_LABEL, normalize_scope, valid_cidr
 from .discovery import contained_range, discovery_chunks, discovery_progress, dns_review, name_discovery, approval_name
 from .inventory import parse_inventory, verify_inventory_host
 from .sensitive import redact, sanitize_document
@@ -105,7 +105,16 @@ def invocation(candidate, doc):
     if kind in ('whatweb', 'gobuster', 'sslscan') and len(services) == 1 and services[0].get('state') == 'open' and services[0].get('protocol') == 'tcp':
         return sys.executable, [str(ROOT / 'backend/kali_recon.py'), kind, '--url', website_url(host, services[0]), '--ip', ip], kind
     if kind == 'dnsrecon' and len(services) == 1 and services[0].get('state') == 'open' and services[0].get('protocol') == 'tcp' and services[0].get('port') == 53 and host.get('name'):
-        return sys.executable, [str(ROOT / 'backend/kali_recon.py'), kind, '--name', host['name'], '--ip', ip], kind
+        args = shlex.split(candidate['command'])
+        zone = args[args.index('--zone') + 1]
+        name = str(host['name']).lower().rstrip('.')
+        if len(zone) > 253 or len(zone.split('.')) < 2 or not all(DOMAIN_LABEL.fullmatch(label) for label in zone.split('.')) or not (name == zone or name.endswith('.' + zone)):
+            raise ValueError('DNS zone must match the approved resolver name.')
+        return sys.executable, [str(ROOT / 'backend/kali_recon.py'), kind, '--zone', zone, '--ip', ip], kind
+    if kind == 'ssh-algorithms' and len(services) == 1 and services[0].get('state') == 'open' and services[0].get('protocol') == 'tcp' and (services[0].get('port') == 22 or services[0].get('name') == 'ssh'):
+        return 'nmap', ['-n', '-Pn', '-sT', '-p', str(services[0]['port']), '--script', 'ssh2-enum-algos', '--max-retries', '1', '-oX', '-', ip], 'nmap'
+    if kind == 'rdp-encryption' and len(services) == 1 and services[0].get('state') == 'open' and services[0].get('protocol') == 'tcp' and services[0].get('port') == 3389:
+        return 'nmap', ['-n', '-Pn', '-sT', '-p', '3389', '--script', 'rdp-enum-encryption', '--max-retries', '1', '-oX', '-', ip], 'nmap'
     if kind == 'tls-certificate' and len(services) == 1 and is_tls_service(services[0]):
         return 'nmap', ['-n', '-Pn', '-sT', '-p', str(services[0]['port']), '--script', 'ssl-cert', '-oX', '-', ip], 'nmap'
     if kind in ('ssh-hostkey', 'smb-security', 'nfs-exports'):
@@ -233,8 +242,8 @@ def parse_check_result(candidate, tool, output):
         report = json.loads(output)
         args = shlex.split(candidate['command'])
         expected_ip = args[args.index('--ip') + 1]
-        expected_target = args[args.index('--name' if tool == 'dnsrecon' else '--url') + 1]
-        target_key = 'name' if tool == 'dnsrecon' else 'url'
+        expected_target = args[args.index('--zone' if tool == 'dnsrecon' else '--url') + 1]
+        target_key = 'zone' if tool == 'dnsrecon' else 'url'
         if not isinstance(report, dict) or report.get('tool') != tool or report.get('ip') != expected_ip or report.get(target_key) != expected_target:
             raise ValueError('Kali tool result target differs from the selected check.')
         if tool == 'whatweb':
@@ -247,18 +256,31 @@ def parse_check_result(candidate, tool, output):
             add('WhatWeb technologies', detail or 'No technology signatures detected.')
         elif tool == 'gobuster':
             paths = report.get('paths')
-            if not isinstance(paths, list) or len(paths) > 20 or report.get('checked') != 7 or not all(
+            checked = report.get('checked')
+            if not isinstance(checked, int) or not 1 <= checked <= 32 or not isinstance(paths, list) or len(paths) > checked or not all(
                     isinstance(item, dict) and re.fullmatch(r'/[A-Za-z0-9./_-]{1,100}', str(item.get('path') or '')) and
                     isinstance(item.get('status'), int) and 100 <= item['status'] <= 599 and
                     isinstance(item.get('size'), int) and item['size'] >= 0 for item in paths):
                 raise ValueError('Invalid Gobuster path report.')
             add('Gobuster paths', '\n'.join(f"{p['path']} · HTTP {p['status']} · {p['size']} bytes" for p in paths) or 'No bundled paths returned a distinct response.')
         elif tool == 'sslscan':
-            protocols = report.get('protocols')
+            protocols, ciphers, count = report.get('protocols'), report.get('ciphers'), report.get('cipherCount')
             if not isinstance(protocols, list) or len(protocols) > 20 or not all(
                     isinstance(p, str) and re.fullmatch(r'(?:TLS|SSL) [0-9.]{1,8}', p) for p in protocols):
                 raise ValueError('Invalid sslscan protocol report.')
-            add('sslscan protocols', ', '.join(protocols) or 'No enabled TLS protocol reported.')
+            if not isinstance(ciphers, list) or len(ciphers) > 100 or not isinstance(count, int) or not len(ciphers) <= count <= 1000 or not all(
+                    isinstance(c, dict) and isinstance(c.get('protocol'), str) and
+                    re.fullmatch(r'(?:TLS|SSL)v?[0-9.]{1,8}', c['protocol']) and
+                    isinstance(c.get('name'), str) and re.fullmatch(r'[A-Za-z0-9_+-]{1,100}', c['name']) and
+                    isinstance(c.get('bits'), int) and 0 <= c['bits'] <= 4096 and
+                    isinstance(c.get('preferred'), bool) for c in ciphers):
+                raise ValueError('Invalid sslscan cipher report.')
+            detail = 'Protocols: ' + (', '.join(protocols) or 'none reported')
+            detail += f'\nAccepted cipher suites: {count}'
+            detail += ''.join(f"\n{c['protocol']} {c['name']} ({c['bits']} bits){' preferred' if c['preferred'] else ''}" for c in ciphers[:50])
+            if count > 50:
+                detail += f'\n{count - 50} additional cipher suites are listed in the linked evidence.'
+            add('sslscan TLS configuration', detail)
         else:
             records = report.get('records')
             if not isinstance(records, list) or len(records) > 100 or not all(
@@ -266,7 +288,7 @@ def parse_check_result(candidate, tool, output):
                     isinstance(r.get('name'), str) and re.fullmatch(r'[a-z0-9.-]{1,253}', r['name']) and
                     isinstance(r.get('value'), str) and re.fullmatch(r'[A-Za-z0-9.:_-]{1,253}', r['value']) for r in records):
                 raise ValueError('Invalid dnsrecon record report.')
-            add('dnsrecon records', '\n'.join(f"{r['type']} {r['name']} {r['value']}" for r in records) or 'No records returned.', service_id)
+            add(f'dnsrecon records: {expected_target}', '\n'.join(f"{r['type']} {r['name']} {r['value']}" for r in records) or 'No records returned.', service_id)
     elif tool == 'http-headers':
         if not output.lstrip().startswith('HTTP/'):
             raise ValueError('No HTTP response headers found.')
