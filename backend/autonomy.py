@@ -76,7 +76,7 @@ class AutonomyController:
     def limits(self):
         return {'maxChecks': self.max_checks, 'maxSeconds': MAX_SECONDS,
                 'groupMaxChecks': self.group_max_checks, 'groupMaxSeconds': GROUP_MAX_SECONDS,
-                'groupMaxHosts': 8, 'discoveryMaxSeconds': MAX_DISCOVERY_SECONDS,
+                'groupMaxHosts': None, 'discoveryMaxSeconds': MAX_DISCOVERY_SECONDS,
                 'autoGroupHosts': AUTO_GROUP_HOSTS}
 
     def _load(self):
@@ -168,9 +168,9 @@ class AutonomyController:
 
     def start_group(self, host_ids, scope, model=''):
         ws = self.workspace
-        if (not isinstance(host_ids, list) or not 2 <= len(host_ids) <= 8 or
+        if (not isinstance(host_ids, list) or len(host_ids) < 2 or
                 any(not isinstance(h, str) for h in host_ids) or len(host_ids) != len(set(host_ids))):
-            raise ValueError('Choose two to eight distinct approved hosts.')
+            raise ValueError('Choose at least two distinct approved hosts.')
         with ws.lock:
             if self.thread and self.thread.is_alive() or any(r.get('status') in ('awaiting-approval', 'awaiting-host-review', 'awaiting-discovery') for r in self._load()['runs']):
                 raise ValueError('Review or stop the current AI run first.')
@@ -282,8 +282,10 @@ class AutonomyController:
         ws = self.workspace
         with ws.lock:
             run = next((r for r in self._load()['runs'] if r['id'] == run_id), None)
-            if not run or run.get('mode') != 'discover-group' or run['status'] not in ('awaiting-host-review', 'awaiting-discovery'):
-                raise ValueError('No matching discovery run is waiting to continue.')
+            if not run or run.get('mode') not in ('group', 'discover-group') or run['status'] not in ('awaiting-host-review', 'awaiting-discovery'):
+                raise ValueError('No matching survey or discovery run is waiting to continue.')
+            if run.get('mode') == 'group' and run['status'] != 'awaiting-discovery':
+                raise ValueError('No matching group survey is waiting to continue.')
             if ws.load_scope() != scope or run['scope'] != scope:
                 raise ValueError('Authorized scope changed.')
             if self.thread and self.thread.is_alive():
@@ -291,8 +293,9 @@ class AutonomyController:
             self._update(run_id, status='running')
             self.stop_event = threading.Event()
             model = run['model'] if run['model'] != 'server default' else ''
-            self.activity_ids[run_id] = ws.activity.begin('ai-run', 'Continue scoped discovery',
-                target=', '.join(scope['cidrs']), detail='Checking saved discovery and approved hosts.')
+            self.activity_ids[run_id] = ws.activity.begin('ai-run', 'Continue host survey' if run.get('mode') == 'group' else 'Continue scoped discovery',
+                target=f"{len(run['hostIds'])} selected hosts" if run.get('mode') == 'group' else ', '.join(scope['cidrs']),
+                detail='Continuing saved host survey.' if run.get('mode') == 'group' else 'Checking saved discovery and approved hosts.')
             worker = self._group_worker if run.get('hostIds') and run.get('phase') == 'survey' else self._discover_group_worker
             args = (run_id, scope, model, self.stop_event) if worker == self._group_worker else (run_id, scope, model, self.stop_event, True)
             self.thread = threading.Thread(target=worker,
@@ -896,7 +899,7 @@ class AutonomyController:
                 count = sum(e['type'] == 'check' for e in run['events'])
                 remaining = GROUP_MAX_SECONDS - (time.monotonic() - started)
                 if remaining <= 0:
-                    if run.get('mode') == 'discover-group' and run.get('phase') == 'survey':
+                    if run.get('phase') == 'survey':
                         return self._pause_discovery(run_id, 'awaiting-discovery',
                             'Survey time limit reached; completed hosts are saved. Continue to survey the rest.')
                     return self._finish(run_id, 'stopped', 'Group time limit reached.')
@@ -908,7 +911,7 @@ class AutonomyController:
                     ws.activity.update(self.activity_ids[run_id], detail='Survey complete; deep-diving into a selected approved host.')
                     return self._worker(run_id, hid, scope, model, stop_event)
                 hid = unvisited[0]
-                if run.get('mode') == 'discover-group' and len(run['surveyedHostIds']) % AUTO_GROUP_HOSTS == 0:
+                if len(run['surveyedHostIds']) % AUTO_GROUP_HOSTS == 0:
                     self._event(run_id, dict(type='survey-batch',
                         completed=len(run['surveyedHostIds']), total=len(run['hostIds']),
                         size=min(AUTO_GROUP_HOSTS, len(unvisited))))
@@ -923,7 +926,7 @@ class AutonomyController:
                     return self._finish(run_id, 'stopped', 'Stopped before the selected check.')
                 remaining = GROUP_MAX_SECONDS - (time.monotonic() - started)
                 if remaining <= 0:
-                    if run.get('mode') == 'discover-group':
+                    if run.get('phase') == 'survey':
                         return self._pause_discovery(run_id, 'awaiting-discovery',
                             'Survey time limit reached; completed hosts are saved. Continue to survey the rest.')
                     return self._finish(run_id, 'stopped', 'Group time limit reached before the check.')

@@ -188,6 +188,30 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(saved['status'], 'completed')
         self.assertEqual(self.calls, [])
 
+    def test_group_api_accepts_more_than_eight_approved_hosts(self):
+        class Model:
+            def assert_configuration(self):
+                pass
+        self.workspace.llm = Model()
+        scope = self.workspace.save_scope({'cidrs': ['100.96.1.0/24'], 'domains': ['lab.test']})
+        doc = self.workspace.load()
+        for number in range(70, 80):
+            parsed = F.parse_import({'tool': 'nmap', 'output':
+                f'Nmap scan report for node{number}.lab.test (100.96.1.{number})\n'
+                'Host is up.\nNmap done: 1 IP address (1 host up) scanned'})
+            F.merge_parsed(doc, parsed)
+        hosts = [f for f in doc['findings'] if f['kind'] == 'host']
+        for host in hosts:
+            host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        self.workspace.save(doc)
+        with patch.object(self.workspace.autonomy, '_group_worker'):
+            status, run = self.call('/api/autonomy/start-group', 'POST',
+                {'hostIds': [h['id'] for h in hosts], 'authorizedScope': scope,
+                 'authorized': True, 'model': ''})
+            self.assertEqual(status, 202, run)
+            self.workspace.autonomy.thread.join(3)
+        self.assertEqual(len(run['hostIds']), 10)
+
     def test_auto_discovery_waits_for_domain_host_approval_then_selects_hosts(self):
         class CompareModel:
             def assert_configuration(self):
@@ -731,7 +755,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/autonomy')[1],
                      {'runs': [], 'limits': {'maxChecks': None, 'maxSeconds': 1200,
                                               'groupMaxChecks': None, 'groupMaxSeconds': 1800,
-                                              'groupMaxHosts': 8, 'discoveryMaxSeconds': 600,
+                                              'groupMaxHosts': None, 'discoveryMaxSeconds': 600,
                                               'autoGroupHosts': 4}})
         output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\n'
                   'Host is up.\n80/tcp open http\nNmap done: 1 IP address (1 host up) scanned')

@@ -619,11 +619,11 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         scope = workspace.resolve_scope(body.get('authorizedScope'))
                     return self.send_json(202, workspace.autonomy.start(body['hostId'], scope, body.get('model', '')))
                 if self.command == 'POST' and path == '/api/autonomy/start-group':
-                    body = self.body(4000)
+                    body = self.body()
                     if (not isinstance(body, dict) or set(body) - {'hostIds', 'model', 'authorizedScope', 'authorized'} or
                             body.get('authorized') is not True or not isinstance(body.get('hostIds'), list) or
                             not isinstance(body.get('model', ''), str) or len(body.get('model', '')) > 200):
-                        raise ValueError('Choose two to eight approved hosts and confirm authorization.')
+                        raise ValueError('Choose at least two approved hosts and confirm authorization.')
                     with workspace.lock:
                         scope = workspace.resolve_scope(body.get('authorizedScope'))
                     return self.send_json(202, workspace.autonomy.start_group(body['hostIds'], scope, body.get('model', '')))

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -129,6 +130,45 @@ class AutonomyTests(unittest.TestCase):
             ws.autonomy.thread.join(3)
         self.assertIsNone(run['maxChecks'])
         self.assertEqual(ws.autonomy.limits()['groupMaxSeconds'], 1800)
+
+    def test_group_survey_accepts_more_than_eight_approved_hosts(self):
+        doc = self.ws.load()
+        for number in range(71, 80):
+            parsed = F.parse_import({'tool': 'nmap', 'output':
+                f'Nmap scan report for host{number}.03.crimsonia.net (100.96.1.{number})\n'
+                'Host is up.\nNmap done: 1 IP address (1 host up) scanned'})
+            F.merge_parsed(doc, parsed)
+        hosts = [h for h in doc['findings'] if h['kind'] == 'host']
+        for host in hosts:
+            host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': self.scope}
+        self.ws.save(doc)
+        with patch.object(self.ws.autonomy, '_group_worker') as worker:
+            run = self.ws.autonomy.start_group([h['id'] for h in hosts], self.scope)
+            self.ws.autonomy.thread.join(3)
+        self.assertEqual(len(run['hostIds']), 10)
+        self.assertIsNone(self.ws.autonomy.limits()['groupMaxHosts'])
+        worker.assert_called_once()
+
+    def test_selected_group_survey_can_resume_without_repeating_hosts(self):
+        run = {'id': 'resume-selected-survey', 'mode': 'group', 'phase': 'survey',
+            'status': 'awaiting-discovery', 'scope': self.scope, 'model': 'server default',
+            'hostIds': ['one', 'two'], 'surveyedHostIds': ['one'], 'events': []}
+        self.ws.autonomy._save({'runs': [run]})
+        with patch.object(self.ws.autonomy, '_group_worker') as worker:
+            self.ws.autonomy.resume_discover_group(run['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        worker.assert_called_once()
+        self.assertEqual(self.ws.autonomy.history()['runs'][0]['surveyedHostIds'], ['one'])
+
+    def test_selected_group_survey_pauses_at_time_limit(self):
+        run = {'id': 'timed-survey', 'mode': 'group', 'phase': 'survey',
+               'hostIds': ['one', 'two'], 'surveyedHostIds': ['one'], 'events': []}
+        with patch.object(self.ws.autonomy, '_group_state', return_value=(run, {}, {}, [])), \
+                patch.object(self.ws.autonomy, '_pause_discovery') as pause, \
+                patch('backend.autonomy.time.monotonic', side_effect=[0, 1801]):
+            self.ws.autonomy._group_worker(run['id'], self.scope, '', threading.Event())
+        pause.assert_called_once()
+        self.assertEqual(pause.call_args.args[:2], (run['id'], 'awaiting-discovery'))
 
     def test_exhausted_catalog_waits_for_review_and_revision_before_execution(self):
         class ProposalLlm(FakeLlm):
