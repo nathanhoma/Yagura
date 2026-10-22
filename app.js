@@ -35,7 +35,17 @@ function updateScopeGate(){
   const scanState=$('#scanState');if(!ready||scanState.textContent.startsWith('Save the target scope')||scanState.textContent.startsWith('Saved scope:'))scanState.textContent=ready?'Saved scope: '+scopeLabel()+'. Select a discovery action to review and confirm it.':'Save the target scope before running discovery.';
 }
 window.addEventListener('hashchange',showView);showView();
-function openImport(){location.hash='#review';showView();if(!checkScope()||!scopeLoaded)return;if(!$('#importPanel').open)$('#importPanel').showModal();$('#importTool').focus();}
+const reviewTabs=[...document.querySelectorAll('.review-tabs [role="tab"]')];
+function setReviewTab(name,focus=false){
+  const selected=reviewTabs.some(tab=>tab.dataset.reviewTab===name)?name:'overview';
+  reviewTabs.forEach(tab=>{const active=tab.dataset.reviewTab===selected;tab.setAttribute('aria-selected',String(active));tab.tabIndex=active?0:-1;if(active&&focus)tab.focus();});
+  document.querySelectorAll('[data-review-panel]').forEach(panel=>{panel.hidden=panel.dataset.reviewPanel!==selected;});
+  try{sessionStorage.setItem('yagura-review-tab',selected);}catch{}
+}
+let initialReviewTab='overview';try{initialReviewTab=sessionStorage.getItem('yagura-review-tab')||'overview';}catch{}
+setReviewTab(initialReviewTab);
+reviewTabs.forEach((tab,index)=>{tab.onclick=()=>setReviewTab(tab.dataset.reviewTab);tab.onkeydown=event=>{let next;if(event.key==='ArrowRight')next=(index+1)%reviewTabs.length;else if(event.key==='ArrowLeft')next=(index+reviewTabs.length-1)%reviewTabs.length;else if(event.key==='Home')next=0;else if(event.key==='End')next=reviewTabs.length-1;else return;event.preventDefault();setReviewTab(reviewTabs[next].dataset.reviewTab,true);};});
+function openImport(){location.hash='#review';showView();setReviewTab('findings');if(!checkScope()||!scopeLoaded)return;if(!$('#importPanel').open)$('#importPanel').showModal();$('#importTool').focus();}
 document.addEventListener('click',event=>{if(event.target.closest('[data-open-import]'))openImport();});
 $('#importNewOpen').onclick=openImport;$('#importClose').onclick=()=>$('#importPanel').close();
 $('#discoveryNewOpen').onclick=()=>$('#discoveryNewDialog').showModal();$('#discoveryNewClose').onclick=()=>$('#discoveryNewDialog').close();
