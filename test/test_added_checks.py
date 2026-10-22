@@ -124,9 +124,31 @@ class AddedChecksTests(unittest.TestCase):
             seen.append(url)
             return 200, {'content-type': 'text/html', 'server': 'test'}, '<title>Lab</title><a href="/login">Login</a><a href="http://other.test/">Outside</a>'
         report = inventory('http://www.lab.test:80/', '192.168.56.10', fetch)
-        self.assertEqual(seen, ['http://www.lab.test:80/', 'http://www.lab.test:80/login'])
+        self.assertEqual(seen, ['http://www.lab.test:80/', 'http://www.lab.test:80/login',
+                                'http://www.lab.test:80/robots.txt', 'http://www.lab.test:80/sitemap.xml'])
         self.assertEqual(len(report['pages']), 2)
         self.assertTrue(all('other.test' not in route for route in report['routes']))
+
+    def test_web_inventory_records_bounded_same_origin_metadata_hints(self):
+        seen = []
+        def fetch(url, ip, timeout):
+            seen.append(url)
+            if url.endswith('/robots.txt'):
+                return 200, {'content-type': 'text/plain'}, 'Disallow: /admin?token=secret\nAllow: /public\nDisallow: https://other.test/hidden'
+            if url.endswith('/sitemap.xml'):
+                body = ('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        '<url><loc>http://www.lab.test:80/docs?key=secret</loc></url>'
+                        '<url><loc>https://other.test/outside</loc></url></urlset>')
+                return 200, {'content-type': 'application/xml'}, body
+            return 200, {'content-type': 'text/html'}, '<title>Lab</title>'
+        report = inventory('http://www.lab.test:80/', '192.168.56.10', fetch)
+        self.assertEqual(seen, ['http://www.lab.test:80/', 'http://www.lab.test:80/robots.txt',
+                                'http://www.lab.test:80/sitemap.xml'])
+        self.assertEqual([(h['source'], h['directive'], h['url']) for h in report['discoveryHints']], [
+            ('robots.txt', 'disallow', 'http://www.lab.test:80/admin'),
+            ('robots.txt', 'allow', 'http://www.lab.test:80/public'),
+            ('sitemap.xml', 'listed', 'http://www.lab.test:80/docs')])
+        self.assertNotIn('secret', json.dumps(report))
 
     def test_edited_invocation_keeps_program_target_and_required_options(self):
         candidates = workflow(self.doc, '192.168.56.10/32')['candidates']
