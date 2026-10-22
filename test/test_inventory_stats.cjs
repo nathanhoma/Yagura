@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {build,flowDiagram}=require('../inventory-stats.js');
+const {build,progressDiagram}=require('../inventory-stats.js');
 
 test('inventory statistics count only eligible hosts and confirmed open services',()=>{
   const hosts=[
@@ -21,9 +21,10 @@ test('inventory statistics count only eligible hosts and confirmed open services
   const stats=build(findings,evidence,map,[{hostId:'h1',kind:'software'},{hostId:'h3',kind:'exposure'}],{domains:['example.test']});
   assert.equal(stats.hosts.length,2);
   assert.equal(stats.services.length,1);
-  assert.equal(stats.flow[0].os,'Linux');
-  assert.equal(stats.flow[0].type,'Web');
-  assert.equal(stats.flow[0].domain,'dev.example.test');
+  assert.deepEqual(stats.osRows.map(row=>row.label),['Linux','Unknown']);
+  assert.equal(stats.progress.length,2);
+  assert.equal(stats.progress[0].stages[2],'Investigated');
+  assert.equal(stats.progress[1].stages[2],'Not investigated');
   assert.equal(stats.portsScanned.size,1);
   assert.equal(stats.coverage[0].states[0],'recorded');
   assert.equal(stats.coverage[1].states[0],'recorded'); // closed is recorded, not open
@@ -31,19 +32,33 @@ test('inventory statistics count only eligible hosts and confirmed open services
   assert.equal(stats.productRows[0].label,'nginx 1.27');
 });
 
-test('unknown OS uses a readable service breakdown with clickable host filters',()=>{
-  const rows=[{hostId:'h1',domain:'dev.example.test',os:'Unknown',type:'Web'},{hostId:'h2',domain:'dev.example.test',os:'Unknown',type:'SSH'},{hostId:'h1',domain:'dev.example.test',os:'Unknown',type:'Web'}];
-  const diagram=flowDiagram(rows);
-  assert.equal(diagram.hasOs,false);
-  assert.match(diagram.markup,/Open services by domain and service type/);
-  assert.doesNotMatch(diagram.markup,/<svg|flow-link/);
-  assert.match(diagram.markup,/2 open services/);
-  assert.deepEqual([...diagram.edges[0].ids],['h1']);
+test('progress counts each host once even with multiple services and saved runs',()=>{
+  const host={id:'h1',kind:'host',ip:'10.0.0.1',name:'web.example.test',evidenceIds:[]};
+  const scope={cidrs:['10.0.0.0/24'],domains:[],matchMode:'and'};
+  const services=[80,443].map((port,i)=>({id:`s${i}`,kind:'service',hostId:'h1',port,protocol:'tcp',state:'open',name:'http',evidenceIds:[]}));
+  const run={scope,mode:'group',events:[{type:'deep-dive-selection',hostId:'h1'},
+    {type:'check',hostId:'h1',outcome:'completed',imported:true}]};
+  const stats=build([host,...services],[],{targets:[{host,eligible:true}]},[{hostId:'h1',kind:'web'}],scope,[run]);
+  assert.equal(stats.services.length,2);
+  assert.equal(stats.progress.length,1);
+  assert.deepEqual(stats.progress[0].stages,['Recorded in scope','Approved','Investigated','Review lead','Deep dive done']);
+  const diagram=progressDiagram(stats.progress);
+  assert.match(diagram.markup,/Recorded host progress/);
+  assert.equal(diagram.edges.length,4);
+  assert.ok(diagram.edges.every(edge=>edge.ids.size===1));
 });
 
-test('known OS preserves the flow diagram and its edge filters',()=>{
-  const diagram=flowDiagram([{hostId:'h1',domain:'dev.example.test',os:'Linux',type:'Web'},{hostId:'h2',domain:'dev.example.test',os:'Unknown',type:'SSH'}]);
-  assert.equal(diagram.hasOs,true);
-  assert.match(diagram.markup,/<svg/);
-  assert.equal(diagram.edges.length,4);
+test('unapproved and unchecked hosts retain distinct paths',()=>{
+  const scope={cidrs:['10.0.0.0/24'],domains:[],matchMode:'and'};
+  const host=id=>({id,kind:'host',ip:`10.0.0.${id.slice(1)}`,evidenceIds:[]});
+  const stats=build([host('h1'),host('h2')],[],{targets:[
+    {host:host('h1'),eligible:true},
+    {host:host('h2'),eligible:false,scopeReason:'Host identity needs DNS review and approval'}
+  ]},[],scope,[]);
+  assert.equal(stats.progress.length,2);
+  assert.equal(stats.progress[0].stages[4],'Not investigated');
+  assert.equal(stats.progress[1].stages[1],'Awaiting approval');
+  assert.equal(stats.progress[1].stages[4],'Awaiting approval');
+  const diagram=progressDiagram(stats.progress);
+  assert.equal(diagram.edges.filter(edge=>edge.label.startsWith('Recorded in scope')).reduce((sum,edge)=>sum+edge.ids.size,0),2);
 });
