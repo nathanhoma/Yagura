@@ -38,6 +38,7 @@ COMMAND_CATALOG = [
     dict(id='nxc-smb-shares', title='Check anonymous SMB shares with NetExec', command="nxc smb {host} --port 445 -u '' -p '' --shares", when='Try one anonymous SMB login and list accessible shares on a recorded open 445/tcp service.'),
     dict(id='dns-ptr', title='Resolve host PTR name', command='getent hosts {host}', when='Record the locally resolved reverse DNS name for a scoped host.'),
     dict(id='web-inventory', title='Inventory web pages and routes', command='python3 -m backend.web_inventory --url {url} --ip {host}', when='Record HTTP status, title, server, and up to 50 same-origin links from five pages.'),
+    dict(id='web-fingerprint', title='Identify web technologies', command='python3 -m backend.web_fingerprint --url {url} --ip {host}', when='Inspect one IP-pinned root-page response for curated server, framework, and CMS signals without a browser or external API.'),
     dict(id='ssh-hostkey', title='Inspect SSH host key', command='nmap -n -Pn -sT -p {port} --script ssh-hostkey -oX - {host}', when='Read the SSH host key on a recorded open SSH service.'),
     dict(id='tls-certificate', title='Inspect TLS certificate', command='nmap -n -Pn -sT -p {port} --script ssl-cert -oX - {host}', when='Read the certificate on a recorded open TLS service.'),
     dict(id='smb-security', title='Inspect SMB security mode', command='nmap -n -Pn -sT -p {port} --script smb2-security-mode -oX - {host}', when='Read SMB signing configuration on a recorded open SMB service.'),
@@ -104,6 +105,8 @@ def workflow(doc, authorized_scope=None):
                     add('http-headers', host, [s], f"Recorded open {port}/tcp ({name or 'web-associated port'}) supports a web header check.", port=port, scheme=scheme, web_host=urlsplit(url).hostname, url=url)
                     if not any(o.get('title') == 'Web inventory' and o.get('serviceId') == s['id'] for o in observations):
                         add('web-inventory', host, [s], f"Inventory pages and routes on recorded web service {port}/tcp.", url=website_url(host, s))
+                    if not any(o.get('title') == 'Web technologies' and o.get('serviceId') == s['id'] for o in observations):
+                        add('web-fingerprint', host, [s], f"Identify curated web technologies on recorded service {port}/tcp.", url=website_url(host, s))
                     # Do not execute extensible scanners until host-level egress isolation is installed.
                 if port == 445 or name in ('microsoft-ds', 'netbios-ssn', 'smb'):
                     add('smb-shares', host, [s], f"Recorded open {port}/tcp ({name or 'SMB-associated port'}) supports share enumeration.")

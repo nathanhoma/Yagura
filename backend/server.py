@@ -33,6 +33,7 @@ from .attention import review_flags
 from .vulnerabilities import match_versions
 from .tool_imports import TOOLS as EXPORT_TOOLS, parse_export, parse_burp_live
 from .burp_mcp import run_get as burp_mcp_get
+from .web_fingerprint import KNOWN_TECHNOLOGIES
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -99,6 +100,8 @@ def invocation(candidate, doc):
         return sys.executable, [str(ROOT / 'backend/web_exposure.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-exposure'
     if kind == 'web-inventory':
         return sys.executable, [str(ROOT / 'backend/web_inventory.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-inventory'
+    if kind == 'web-fingerprint':
+        return sys.executable, [str(ROOT / 'backend/web_fingerprint.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-fingerprint'
     if kind == 'tls-certificate' and len(services) == 1 and is_tls_service(services[0]):
         return 'nmap', ['-n', '-Pn', '-sT', '-p', str(services[0]['port']), '--script', 'ssl-cert', '-oX', '-', ip], 'nmap'
     if kind in ('ssh-hostkey', 'smb-security', 'nfs-exports'):
@@ -157,7 +160,7 @@ def parse_check_result(candidate, tool, output):
         return F.parse_import(dict(tool=tool, output=output, command=candidate['command'], observedAt=F.now()))
     time = F.now()
     ev = dict(id=F.uid('evidence'), tool=tool, command=candidate['command'], output=output,
-              observedAt=time, importedAt=time, format='json' if tool in ('web-contacts', 'web-inventory', 'web-exposure') else 'jsonl' if tool == 'nuclei-git' else 'text')
+              observedAt=time, importedAt=time, format='json' if tool in ('web-contacts', 'web-inventory', 'web-exposure', 'web-fingerprint') else 'jsonl' if tool == 'nuclei-git' else 'text')
     host_id = candidate['hostId']
     service_id = candidate['serviceIds'][0] if candidate['serviceIds'] else None
     observations = []
@@ -208,6 +211,20 @@ def parse_check_result(candidate, tool, output):
                 for hint in report['discoveryHints'][:100]))
         if report.get('errors'):
             add('Web inventory errors', '\n'.join(map(str, report['errors'][:10])))
+    elif tool == 'web-fingerprint':
+        report = json.loads(output)
+        if not isinstance(report, dict) or not isinstance(report.get('technologies'), list) or len(report['technologies']) > 30:
+            raise ValueError('Invalid web technology report.')
+        command = shlex.split(candidate['command'])
+        expected_url, expected_ip = command[command.index('--url') + 1], command[command.index('--ip') + 1]
+        if report.get('url') != expected_url or report.get('ip') != expected_ip or not isinstance(report.get('status'), int):
+            raise ValueError('Web technology report target differs from the selected check.')
+        labels = []
+        for item in report['technologies']:
+            if not isinstance(item, dict) or item.get('name') not in KNOWN_TECHNOLOGIES or not isinstance(item.get('version'), str) or not re.fullmatch(r'[0-9A-Za-z._-]{0,31}', item['version']):
+                raise ValueError('Invalid web technology signal.')
+            labels.append(item['name'] + ('/' + item['version'] if item['version'] else ''))
+        add('Web technologies', ', '.join(labels) if labels else 'No curated technology signals detected on the root page.')
     elif tool == 'http-headers':
         if not output.lstrip().startswith('HTTP/'):
             raise ValueError('No HTTP response headers found.')
@@ -388,7 +405,7 @@ class Workspace:
                 raise ValueError('The selected check changed before execution.')
             host = next(f for f in doc['findings'] if f['id'] == candidate['hostId'])
             require_target(host, scope)
-            if candidate['catalogId'] in ('http-headers', 'web-contacts', 'web-exposure', 'web-inventory'):
+            if candidate['catalogId'] in ('http-headers', 'web-contacts', 'web-exposure', 'web-inventory', 'web-fingerprint'):
                 service = next(f for f in doc['findings'] if f['id'] == candidate['serviceIds'][0])
                 require_web_origin(website_url(host, service), host, scope)
             if candidate['id'] in self.active_checks:
