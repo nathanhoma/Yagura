@@ -72,12 +72,13 @@ body[data-view]:not([data-view="scope"]):not([data-scope-state="ready"]) .grid{d
 .finding-toolbar .field{min-width:180px}.finding-toolbar .finding-search{flex:1;min-width:220px}
 .finding-tree{display:flex;flex-direction:column;gap:8px}
 .finding-branch{border:1px solid var(--line);border-radius:8px;background:#0e1518;overflow:hidden}
-.finding-branch summary{display:flex;align-items:center;gap:10px;min-height:48px;padding:9px 12px;cursor:pointer;list-style:none}
-.finding-branch summary::-webkit-details-marker{display:none}
-.finding-branch summary::before{content:'▸';color:var(--lime);font-size:14px;flex:none}
+.finding-branch>summary{display:flex;align-items:center;gap:10px;min-height:48px;padding:9px 12px;cursor:pointer;list-style:none}
+.finding-branch>summary::-webkit-details-marker{display:none}
+.finding-branch>summary::before{content:'▸';color:var(--lime);font-size:14px;flex:none}
 .finding-branch[open]>summary::before{content:'▾'}
-.finding-branch summary:focus-visible{outline:2px solid var(--cyan);outline-offset:-2px}
-.finding-branch summary:hover{background:#1a2829}
+.finding-branch>summary:focus-visible{outline:2px solid var(--cyan);outline-offset:-2px}
+.finding-branch>summary:hover{background:#1a2829}
+.finding-branch:has(.record-actions[open]){overflow:visible}
 .finding-name{font-weight:650;overflow-wrap:anywhere;min-width:0}
 .finding-summary-count{color:var(--muted);font-size:12px;margin-left:auto;text-align:right}
 .finding-children{border-top:1px solid var(--line);padding:8px 10px 10px 20px;margin-left:17px;border-left:2px solid #3a5050;display:flex;flex-direction:column;gap:8px}
@@ -138,6 +139,7 @@ body[data-view="briefing"] .briefing-latest{position:absolute;right:24px;bottom:
 .check-details{margin-top:8px}.check-details>summary{cursor:pointer;color:var(--muted);font-size:10px}.check-details[open]>summary{margin-bottom:8px}.check-details .toolbar{margin-top:9px}.check-target{color:var(--muted);font-size:10px;margin-top:4px}.check-actions{display:flex;align-items:start;gap:8px}
 #autonomyLimitBadge,#autonomyPanel>.cardhead .title{display:none}.autonomy-now.idle{position:static;box-shadow:none;border-color:var(--line);background:transparent;padding:9px 11px;margin-bottom:12px}.autonomy-now.idle strong{font-size:12px}.autonomy-now.idle p,.autonomy-now.idle .toolbar,#autonomyStop:disabled{display:none}
 .analysis-scope-fields[hidden]{display:none}.analysis-scope-fields{margin-top:12px}
+.approved-hosts{border:1px solid var(--line);border-radius:7px;padding:10px}.approved-hosts>summary{cursor:pointer;font-weight:650;font-size:12px}.approved-hosts>.results{margin-top:10px}
 </style></head>
 <body><div class="app"><aside class="side"><div class="brand"><div class="logo">Y</div><div>YAGURA<small>RED TEAM ASSIST</small></div></div>
 <div class="workflow-switch sidebar-mode" role="group" aria-label="Operating mode"><button type="button" data-workflow-switch="ai" aria-pressed="true"><strong>✦ AI automation</strong><span>Yagura selects the next checks</span><em data-ai-state hidden></em></button><button type="button" data-workflow-switch="manual" aria-pressed="false"><strong>⌘ Manual control</strong><span>You select each check</span></button></div>
