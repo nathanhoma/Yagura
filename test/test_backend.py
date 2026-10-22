@@ -27,6 +27,29 @@ class FakeLlm:
 
 
 class BackendTests(unittest.TestCase):
+    def test_llm_metrics_capture_usage_and_truncation_without_content(self):
+        llm = LlmService(model='test-model')
+        rows = []
+        llm.on_completion = rows.append
+        llm.call = lambda route, body=None: {'choices': [{'message': {'content': '{"answer":"secret-value"}'}, 'finish_reason': 'stop'}],
+                                               'usage': {'prompt_tokens': 42, 'completion_tokens': 8, 'total_tokens': 50}}
+        llm.complete([{'role': 'user', 'content': 'password=secret-value'}], max_tokens=100)
+        self.assertEqual((rows[0]['promptTokens'], rows[0]['completionTokens'], rows[0]['finishReason']), (42, 8, 'stop'))
+        self.assertEqual(rows[0]['inputChars'], len('password=secret-value'))
+        self.assertNotIn('secret-value', str(rows))
+        llm.call = lambda route, body=None: {'choices': [{'message': {'content': '{"partial":true}'}, 'finish_reason': 'length'}]}
+        with self.assertRaisesRegex(LlmError, 'truncated'):
+            llm.complete([{'role': 'user', 'content': 'test'}], max_tokens=100)
+        self.assertEqual((rows[1]['status'], rows[1]['finishReason'], rows[1]['outputChars']),
+                         ('invalid-response', 'length', len('{"partial":true}')))
+        self.assertIsNone(rows[1]['promptTokens'])
+
+    def test_llm_timeout_allows_five_minutes_and_remains_bounded(self):
+        self.assertEqual(LlmService(timeout_ms=180000).timeout, 180)
+        self.assertEqual(LlmService(timeout_ms=300000).timeout, 300)
+        self.assertEqual(LlmService(timeout_ms=600000).timeout, 300)
+        self.assertEqual(LlmService().timeout, 30)
+
     def test_all_import_formats_link_records(self):
         for tool, filename, count in [('nmap', 'nmap.xml', 1), ('nmap', 'nmap.txt', 1), ('ip addr', 'addr.json', 2), ('ip addr', 'addr.txt', 4), ('ip neigh', 'neigh.json', 2), ('ip neigh', 'neigh.txt', 3), ('ping', 'ping.txt', 1)]:
             with self.subTest(filename=filename):
@@ -115,6 +138,14 @@ class BackendTests(unittest.TestCase):
         text = 'Nmap scan report for 192.168.56.10\nHost is up.\nAll 100 scanned ports on 192.168.56.10 are filtered\nNmap done: 1 IP address (1 host up) scanned\n'
         parsed = F.parse_import({'tool': 'nmap', 'command': 'nmap -n -Pn -sT --top-ports 100 192.168.56.10', 'output': text})
         self.assertEqual(next(f['state'] for f in parsed['findings'] if f['kind'] == 'host'), 'unknown')
+        open_text = ('Nmap scan report for 192.168.56.10\nHost is up.\n'
+                     'PORT    STATE SERVICE\n443/tcp open  https\n'
+                     'Nmap done: 1 IP address (1 host up) scanned\n')
+        opened_text = F.parse_import({'tool': 'nmap', 'command': 'nmap -n -Pn -sT -p 443 192.168.56.10',
+                                      'output': open_text})
+        self.assertEqual(next(f['state'] for f in opened_text['findings'] if f['kind'] == 'host'), 'up')
+        self.assertEqual(next(f['detail'] for f in opened_text['findings'] if f['kind'] == 'observation'),
+                         'Host responded on an open port.')
 
     def test_model_adapter_selects_advertised_ids(self):
         llm = LlmService('http://127.0.0.1:11434/v1')

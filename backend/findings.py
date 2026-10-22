@@ -101,7 +101,9 @@ def parse_import(data):
         return h
 
     def observe(h, title, detail, service=None):
-        findings.append(record('observation', dict(hostId=h['id'] if h else None, serviceId=service['id'] if service else None, title=title, detail=detail), ev['id'], time))
+        observation = record('observation', dict(hostId=h['id'] if h else None, serviceId=service['id'] if service else None, title=title, detail=detail), ev['id'], time)
+        findings.append(observation)
+        return observation
 
     def service(h, **fields):
         port = fields.get('port')
@@ -204,25 +206,27 @@ def parse_import(data):
                         accuracy = match.get('accuracy', '')
                         observe(h, 'Nmap OS guess', f"{name} ({accuracy}% accuracy)" if accuracy else name)
         else:
-            h = current = None
+            h = current = status_observation = None
             for line in output.splitlines():
                 report = re.match(r'^Nmap scan report for (.+)$', line)
                 if report:
                     named = re.match(r'^(.*?)\s+\(([^)]+)\)$', report[1])
                     h = host(named[2] if named else report[1].strip(), name=named[1] if named else '')
-                    current = None
+                    current = status_observation = None
                     continue
                 if not h:
                     continue
                 if line.startswith('Host is up') or line.startswith('Host seems down'):
                     assumed_up = line.startswith('Host is up') and '-Pn' in str(command).split()
                     h['state'] = 'unknown' if assumed_up else 'up' if line.startswith('Host is up') else 'down'
-                    observe(h, 'Nmap host status', 'Nmap -Pn assumed this host up; no open port confirmed.' if assumed_up else line.strip())
+                    status_observation = observe(h, 'Nmap host status', 'Nmap -Pn assumed this host up; no open port confirmed.' if assumed_up else line.strip())
                 p = re.match(r'^\s*(\d+)/(tcp|udp|sctp)\s+(\S+)\s+(\S+)(?:\s+(.*))?$', line)
                 if p:
                     current = service(h, port=int(p[1]), protocol=p[2], state=p[3], name='' if p[4] == 'unknown' else p[4], product=p[5] or '')
                     if current and current['state'] == 'open':
                         h['state'] = 'up'
+                        if status_observation and status_observation['detail'].startswith('Nmap -Pn assumed'):
+                            status_observation['detail'] = 'Host responded on an open port.'
                     continue
                 mac = re.match(r'^MAC Address:\s+(\S+)', line)
                 if mac:

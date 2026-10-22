@@ -149,7 +149,7 @@ class CheckProposals:
         try:
             response = ws.llm.complete([{'role': 'system', 'content': PROMPT},
                                         {'role': 'user', 'content': json.dumps({'request': redact(request), 'context': context}, ensure_ascii=False)}],
-                                       max_tokens=2400, model=model)
+                                       max_tokens=4000, model=model)
         except Exception as exc:
             ws.activity.finish(activity_id, 'failed', str(exc))
             raise

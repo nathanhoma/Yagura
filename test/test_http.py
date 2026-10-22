@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from unittest.mock import patch
 
+from backend import findings as F
 from backend.llm import LlmService
 from backend.server import Workspace, create_server
 
@@ -39,6 +40,38 @@ class HttpTests(unittest.TestCase):
             with exc:
                 return exc.code, json.load(exc)
 
+    def test_attention_endpoint_tracks_saved_scope_and_new_evidence(self):
+        self.workspace.save_scope({'cidrs': ['192.168.56.0/24'], 'domains': []})
+        self.assertEqual(self.call('/api/attention'), (200, {'flags': []}))
+        xml = '<nmaprun><host><status state="up"/><address addrtype="ipv4" addr="192.168.56.10"/><ports><port protocol="tcp" portid="80"><state state="open"/><service name="http" product="nginx" version="1.24"/></port></ports></host></nmaprun>'
+        self.workspace.save(F.parse_import({'tool': 'nmap', 'output': xml}))
+        status, data = self.call('/api/attention')
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data['flags']), 1)
+        self.assertEqual(data['flags'][0]['kind'], 'software')
+        self.assertEqual(len(data['flags'][0]['evidenceIds']), 1)
+
+    def test_llm_metrics_endpoint_returns_only_measurements(self):
+        self.workspace.llm_metrics.record({'model': 'test-model', 'status': 'completed',
+            'finishReason': 'stop', 'inputChars': 120, 'outputChars': 30,
+            'promptTokens': 40, 'completionTokens': 10, 'durationMs': 12, 'maxOutputTokens': 100})
+        status, data = self.call('/api/llm/metrics')
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data['calls']), 1)
+        self.assertEqual(data['calls'][0]['promptTokens'], 40)
+        self.assertNotIn('content', str(data))
+
+    def test_vulnerability_endpoint_uses_scoped_saved_evidence(self):
+        self.workspace.save_scope({'cidrs': ['192.168.56.0/24'], 'domains': []})
+        self.assertEqual(self.call('/api/vulnerabilities')[1]['matches'], [])
+        xml = '<nmaprun><host><status state="up"/><address addrtype="ipv4" addr="192.168.56.10"/><ports><port protocol="tcp" portid="80"><state state="open"/><service name="http" product="Apache httpd" version="2.4.58"/></port></ports></host></nmaprun>'
+        self.workspace.save(F.parse_import({'tool': 'nmap', 'output': xml}))
+        status, data = self.call('/api/vulnerabilities')
+        self.assertEqual(status, 200)
+        self.assertEqual(data['catalog']['asOf'], '2026-10-21')
+        self.assertIn('CVE-2023-38709', {match['cveId'] for match in data['matches']})
+        self.assertTrue(all(match['evidenceIds'] and match['status'] == 'possible' for match in data['matches']))
+
     def test_activity_endpoint_reports_live_and_finished_operations(self):
         self.assertEqual(self.call('/api/activity')[1]['active'], [])
         item = self.workspace.activity.begin('check', 'Test check', 'ping -c 3 100.96.1.70', '100.96.1.70')
@@ -53,6 +86,32 @@ class HttpTests(unittest.TestCase):
     def test_health_accepts_explicit_https_gateway(self):
         self.workspace.llm = LlmService('https://llm-gateway.xs.network/v1', trusted_https_host='llm-gateway.xs.network')
         self.assertEqual(self.call('/api/health')[1]['llm'], 'configured')
+
+    def test_briefing_question_reads_approved_evidence_without_running_a_check(self):
+        scope = self.workspace.save_scope({'cidrs': ['100.96.1.0/24'], 'domains': ['lab.test']})
+        doc = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for web.lab.test (100.96.1.70)\nHost is up.\n'
+            '443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        self.workspace.save(doc)
+        class Model:
+            def complete(self, messages, max_tokens=0, model=''):
+                self.max_tokens = max_tokens
+                context = json.loads(messages[1]['content'])['context']
+                finding = context['findings'][0]
+                return {'model': 'fake', 'data': {'supported': True,
+                    'answer': 'Recorded host evidence exists.', 'uncertainty': 'Recheck if needed.',
+                    'findingIds': [finding['id']], 'evidenceIds': finding['evidenceIds'],
+                    'candidateIds': []}}
+        self.workspace.llm = Model()
+        status, answer = self.call('/api/briefing/ask', 'POST',
+                                   {'question': 'What is recorded?', 'hostIds': [host['id']], 'model': ''})
+        self.assertEqual(status, 200)
+        self.assertTrue(answer['supported'])
+        self.assertEqual(answer['findingIds'], [host['id']])
+        self.assertEqual(self.workspace.llm.max_tokens, 32768)
+        self.assertEqual(self.calls, [])
 
     def test_autonomy_proposal_requires_exact_human_approval(self):
         class ProposalModel:
@@ -235,7 +294,11 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True})[0], 400)
         self.call('/api/scope', 'PUT', {'cidr': '10.0.4.80/32'})
         self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True, 'authorizedCidr': '10.0.4.81/32'})[0], 400)
-        status, result = self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True, 'authorizedCidr': '10.0.4.80/32'})
+        self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True,
+            'authorizedCidr': '10.0.4.80/32', 'expectedCommand': candidate['command'] + ' --extra'})[0], 400)
+        self.assertEqual(self.calls, [])
+        status, result = self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True,
+            'authorizedCidr': '10.0.4.80/32', 'expectedCommand': candidate['command']})
         self.assertEqual(status, 200)
         self.assertEqual(self.calls, [('nmap', ['-n', '-Pn', '-sT', '--top-ports', '100', '10.0.4.80'])])
         self.assertEqual(result['command'], candidate['command'])
@@ -629,8 +692,8 @@ class HttpTests(unittest.TestCase):
                 return {'model': 'fake', 'data': {'candidateId': None, 'reason': 'Enough evidence for now.', 'expectedEvidence': ''}}
         self.workspace.llm = StopModel()
         self.assertEqual(self.call('/api/autonomy')[1],
-                     {'runs': [], 'limits': {'maxChecks': 3, 'maxSeconds': 180,
-                                              'groupMaxChecks': 12, 'groupMaxSeconds': 600,
+                     {'runs': [], 'limits': {'maxChecks': None, 'maxSeconds': 600,
+                                              'groupMaxChecks': None, 'groupMaxSeconds': 900,
                                               'groupMaxHosts': 8, 'discoveryMaxSeconds': 600,
                                               'autoGroupHosts': 4}})
         output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\n'

@@ -17,6 +17,7 @@ from . import findings as F
 from .email_drafts import DraftStore, DraftConflict, discovered_contacts, export_eml, generate_draft
 from .analysis import analyze, fingerprint, scoped_document
 from .llm import LlmService, private_url
+from .llm_metrics import LlmMetrics
 from .workflow import COMMAND_CATALOG, is_local_ip, workflow
 from .web_contacts import website_url
 from .scope import normalize_scope, valid_cidr
@@ -24,8 +25,11 @@ from .discovery import contained_range, discovery_chunks, discovery_progress, dn
 from .sensitive import redact, sanitize_document
 from .outbound import require_target, require_web_origin
 from .autonomy import AutonomyController
+from .briefing import answer_question
 from .check_proposals import CheckProposals
 from .activity import ActivityTracker
+from .attention import review_flags
+from .vulnerabilities import match_versions
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,6 +72,8 @@ def invocation(candidate, doc):
         return 'ping', ['-c', '3', ip], 'ping'
     if kind == 'nmap-ports':
         return 'nmap', ['-n', '-Pn', '-sT', '--top-ports', '100', ip], 'nmap'
+    if kind == 'nmap-ports-extended' and not services:
+        return 'nmap', ['-n', '-Pn', '-sT', '--top-ports', '1000', '--max-retries', '1', '-oX', '-', ip], 'nmap'
     if kind == 'nmap-service':
         return 'nmap', ['-n', '-Pn', '-sT', '-sV', '--version-light', '-p', ','.join(str(s['port']) for s in sorted(services, key=lambda s: s['port'])), ip], 'nmap'
     if kind == 'nmap-os':
@@ -93,6 +99,10 @@ def invocation(candidate, doc):
     if kind in ('ssh-hostkey', 'smb-security', 'nfs-exports'):
         script = {'ssh-hostkey': 'ssh-hostkey', 'smb-security': 'smb2-security-mode', 'nfs-exports': 'nfs-showmount'}[kind]
         return 'nmap', ['-n', '-Pn', '-sT', '-p', str(services[0]['port']), '--script', script, '-oX', '-', ip], 'nmap'
+    if kind == 'ldap-rootdse' and len(services) == 1 and services[0].get('port') == 389 and services[0].get('protocol') == 'tcp' and services[0].get('state') == 'open':
+        return 'nmap', ['-n', '-Pn', '-sT', '-p', '389', '--script', 'ldap-rootdse', '-oX', '-', ip], 'nmap'
+    if kind == 'snmp-system' and len(services) == 1 and services[0].get('port') == 161 and services[0].get('protocol') == 'udp' and services[0].get('state') == 'open':
+        return 'snmpwalk', ['-v2c', '-c', 'public', '-t', '2', '-r', '0', '-On', ip, '1.3.6.1.2.1.1'], 'snmp-system'
     if kind == 'nuclei-git':
         service = services[0]
         scheme = 'https' if service.get('tunnel') == 'ssl' or 'https' in service.get('name', '').lower() or service['port'] in (443, 8443) else 'http'
@@ -193,6 +203,11 @@ def parse_check_result(candidate, tool, output):
         if not output.lstrip().startswith('HTTP/'):
             raise ValueError('No HTTP response headers found.')
         add('HTTP response headers', output)
+    elif tool == 'snmp-system':
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if not lines or len(lines) > 100 or any(not re.match(r'^\.1\.3\.6\.1\.2\.1\.1\.\d+(?:\.\d+)*\s*=', line) for line in lines):
+            raise ValueError('No bounded SNMP system subtree response from the selected host.')
+        add('SNMP system information', '\n'.join(lines), service_id)
     elif tool == 'smb-shares':
         if not re.search(r'\bSharename\b|\bDisk\b|\bIPC\b', output, re.I):
             raise ValueError('No SMB share listing found.')
@@ -249,6 +264,9 @@ class Workspace:
         self.analysis_file = Path(analysis_file or self.findings_file.with_name('analysis.json'))
         self.drafts = DraftStore(self.findings_file.with_name('email-drafts.json'))
         self.llm = llm or LlmService(os.getenv('LLM_BASE_URL', ''), os.getenv('LLM_MODEL', ''), os.getenv('LLM_API_KEY', ''), os.getenv('LLM_TIMEOUT_MS', '30000'), os.getenv('LLM_TRUSTED_HTTPS_HOST', ''))
+        self.llm_metrics = LlmMetrics(self.findings_file.with_name('llm-metrics.json'))
+        if isinstance(self.llm, LlmService):
+            self.llm.on_completion = self.llm_metrics.record
         self.runner = runner or run_command
         self.lock = threading.RLock()
         self.active_checks = set()
@@ -534,10 +552,17 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(200, scope)
                 if self.command == 'GET' and path == '/api/llm/health':
                     return self.send_json(200, workspace.llm.health())
+                if self.command == 'GET' and path == '/api/llm/metrics':
+                    return self.send_json(200, {'calls': workspace.llm_metrics.history()[:30]})
                 if self.command == 'GET' and path == '/api/activity':
                     return self.send_json(200, workspace.activity.snapshot())
                 if self.command == 'GET' and path == '/api/autonomy':
                     return self.send_json(200, {**workspace.autonomy.history(), 'limits': workspace.autonomy.limits()})
+                if self.command == 'POST' and path == '/api/briefing/ask':
+                    body = self.body(4000)
+                    if not isinstance(body, dict) or set(body) != {'question', 'hostIds', 'model'}:
+                        raise ValueError('Supply a question, approved hostIds, and optional model.')
+                    return self.send_json(200, answer_question(workspace, body['question'], body['hostIds'], body['model']))
                 if self.command == 'GET' and path == '/api/check-proposals':
                     return self.send_json(200, workspace.check_proposals.list())
                 if self.command == 'POST' and path == '/api/check-proposals':
@@ -695,10 +720,10 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     if hasattr(event, 'error'):
                         raise event.error
                     return self.send_json(200, event.result)
-                if self.command == 'GET' and path in ('/api/findings', '/api/workflow', '/api/commands'):
+                if self.command == 'GET' and path in ('/api/findings', '/api/workflow', '/api/commands', '/api/attention', '/api/vulnerabilities'):
                     with workspace.lock:
                         scope = workspace.resolve_scope(parse_qs(url.query).get('cidr', [None])[0]) if path == '/api/workflow' else None
-                        data = {'/api/findings': lambda: sanitize_document(workspace.load()), '/api/workflow': lambda: workflow(sanitize_document(workspace.load()), scope), '/api/commands': lambda: {'commands': COMMAND_CATALOG + workspace.check_proposals.catalog_entries()}}[path]()
+                        data = {'/api/findings': lambda: sanitize_document(workspace.load()), '/api/workflow': lambda: workflow(sanitize_document(workspace.load()), scope), '/api/commands': lambda: {'commands': COMMAND_CATALOG + workspace.check_proposals.catalog_entries()}, '/api/attention': lambda: {'flags': review_flags(sanitize_document(workspace.load()), workspace.load_scope())}, '/api/vulnerabilities': lambda: match_versions(sanitize_document(workspace.load()), workspace.load_scope())}[path]()
                     return self.send_json(200, data)
                 if self.command == 'GET' and path == '/api/export':
                     with workspace.lock:
@@ -988,12 +1013,13 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(200, sanitize_document(doc))
                 if self.command == 'POST' and path == '/api/checks/run':
                     body = self.body(4000)
-                    if not isinstance(body, dict) or set(body) - {'candidateId', 'authorized', 'authorizedCidr', 'authorizedScope', 'editedCommand'} or body.get('authorized') is not True or not isinstance(body.get('candidateId'), str) or ('editedCommand' in body and not isinstance(body['editedCommand'], str)) or 'authorizedCidr' in body and 'authorizedScope' in body:
+                    if not isinstance(body, dict) or set(body) - {'candidateId', 'authorized', 'authorizedCidr', 'authorizedScope', 'editedCommand', 'expectedCommand'} or body.get('authorized') is not True or not isinstance(body.get('candidateId'), str) or ('editedCommand' in body and not isinstance(body['editedCommand'], str)) or ('expectedCommand' in body and not isinstance(body['expectedCommand'], str)) or 'authorizedCidr' in body and 'authorizedScope' in body:
                         raise ValueError('Choose a current suggested check and confirm authorization.')
                     with workspace.lock:
                         scope = workspace.resolve_scope(body.get('authorizedScope', body.get('authorizedCidr')))
                     try:
-                        result = workspace.execute_candidate(body['candidateId'], scope, body.get('editedCommand'))
+                        result = workspace.execute_candidate(body['candidateId'], scope, body.get('editedCommand'),
+                                                             body.get('expectedCommand'))
                     except CheckBusy as exc:
                         return self.send_json(409, {'error': str(exc)})
                     return self.send_json(200, result)
@@ -1020,7 +1046,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     try:
                         ids = {x for c in available for x in c['findingIds']}
                         context = [{**f, 'detail': str(f.get('detail') or '')[:600]} for f in doc['findings'] if f['id'] in ids]
-                        response = workspace.llm.complete([dict(role='system', content=SYSTEM_PROMPT), dict(role='user', content=json.dumps(dict(findings=context, candidates=available, commands=COMMAND_CATALOG)))], max_tokens=800, model=body.get('model', ''))
+                        response = workspace.llm.complete([dict(role='system', content=SYSTEM_PROMPT), dict(role='user', content=json.dumps(dict(findings=context, candidates=available, commands=COMMAND_CATALOG)))], max_tokens=2000, model=body.get('model', ''))
                         selected = response['data']['suggestions']
                         if not isinstance(selected, list):
                             raise ValueError('Invalid response')

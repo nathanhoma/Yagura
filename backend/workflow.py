@@ -21,6 +21,7 @@ COMMAND_CATALOG = [
     dict(id='nmap-discovery', title='Discover hosts in a local range', command='nmap -n -sn -oX - {cidr}', when='Discover reachable hosts in an authorized local IPv4 range of at most 1,024 addresses.'),
     dict(id='ping', title='Check host reachability', command='ping -c 3 {host}', when='Check ICMP reachability of a recorded host.'),
     dict(id='nmap-ports', title='Check common TCP ports', command='nmap -n -Pn -sT --top-ports 100 {host}', when='Discover common services when a target has no recorded open TCP ports using a TCP connect scan.'),
+    dict(id='nmap-ports-extended', title='Check more TCP ports', command='nmap -n -Pn -sT --top-ports 1000 --max-retries 1 -oX - {host}', when='Extend a scoped host survey to the 1,000 most common TCP ports at a bounded retry count.'),
     dict(id='nmap-service', title='Identify service versions', command='nmap -n -Pn -sT -sV --version-light -p {ports} {host}', when='Identify versions on recorded open TCP ports using a TCP connect scan.'),
     dict(id='nmap-os', title='Guess host operating system', command='nmap -n -Pn -O {host}', when='Use Nmap OS fingerprinting on a recorded host with an open TCP port. May require elevated privileges.'),
     dict(id='http-headers', title='Inspect HTTP headers', command="curl -q --noproxy '*' --resolve {web_host}:{port}:{host} -I --max-time 5 {url}", when='Review headers for a recorded open web service, pinned to its recorded IP.'),
@@ -33,6 +34,8 @@ COMMAND_CATALOG = [
     dict(id='ssh-hostkey', title='Inspect SSH host key', command='nmap -n -Pn -sT -p {port} --script ssh-hostkey -oX - {host}', when='Read the SSH host key on a recorded open SSH service.'),
     dict(id='smb-security', title='Inspect SMB security mode', command='nmap -n -Pn -sT -p {port} --script smb2-security-mode -oX - {host}', when='Read SMB signing configuration on a recorded open SMB service.'),
     dict(id='nfs-exports', title='List NFS exports', command='nmap -n -Pn -sT -p {port} --script nfs-showmount -oX - {host}', when='List exports on a recorded open NFS service.'),
+    dict(id='snmp-system', title='Read public SNMP system information', command='snmpwalk -v2c -c public -t 2 -r 0 -On {host} 1.3.6.1.2.1.1', when='Make one bounded public-community query for system metadata on a recorded open 161/udp service.'),
+    dict(id='ldap-rootdse', title='Read LDAP Root DSE', command='nmap -n -Pn -sT -p {port} --script ldap-rootdse -oX - {host}', when='Read Root DSE metadata on a recorded open 389/tcp service without user enumeration.'),
     dict(id='nuclei-git', title='Check exposed Git metadata', command='nuclei -u {scheme}://{host}:{port}/ -t backend/templates/git-head-exposure.yaml -j -silent -rl 1 -c 1 -dr -ni', when='Run one bundled read-only Nuclei template on a recorded web service.'),
 ]
 
@@ -73,6 +76,7 @@ def workflow(doc, authorized_scope=None):
             if host.get('state') != 'up':
                 add('ping', host, [], f"Host {host['ip']} is recorded with reachability {host.get('state')}; verify ICMP response.")
             tcp = [s for s in opened if s.get('protocol') == 'tcp']
+            add('nmap-ports-extended', host, [], 'Check more TCP ports on this approved host with bounded retries.')
             if not tcp:
                 add('nmap-ports', host, [], f"Host {host['ip']} has no recorded open TCP services; discover common ports.")
             unknown = [s for s in tcp if not s.get('product') and not s.get('version')]
@@ -108,6 +112,11 @@ def workflow(doc, authorized_scope=None):
                 if port == 2049 or name == 'nfs':
                     if not any(o.get('title') == 'nfs-showmount' and o.get('serviceId') == s['id'] for o in observations):
                         add('nfs-exports', host, [s], f"List exports on recorded NFS service {port}/tcp.", port=port)
+                if port == 389 and not any(o.get('title') == 'ldap-rootdse' and o.get('serviceId') == s['id'] for o in observations):
+                    add('ldap-rootdse', host, [s], 'Read LDAP Root DSE metadata from the recorded 389/tcp service.', port=port)
+            for s in opened:
+                if s.get('protocol') == 'udp' and s.get('port') == 161 and not any(o.get('title') == 'SNMP system information' and o.get('serviceId') == s['id'] for o in observations):
+                    add('snmp-system', host, [s], 'Read the public SNMP system subtree on recorded open 161/udp.')
         stage = 'local context' if host.get('local') else 'recon' if not opened else 'service identification' if any(not s.get('product') and not s.get('version') for s in opened) else 'access triage'
         reason = ('' if eligible else 'Local interface address' if host.get('local') else
                   'Imported target outside local IPv4 suggestion scope' if not is_local_ip(host['ip']) else
