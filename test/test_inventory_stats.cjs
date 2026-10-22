@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {build}=require('../inventory-stats.js');
+const {build,flowDiagram}=require('../inventory-stats.js');
 
 test('inventory statistics count only eligible hosts and confirmed open services',()=>{
   const hosts=[
@@ -28,4 +28,21 @@ test('inventory statistics count only eligible hosts and confirmed open services
   assert.equal(stats.coverage[1].states[0],'recorded'); // closed is recorded, not open
   assert.equal(stats.leadRows.length,1);
   assert.equal(stats.productRows[0].label,'nginx 1.27');
+});
+
+test('unknown OS uses a readable service breakdown with clickable host filters',()=>{
+  const rows=[{hostId:'h1',domain:'dev.example.test',os:'Unknown',type:'Web'},{hostId:'h2',domain:'dev.example.test',os:'Unknown',type:'SSH'},{hostId:'h1',domain:'dev.example.test',os:'Unknown',type:'Web'}];
+  const diagram=flowDiagram(rows);
+  assert.equal(diagram.hasOs,false);
+  assert.match(diagram.markup,/Open services by domain and service type/);
+  assert.doesNotMatch(diagram.markup,/<svg|flow-link/);
+  assert.match(diagram.markup,/2 open services/);
+  assert.deepEqual([...diagram.edges[0].ids],['h1']);
+});
+
+test('known OS preserves the flow diagram and its edge filters',()=>{
+  const diagram=flowDiagram([{hostId:'h1',domain:'dev.example.test',os:'Linux',type:'Web'},{hostId:'h2',domain:'dev.example.test',os:'Unknown',type:'SSH'}]);
+  assert.equal(diagram.hasOs,true);
+  assert.match(diagram.markup,/<svg/);
+  assert.equal(diagram.edges.length,4);
 });

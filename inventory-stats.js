@@ -36,21 +36,43 @@ const InventoryStats=(()=>{
     if(!rows.length)return '<div class="empty">No recorded open services on approved hosts.</div>';
     const topDomains=groups(rows,row=>row.domain).slice(0,8).map(row=>row.label);
     const flow=rows.map(row=>({...row,domain:topDomains.includes(row.domain)?row.domain:'Other domains'}));
+    if(flow.every(row=>row.os==='Unknown')){
+      const domains=[...new Set(flow.map(row=>row.domain))].sort((a,b)=>flow.filter(row=>row.domain===b).length-flow.filter(row=>row.domain===a).length||a.localeCompare(b));
+      const types=['Web','SSH','SMB','Directory / DNS','Mail','Database','Other'];
+      const edges=[];
+      const markup=`<div class="flow-breakdown" role="list" aria-label="Open services by domain and service type">${domains.map(domain=>{
+        const domainRows=flow.filter(row=>row.domain===domain);
+        return `<div class="flow-breakdown-group" role="listitem"><div class="flow-breakdown-heading"><strong>${escape(domain)}</strong><span>${domainRows.length} open services</span></div><div class="flow-breakdown-types">${types.map(type=>{
+          const matches=domainRows.filter(row=>row.type===type);
+          if(!matches.length)return '';
+          const key=edges.length;edges.push({ids:setFor(matches),label:`${domain} → ${type}`});
+          return `<button class="flow-breakdown-type" type="button" data-flow-edge="${key}" aria-label="${escape(domain)}: ${escape(type)}, ${matches.length} open services"><span>${escape(type)}</span><i style="width:${100*matches.length/domainRows.length}%"></i><b>${matches.length}</b></button>`;
+        }).join('')}</div></div>`;
+      }).join('')}</div>`;
+      return {markup,edges,hasOs:false};
+    }
     const byColumn=[...Array(3)].map((_,i)=>[...new Set(flow.map(row=>[row.domain,row.os,row.type][i]))].map(label=>({label,count:flow.filter(row=>[row.domain,row.os,row.type][i]===label).length,ids:setFor(flow.filter(row=>[row.domain,row.os,row.type][i]===label))})).sort((a,b)=>b.count-a.count||a.label.localeCompare(b.label)));
     const total=flow.length,gap=12,height=390,scale=Math.min(...byColumn.map(nodes=>(height-gap*(nodes.length-1))/total));
     const x=[170,465,760],nodes=byColumn.map((column,i)=>{let y=12;return column.map(node=>{const result={...node,x:x[i],y,height:Math.max(1,node.count*scale),out:0,in:0};y+=result.height+gap;return result;});});
     const lookup=nodes.map(column=>new Map(column.map(node=>[node.label,node]))),edges=[],links=[];
     for(let step=0;step<2;step++){const map=new Map();for(const row of flow){const from=[row.domain,row.os,row.type][step],to=[row.domain,row.os,row.type][step+1],key=JSON.stringify([from,to]);if(!map.has(key))map.set(key,{from,to,step,rows:[]});map.get(key).rows.push(row);}links.push(...[...map.values()].sort((a,b)=>a.from.localeCompare(b.from)||a.to.localeCompare(b.to)));}
-    for(const link of links){const a=lookup[link.step].get(link.from),b=lookup[link.step+1].get(link.to),width=link.rows.length*scale,y1=a.y+a.out+width/2,y2=b.y+b.in+width/2;a.out+=width;b.in+=width;const ids=setFor(link.rows),key=edges.length;edges.push({ids,label:`${link.from} → ${link.to}`});link.path=`<path class="flow-link" d="M ${a.x+12} ${y1} C ${a.x+140} ${y1}, ${b.x-128} ${y2}, ${b.x} ${y2}" stroke-width="${Math.max(1,width)}" data-flow-edge="${key}" tabindex="0" role="button" aria-label="${escape(link.from)} to ${escape(link.to)}: ${link.rows.length} open services"><title>${escape(link.from)} → ${escape(link.to)} · ${link.rows.length} services</title></path>`;}
+    for(let step=0;step<2;step++){
+      const current=links.filter(link=>link.step===step),sourceOrder=new Map(nodes[step].map((node,i)=>[node.label,i])),targetOrder=new Map(nodes[step+1].map((node,i)=>[node.label,i]));
+      for(const link of [...current].sort((a,b)=>sourceOrder.get(a.from)-sourceOrder.get(b.from)||targetOrder.get(a.to)-targetOrder.get(b.to))) {const node=lookup[step].get(link.from);link.y1=node.y+node.out+link.rows.length*scale/2;node.out+=link.rows.length*scale;}
+      for(const link of [...current].sort((a,b)=>targetOrder.get(a.to)-targetOrder.get(b.to)||sourceOrder.get(a.from)-sourceOrder.get(b.from))) {const node=lookup[step+1].get(link.to);link.y2=node.y+node.in+link.rows.length*scale/2;node.in+=link.rows.length*scale;}
+    }
+    for(const link of links){const a=lookup[link.step].get(link.from),b=lookup[link.step+1].get(link.to),width=link.rows.length*scale,ids=setFor(link.rows),key=edges.length;edges.push({ids,label:`${link.from} → ${link.to}`});link.path=`<path class="flow-link" d="M ${a.x+12} ${link.y1} C ${a.x+140} ${link.y1}, ${b.x-128} ${link.y2}, ${b.x} ${link.y2}" stroke-width="${Math.max(1,width)}" data-flow-edge="${key}" tabindex="0" role="button" aria-label="${escape(link.from)} to ${escape(link.to)}: ${link.rows.length} open services"><title>${escape(link.from)} → ${escape(link.to)} · ${link.rows.length} services</title></path>`;}
     const nodeMarkup=nodes.flatMap((column,index)=>column.map(node=>{const label=index===0?`<text x="${node.x-7}" y="${node.y+Math.min(13,node.height/2+4)}" text-anchor="end">${escape(node.label)}</text>`:`<text x="${node.x+18}" y="${node.y+Math.min(13,node.height/2+4)}">${escape(node.label)}</text>`;return `<rect class="flow-node" x="${node.x}" y="${node.y}" width="12" height="${node.height}"><title>${escape(node.label)} · ${node.count} open services</title></rect>${label}`;})).join('');
     const markup=`<svg viewBox="0 0 980 415" role="img" aria-label="Open service flow from domain group through estimated operating system to service type">${links.map(link=>link.path).join('')}${nodeMarkup}</svg>`;
-    return {markup,edges};
+    return {markup,edges,hasOs:true};
   }
   function render(){if(!source)return;const data=source.data,all=new Set(data.hosts.map(host=>host.id)),active=selected?intersection(selected,all):all;const visible=rows=>rows.filter(row=>active.has(row.hostId));
     document.querySelector('#inventoryCount').textContent=`${data.hosts.length} approved hosts · ${data.services.length} open services`;
     document.querySelector('#inventorySelection').textContent=selected?`${selectionLabel} · ${active.size} matching hosts`:`All ${all.size} approved hosts`;
     const clear=document.querySelector('#inventoryClear');clear.hidden=!selected;clear.onclick=()=>{selected=null;selectionLabel='';render();};
     const diagram=flowDiagram(visible(data.flow)),flowBox=document.querySelector('#inventoryFlow');flowBox.innerHTML=typeof diagram==='string'?diagram:diagram.markup;
+    document.querySelector('#inventoryFlowTitle').textContent=typeof diagram==='string'||!diagram.hasOs?'Open services by domain':'Domains → estimated OS → services';
+    document.querySelector('#inventoryFlowCaption').textContent=typeof diagram==='string'||!diagram.hasOs?'Service mix from recorded open ports. OS estimates are unavailable for these hosts.':'Connections count recorded open services. OS is an Nmap estimate; missing guesses appear as Unknown.';
     if(typeof diagram!=='string')flowBox.querySelectorAll('[data-flow-edge]').forEach(path=>{const activate=()=>{const edge=diagram.edges[Number(path.dataset.flowEdge)];choose(edge.ids,edge.label);};path.onclick=activate;path.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();activate();}};});
     const portRows=groups(visible(data.services).filter(row=>row.protocol===portProtocol),row=>`${row.port}/${row.protocol}`),portBox=document.querySelector('#inventoryPorts');
     document.querySelector('#inventoryPortCaption').innerHTML=`${data.portsScanned.size} / ${data.hosts.length} approved hosts have saved port-check evidence. Unknown is not closed. <button class="ref" id="inventoryProtocol" type="button">${portProtocol.toUpperCase()} ▾</button>`;
@@ -65,6 +87,6 @@ const InventoryStats=(()=>{
     const hostBox=document.querySelector('#inventoryHosts');hostBox.innerHTML=data.hosts.filter(host=>active.has(host.id)).slice(0,40).map(host=>`<button class="btn" type="button" data-inventory-host="${escape(host.id)}">${escape(host.name||host.ip)}</button>`).join('')+(active.size>40?`<span class="status">+${active.size-40} more hosts</span>`:'')||'<div class="empty">No matching hosts.</div>';hostBox.querySelectorAll('[data-inventory-host]').forEach(button=>button.onclick=()=>source.openHost(button.dataset.inventoryHost));
   }
   function update(findings,evidence,map,flags,scope,openHost){source={data:build(findings,evidence,map,flags,scope),openHost};render();}
-  return {build,update};
+  return {build,update,flowDiagram};
 })();
 if(typeof module!=='undefined')module.exports=InventoryStats;
