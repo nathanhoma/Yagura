@@ -32,6 +32,31 @@ class AddedChecksTests(unittest.TestCase):
         self.assertTrue(any(f['title'] == 'HTTP response headers' and f['serviceId'] == headers['serviceIds'][0] for f in self.doc['findings']))
         self.assertEqual(self.doc['evidence'][-1]['output'], 'HTTP/1.1 200 OK\nServer: lab\n')
 
+    def test_tls_certificate_check_is_scoped_and_not_repeated_after_import(self):
+        xml = ('<nmaprun><host><status state="up"/><address addrtype="ipv4" addr="192.168.56.10"/>'
+               '<ports><port protocol="tcp" portid="443"><state state="open"/>'
+               '<service name="https" tunnel="ssl"/></port></ports></host></nmaprun>')
+        F.merge_parsed(self.doc, F.parse_import({'tool': 'nmap', 'output': xml}))
+        self.assertFalse(any(c['catalogId'] == 'tls-certificate' for c in workflow(self.doc, '192.168.56.11/32')['candidates']))
+        candidate = next(c for c in workflow(self.doc, '192.168.56.10/32')['candidates']
+                         if c['catalogId'] == 'tls-certificate')
+        self.assertEqual(invocation(candidate, self.doc),
+                         ('nmap', ['-n', '-Pn', '-sT', '-p', '443', '--script', 'ssl-cert', '-oX', '-', '192.168.56.10'], 'nmap'))
+        result = ('<nmaprun><host><status state="up"/><address addrtype="ipv4" addr="192.168.56.10"/>'
+                  '<ports><port protocol="tcp" portid="443"><state state="open"/>'
+                  '<service name="https" tunnel="ssl"/><script id="ssl-cert" '
+                  'output="Subject: commonName=www.lab.test; Issuer: Test CA"/>'
+                  '</port></ports></host></nmaprun>')
+        F.merge_parsed(self.doc, parse_check_result(candidate, 'nmap', result))
+        self.assertTrue(any(f['title'] == 'ssl-cert' and f.get('serviceId') == candidate['serviceIds'][0]
+                            for f in self.doc['findings']))
+        self.assertFalse(any(c['catalogId'] == 'tls-certificate' and c['serviceIds'] == candidate['serviceIds']
+                             for c in workflow(self.doc, '192.168.56.10/32')['candidates']))
+        service = next(f for f in self.doc['findings'] if f['id'] == candidate['serviceIds'][0])
+        service['state'] = 'closed'
+        with self.assertRaises(ValueError):
+            invocation(candidate, self.doc)
+
     def test_cheatsheet_enumeration_checks_are_scoped_and_fixed(self):
         extra = F.parse_import({'tool': 'nmap', 'output': (
             'Nmap scan report for www.lab.test (192.168.56.10)\nHost is up.\n'

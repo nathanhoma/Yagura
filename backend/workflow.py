@@ -15,6 +15,13 @@ def is_local_ip(value):
         return False
 
 
+def is_tls_service(service):
+    name = str(service.get('name') or '').lower()
+    return (service.get('state') == 'open' and service.get('protocol') == 'tcp' and
+            (service.get('tunnel') == 'ssl' or name in ('https', 'imaps', 'pop3s', 'smtps', 'ldaps', 'ftps')
+             or service.get('port') in (443, 465, 636, 990, 993, 995, 8443)))
+
+
 COMMAND_CATALOG = [
     dict(id='interfaces', title='Read local IPv4 interfaces', command='ip -j -4 addr', when='List local interface addresses and scan ranges.'),
     dict(id='neighbors', title='Refresh local neighbors', command='ip -j -4 neigh', when='Refresh neighbor entries seen on the local link.'),
@@ -32,6 +39,7 @@ COMMAND_CATALOG = [
     dict(id='dns-ptr', title='Resolve host PTR name', command='getent hosts {host}', when='Record the locally resolved reverse DNS name for a scoped host.'),
     dict(id='web-inventory', title='Inventory web pages and routes', command='python3 -m backend.web_inventory --url {url} --ip {host}', when='Record HTTP status, title, server, and up to 50 same-origin links from five pages.'),
     dict(id='ssh-hostkey', title='Inspect SSH host key', command='nmap -n -Pn -sT -p {port} --script ssh-hostkey -oX - {host}', when='Read the SSH host key on a recorded open SSH service.'),
+    dict(id='tls-certificate', title='Inspect TLS certificate', command='nmap -n -Pn -sT -p {port} --script ssl-cert -oX - {host}', when='Read the certificate on a recorded open TLS service.'),
     dict(id='smb-security', title='Inspect SMB security mode', command='nmap -n -Pn -sT -p {port} --script smb2-security-mode -oX - {host}', when='Read SMB signing configuration on a recorded open SMB service.'),
     dict(id='nfs-exports', title='List NFS exports', command='nmap -n -Pn -sT -p {port} --script nfs-showmount -oX - {host}', when='List exports on a recorded open NFS service.'),
     dict(id='snmp-system', title='Read public SNMP system information', command='snmpwalk -v2c -c public -t 2 -r 0 -On {host} 1.3.6.1.2.1.1', when='Make one bounded public-community query for system metadata on a recorded open 161/udp service.'),
@@ -109,6 +117,9 @@ def workflow(doc, authorized_scope=None):
                 if port == 22 or name == 'ssh':
                     if not any(o.get('title') == 'ssh-hostkey' and o.get('serviceId') == s['id'] for o in observations):
                         add('ssh-hostkey', host, [s], f"Read the host key on recorded SSH service {port}/tcp.", port=port)
+                if is_tls_service(s):
+                    if not any(o.get('title') == 'ssl-cert' and o.get('serviceId') == s['id'] for o in observations):
+                        add('tls-certificate', host, [s], f"Read the certificate on recorded TLS service {port}/tcp.", port=port)
                 if port == 2049 or name == 'nfs':
                     if not any(o.get('title') == 'nfs-showmount' and o.get('serviceId') == s['id'] for o in observations):
                         add('nfs-exports', host, [s], f"List exports on recorded NFS service {port}/tcp.", port=port)
