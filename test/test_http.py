@@ -624,8 +624,8 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True, 'authorizedCidr': '192.168.56.11/32'})[0], 400)
         status, result = self.call('/api/checks/run', 'POST', {'candidateId': candidate['id'], 'authorized': True, 'authorizedCidr': '192.168.56.10/32'})
         self.assertEqual(status, 200)
-        self.assertEqual(result['command'], 'nmap -n -Pn -O 192.168.56.10')
-        self.assertEqual(self.calls, [('nmap', ['-n', '-Pn', '-O', '192.168.56.10'])])
+        self.assertEqual(result['command'], 'sudo -n nmap -n -Pn -O --top-ports 100 --max-retries 1 -oX - 192.168.56.10')
+        self.assertEqual(self.calls, [('sudo', ['-n', 'nmap', '-n', '-Pn', '-O', '--top-ports', '100', '--max-retries', '1', '-oX', '-', '192.168.56.10'])])
 
 
     def test_website_contacts_check_saves_linked_findings_and_sources(self):

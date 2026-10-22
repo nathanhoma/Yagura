@@ -4,6 +4,7 @@ import unittest
 
 from backend import findings as F
 from backend.analysis import analyze, build_context, validate_result
+from backend.autonomy import SAFE_KINDS
 from backend.llm import LlmService, LlmError, private_url
 from backend.server import Workspace, valid_cidr
 from backend.workflow import workflow
@@ -79,7 +80,8 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(workflow(doc)['candidates'], [])
         candidates = workflow(doc, '192.168.56.10/32')['candidates']
         self.assertTrue(any(c['catalogId'] == 'http-headers' for c in candidates))
-        self.assertIn('nmap -n -Pn -O 192.168.56.10', [c['command'] for c in candidates])
+        self.assertIn('sudo -n nmap -n -Pn -O --top-ports 100 --max-retries 1 -oX - 192.168.56.10', [c['command'] for c in candidates])
+        self.assertIn('nmap-os', SAFE_KINDS)
         self.assertTrue(all('{' not in c['command'] for c in candidates))
         self.assertEqual(workflow(doc, '192.168.56.11/32')['candidates'], [])
         result = analyze(doc, {}, FakeLlm())
@@ -93,6 +95,14 @@ class BackendTests(unittest.TestCase):
         context = build_context(doc)
         with self.assertRaises(Exception):
             validate_result({'assessments': [{'findingIds': ['invented'], 'evidenceIds': ['invented'], 'interpretation': 'bad', 'uncertainties': []}], 'suggestions': []}, context)
+
+    def test_os_scan_xml_saves_an_os_guess(self):
+        xml = ('<nmaprun><host><status state="up"/><address addr="192.168.56.10" addrtype="ipv4"/>'
+               '<ports><port protocol="tcp" portid="80"><state state="open"/></port></ports>'
+               '<os><osmatch name="Linux 5.x" accuracy="92"/></os></host></nmaprun>')
+        parsed = F.parse_import({'tool': 'nmap', 'command': 'sudo -n nmap -n -Pn -O --top-ports 100 --max-retries 1 -oX - 192.168.56.10', 'output': xml})
+        self.assertTrue(any(f.get('title') == 'Nmap OS guess' and f.get('detail') == 'Linux 5.x (92% accuracy)'
+                            for f in parsed['findings']))
 
     def test_storage_and_scope(self):
         with tempfile.TemporaryDirectory() as directory:

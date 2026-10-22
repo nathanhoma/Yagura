@@ -78,7 +78,7 @@ def invocation(candidate, doc):
     if kind == 'nmap-service':
         return 'nmap', ['-n', '-Pn', '-sT', '-sV', '--version-light', '-p', ','.join(str(s['port']) for s in sorted(services, key=lambda s: s['port'])), ip], 'nmap'
     if kind == 'nmap-os':
-        return 'nmap', ['-n', '-Pn', '-O', ip], 'nmap'
+        return 'sudo', ['-n', 'nmap', '-n', '-Pn', '-O', '--top-ports', '100', '--max-retries', '1', '-oX', '-', ip], 'nmap'
     if kind == 'http-headers':
         s = services[0]
         url = website_url(host, s)
