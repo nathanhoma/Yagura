@@ -18,6 +18,7 @@ from .reviewed_check import validate as validate_reviewed_check
 from .scope import ip_allowed
 from .sensitive import redact, sanitize_document
 from .workflow import workflow
+from .vulnerabilities import match_versions
 
 
 MAX_SECONDS = 600
@@ -183,7 +184,7 @@ class AutonomyController:
             ws.llm.assert_configuration()
             if model:
                 ws.llm.select_model(requested=model)
-            run = dict(id=uid('ai-run'), mode='group', hostIds=host_ids, surveyedHostIds=[],
+            run = dict(id=uid('ai-run'), mode='group', phase='survey', hostIds=host_ids, surveyedHostIds=[],
                        hostSnapshots={hid: {'ip': hosts[hid]['ip'], 'name': hosts[hid].get('name')} for hid in host_ids},
                        hostId=host_ids[0], hostName=f'{len(host_ids)} selected hosts', hostIp='',
                        model=model or 'server default', scope=scope, status='running', startedAt=now(),
@@ -214,7 +215,7 @@ class AutonomyController:
             ws.llm.assert_configuration()
             if model:
                 ws.llm.select_model(requested=model)
-            run = dict(id=uid('ai-run'), mode='discover-group', hostIds=[], surveyedHostIds=[],
+            run = dict(id=uid('ai-run'), mode='discover-group', phase='survey', hostIds=[], surveyedHostIds=[],
                        hostSnapshots={}, hostId='', hostName='Saved target scope', hostIp='',
                        model=model or 'server default', scope=scope, resolvers=resolvers,
                        status='running', startedAt=now(), endedAt=None, maxChecks=self.group_max_checks,
@@ -274,7 +275,7 @@ class AutonomyController:
                 raise ValueError('Approved host was removed.')
             require_target(host, scope)
             run = next(r for r in self._load()['runs'] if r['id'] == run_id)
-            selected = scoped_document(doc, None, scope, run['hostIds']) if run.get('mode') in ('group', 'discover-group') else scoped_document(doc, host_id, scope)
+            selected = scoped_document(doc, None, scope, run['hostIds']) if run.get('mode') in ('group', 'discover-group') and run.get('phase') != 'deep-dive' else scoped_document(doc, host_id, scope)
             context = build_context(selected, scope)
             context['candidates'] = []
         response = ws.llm.complete([{'role': 'system', 'content': PROPOSAL_PROMPT},
@@ -383,7 +384,7 @@ class AutonomyController:
             model = run['model'] if run['model'] != 'server default' else ''
             self.activity_ids[run_id] = self.workspace.activity.begin('ai-run', 'AI-led investigation',
                 target=host.get('name') or host['ip'], detail='Running the human-approved command.')
-            group = run.get('mode') in ('group', 'discover-group')
+            group = run.get('mode') in ('group', 'discover-group') and run.get('phase') != 'deep-dive'
             target = self._group_worker if group else self._worker
             args = (run_id, scope, model, self.stop_event, expected_command) if group else (run_id, run['hostId'], scope, model, self.stop_event, expected_command)
             self.thread = threading.Thread(target=target,
@@ -487,6 +488,56 @@ class AutonomyController:
                           c['catalogId'] in SAFE_KINDS and c['id'] not in tried]
             candidates = fresh_candidates(doc, candidates)
             return run, doc, hosts, candidates
+
+    def _select_deep_dive(self, run_id, scope):
+        """Choose one surveyed host with imported evidence and a fresh catalog check."""
+        run, doc, hosts, candidates = self._group_state(run_id, scope)
+        imported = {e.get('hostId') for e in run['events'] if e.get('type') == 'check'
+                    and e.get('outcome') == 'completed' and e.get('imported')}
+        versions = match_versions(doc, scope)['matches']
+        rows = []
+        for hid in run['hostIds']:
+            available = [c for c in candidates if c['hostId'] == hid]
+            if hid not in imported or not available:
+                continue
+            ai_flags = [f for f in run.get('flags', []) if f['hostId'] == hid]
+            version_leads = [m for m in versions if m['hostId'] == hid]
+            rule_leads = review_flags(doc, scope, hid)
+            services = [f for f in doc['findings'] if f.get('kind') == 'service'
+                        and f.get('hostId') == hid and f.get('state') == 'open']
+            signals = [name for name, found in (('AI review flag', ai_flags),
+                       ('version advisory match', version_leads), ('rule lead', rule_leads),
+                       ('open service', services)) if found]
+            sources = ai_flags + version_leads + rule_leads
+            rows.append(dict(hostId=hid, score=(bool(ai_flags), bool(version_leads),
+                bool(rule_leads), len(services), len(available)), signals=signals,
+                findingIds=sorted({fid for item in sources for fid in item.get('findingIds', [])})[:12],
+                evidenceIds=sorted({eid for item in sources for eid in item.get('evidenceIds', [])})[:12],
+                available=len(available)))
+        if not rows:
+            return None
+        chosen = max(rows, key=lambda row: row['score'])
+        hid = chosen['hostId']
+        reason = ('Selected from surveyed hosts with imported evidence and remaining catalog checks: '
+                  + (', '.join(chosen['signals']) or 'remaining coverage')
+                  + f"; {chosen['available']} check(s) available. Leads require verification.")
+        # Recheck the approved snapshot immediately before moving to the one-host loop.
+        with self.workspace.lock:
+            if self.workspace.load_scope() != scope:
+                raise ValueError('Authorized scope changed.')
+            current = self.workspace.load()
+            host = next((h for h in current['findings'] if h.get('kind') == 'host' and h['id'] == hid), None)
+            if not host or {'ip': host['ip'], 'name': host.get('name')} != run['hostSnapshots'][hid]:
+                raise ValueError('Deep-dive host changed or was removed.')
+            require_target(host, scope)
+            data = self._load()
+            saved = next(r for r in data['runs'] if r['id'] == run_id)
+            saved.update(phase='deep-dive', hostId=hid, deepDiveHostId=hid,
+                         deepDiveReason=reason)
+            saved['events'].append(dict(type='deep-dive-selection', at=now(), hostId=hid,
+                reason=reason, findingIds=chosen['findingIds'], evidenceIds=chosen['evidenceIds']))
+            self._save(data)
+        return hid
 
     def _review_check_result(self, run_id, host_id, scope, model, result):
         """Judge only the newly imported evidence for this host, then save an audit event."""
@@ -800,7 +851,11 @@ class AutonomyController:
                     return self._finish(run_id, 'stopped', 'Group time limit reached.')
                 unvisited = [hid for hid in run['hostIds'] if hid not in run['surveyedHostIds']]
                 if not unvisited:
-                    return self._finish(run_id, 'completed', 'Each selected host was surveyed; review any check-level flags.')
+                    hid = self._select_deep_dive(run_id, scope)
+                    if hid is None:
+                        return self._finish(run_id, 'completed', 'Survey complete; no host has both imported evidence and a fresh catalog check.')
+                    ws.activity.update(self.activity_ids[run_id], detail='Survey complete; deep-diving into a selected approved host.')
+                    return self._worker(run_id, hid, scope, model, stop_event)
                 hid = unvisited[0]
                 options = [c for c in candidates if c['hostId'] == hid]
                 priority = ('nmap-service', 'nmap-ports', 'web-inventory', 'http-headers',
@@ -915,7 +970,7 @@ class AutonomyController:
                                               timeout=max(1, min(45, int(remaining))))
                 result['ruleFlagsBefore'] = rule_flags_before
                 tried.add(candidate_id)
-                self._event(run_id, dict(type='check', step=step + 1, candidateId=candidate_id,
+                self._event(run_id, dict(type='check', step=step + 1, hostId=host_id, candidateId=candidate_id,
                                          outcome=result['outcome'], imported=result['imported'],
                                          evidenceIds=result['evidenceIds'], warning=redact(result['warning'])[:300],
                                          summary=redact(result['output'] or result['stderr'])[:280]))
