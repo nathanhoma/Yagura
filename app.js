@@ -333,8 +333,51 @@ function openAutonomyNewRun(mode=autonomyMode){setAutonomyMode(mode);const dialo
 $('#autonomyNewRunOpen').onclick=()=>openAutonomyNewRun();
 $('#autonomyNewRunClose').onclick=()=>$('#autonomyNewRun').close();
 $('#autonomyNewRun').onclose=()=>{$('#autonomyState').textContent='';};
-function renderAutonomyGroupHosts(){const hosts=map.targets.filter(t=>t.eligible).map(t=>t.host),query=$('#autonomyGroupSearch').value.trim().toLowerCase(),visible=hosts.filter(h=>recordLabel(h).toLowerCase().includes(query)),box=$('#autonomyGroupList');box.innerHTML=visible.length?visible.map(h=>`<label class="check"><input type="checkbox" data-autonomy-host="${esc(h.id)}" ${autonomySelectedHosts.has(h.id)?'checked':''}><span>${esc(recordLabel(h))}</span></label>`).join(''):'<div class="empty">No approved host matches this search.</div>';const chosen=hosts.filter(h=>autonomySelectedHosts.has(h.id));$('#autonomyGroupSelected').innerHTML=`${chosen.length} of 8 hosts selected`+(chosen.length?'<div>'+chosen.map(h=>`<span>${esc(recordLabel(h))}</span>`).join('')+'</div>':'');}
+function autonomyHostGroup(host){
+  const name=String(host.name||'').toLowerCase();
+  const suffix=savedScope.domains.map(domain=>domain.toLowerCase()).find(domain=>name.endsWith('.'+domain));
+  if(!suffix)return 'Other / IP only';
+  const prefix=name.slice(0,-suffix.length-1).split('.');
+  return prefix.length>1?`${prefix[prefix.length-1]}.${suffix}`:suffix;
+}
+function autonomyHostChoices(){
+  const hosts=map.targets.filter(t=>t.eligible).map(t=>t.host);
+  const services=new Map(),flags=new Map();
+  for(const finding of findings)if(finding.kind==='service'&&finding.hostId)services.set(finding.hostId,[...(services.get(finding.hostId)||[]),finding]);
+  for(const flag of attentionFlags)if(flag.hostId)flags.set(flag.hostId,[...(flags.get(flag.hostId)||[]),flag]);
+  return hosts.map(host=>({host,services:services.get(host.id)||[],flags:flags.get(host.id)||[],group:autonomyHostGroup(host)}));
+}
+function renderAutonomyGroupHosts(){
+  const choices=autonomyHostChoices(),search=$('#autonomyGroupSearch').value.trim().toLowerCase(),filter=$('#autonomyGroupFilter').value,segmentSelect=$('#autonomyGroupSegment'),segment=segmentSelect.value;
+  const groups=[...new Set(choices.map(choice=>choice.group))].sort();
+  segmentSelect.innerHTML='<option value="">All groups</option>'+groups.map(group=>`<option value="${esc(group)}">${esc(group)}</option>`).join('');
+  segmentSelect.value=groups.includes(segment)?segment:'';
+  const matches=choices.filter(choice=>{
+    if(segmentSelect.value&&choice.group!==segmentSelect.value)return false;
+    if(filter==='flags'&&!choice.flags.length||filter==='services'&&!choice.services.length||filter==='unscanned'&&choice.services.length)return false;
+    return !search||[recordLabel(choice.host),choice.group,...choice.services.map(service=>`${service.port}/${service.protocol} ${service.name||''} ${service.product||''}`),...choice.flags.map(flag=>`${flag.title||''} ${flag.reason||''}`)].some(value=>String(value).toLowerCase().includes(search));
+  }).sort((a,b)=>b.flags.length-a.flags.length||b.services.length-a.services.length||recordLabel(a.host).localeCompare(recordLabel(b.host),undefined,{numeric:true}));
+  const visible=filter==='leads'&&!search&&!segmentSelect.value?matches.slice(0,8):matches;
+  const box=$('#autonomyGroupList');
+  box.innerHTML=visible.length?visible.map(({host,services,flags})=>{
+    const lead=flags.length?(flags[0].reason||flags[0].title||'Review flag').slice(0,150):services.length?services.slice(0,3).map(service=>`${service.port}/${service.protocol} ${service.name||service.product||''}`).join(' · '):'No service evidence yet';
+    const meta=`${flags.length} flag${flags.length===1?'':'s'} · ${services.length} service${services.length===1?'':'s'}`;
+    return `<label class="autonomy-host-row"><input type="checkbox" data-autonomy-host="${esc(host.id)}" ${autonomySelectedHosts.has(host.id)?'checked':''}><span><strong>${esc(recordLabel(host))}</strong><small>${esc(meta)} · ${esc(autonomyHostGroup(host))}</small><small class="${flags.length?'host-lead':''}">${esc(lead)}</small></span></label>`;
+  }).join(''):'<div class="empty">No approved host matches these filters.</div>';
+  $('#autonomyGroupCount').textContent=filter==='leads'&&!search&&!segmentSelect.value?`Showing ${visible.length} evidence leads of ${choices.length} approved hosts`:`${visible.length} of ${choices.length} approved hosts shown`;
+  const available=visible.filter(choice=>!autonomySelectedHosts.has(choice.host.id));
+  $('#autonomyGroupSelectVisible').disabled=!available.length||available.length>8-autonomySelectedHosts.size;
+  $('#autonomyGroupSelectVisible').title=available.length>8-autonomySelectedHosts.size?'Narrow the list to fit the eight-host limit.':'';
+  $('#autonomyGroupClear').disabled=!autonomySelectedHosts.size;
+  const chosen=choices.filter(choice=>autonomySelectedHosts.has(choice.host.id));
+  $('#autonomyGroupSelected').innerHTML=`${chosen.length} of 8 hosts selected`+(chosen.length?'<div>'+chosen.map(({host})=>`<button type="button" data-remove-autonomy-host="${esc(host.id)}" aria-label="Remove ${esc(recordLabel(host))}">${esc(recordLabel(host))} ×</button>`).join('')+'</div>':'');
+}
 $('#autonomyGroupSearch').oninput=renderAutonomyGroupHosts;
+$('#autonomyGroupFilter').onchange=renderAutonomyGroupHosts;
+$('#autonomyGroupSegment').onchange=renderAutonomyGroupHosts;
+$('#autonomyGroupSelectVisible').onclick=()=>{for(const input of $('#autonomyGroupList').querySelectorAll('[data-autonomy-host]:not(:checked)'))autonomySelectedHosts.add(input.dataset.autonomyHost);renderAutonomyGroupHosts();};
+$('#autonomyGroupClear').onclick=()=>{autonomySelectedHosts.clear();renderAutonomyGroupHosts();};
+$('#autonomyGroupSelected').onclick=event=>{const button=event.target.closest('[data-remove-autonomy-host]');if(button){autonomySelectedHosts.delete(button.dataset.removeAutonomyHost);renderAutonomyGroupHosts();}};
 $('#autonomyGroupList').onchange=event=>{const input=event.target.closest('[data-autonomy-host]');if(!input)return;if(input.checked&&autonomySelectedHosts.size>=8){input.checked=false;$('#autonomyState').textContent='Choose at most eight hosts for one group run.';return;}if(input.checked)autonomySelectedHosts.add(input.dataset.autonomyHost);else autonomySelectedHosts.delete(input.dataset.autonomyHost);renderAutonomyGroupHosts();};
 function requireAutonomyModel(){if(autonomyModelRequired&&!$('#autonomyModel').value){$('#autonomyModelState').textContent='Choose one of the available models before starting.';$('#autonomyModel').focus();return false;}return true;}
 $('#autonomyModel').onchange=()=>{if($('#autonomyModel').value)$('#autonomyModelState').textContent='';};
