@@ -274,6 +274,43 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(saved['flags'][0]['hostId'], self.host['id'])
         self.assertEqual(saved['flags'][0]['evidenceIds'], [self.host['evidenceIds'][0]])
 
+    def test_rule_lead_delta_reaches_check_review_only_for_new_evidence(self):
+        class CaptureReview(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                self.prompts.append(json.loads(messages[1]['content']))
+                return {'model': 'fake', 'data': {'flag': None}}
+
+        self.ws.llm = CaptureReview()
+        self.ws.autonomy._save({'runs': [dict(id='review-run', status='running', events=[], flags=[])]})
+        output = ('<nmaprun args="nmap -sV 100.96.1.70"><host><status state="up"/>'
+                  '<address addr="100.96.1.70" addrtype="ipv4"/><ports><port protocol="tcp" portid="80">'
+                  '<state state="open"/><service name="http" product="nginx" version="1.2.3"/>'
+                  '</port></ports></host></nmaprun>')
+        before = self.ws.autonomy._rule_flags(self.host['id'], self.scope)
+        parsed = F.parse_import({'tool': 'nmap', 'output': output})
+        doc = self.ws.load()
+        F.merge_parsed(doc, parsed)
+        self.ws.save(doc)
+        evidence_id = parsed['evidence'][0]['id']
+        self.ws.autonomy._review_check_result('review-run', self.host['id'], self.scope, '',
+            dict(outcome='completed', imported=True, evidenceIds=[evidence_id], ruleFlagsBefore=before))
+        changes = self.ws.llm.prompts[-1]['ruleChanges']
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]['change'], 'new')
+        self.assertEqual(changes[0]['kind'], 'software')
+        self.assertEqual(changes[0]['evidenceIds'], [evidence_id])
+        self.assertEqual(self.ws.autonomy.history()['runs'][0]['events'][-1]['ruleChanges'], changes)
+
+        before = self.ws.autonomy._rule_flags(self.host['id'], self.scope)
+        parsed = F.parse_import({'tool': 'nmap', 'output': output})
+        doc = self.ws.load()
+        F.merge_parsed(doc, parsed)
+        self.ws.save(doc)
+        self.ws.autonomy._review_check_result('review-run', self.host['id'], self.scope, '',
+            dict(outcome='completed', imported=True, evidenceIds=[parsed['evidence'][0]['id']],
+                 ruleFlagsBefore=before))
+        self.assertEqual(self.ws.llm.prompts[-1]['ruleChanges'], [])
+
     def test_scope_discovery_selects_ip_only_hosts_and_starts_group_loop(self):
         scope = self.ws.save_scope({'cidrs': ['100.96.1.0/28'], 'domains': []})
         def runner(program, args, timeout):

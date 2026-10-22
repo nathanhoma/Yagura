@@ -8,13 +8,14 @@ import re
 from .scope import approved_host, normalize_scope
 
 
-def review_flags(doc, scope):
+def review_flags(doc, scope, host_id=None):
     scope = normalize_scope(scope)
     if not scope['cidrs']:
         return []
     findings = doc.get('findings', [])
     evidence = {e['id'] for e in doc.get('evidence', [])}
-    hosts = {f['id']: f for f in findings if f.get('kind') == 'host' and approved_host(f, scope)}
+    hosts = {f['id']: f for f in findings if f.get('kind') == 'host' and
+             (host_id is None or f['id'] == host_id) and approved_host(f, scope)}
     services = [f for f in findings if f.get('kind') == 'service' and f.get('hostId') in hosts and f.get('state') == 'open']
     observations = [f for f in findings if f.get('kind') == 'observation' and f.get('hostId') in hosts]
     flags = []
