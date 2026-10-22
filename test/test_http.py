@@ -479,6 +479,43 @@ class HttpTests(unittest.TestCase):
         self.call('/api/scope', 'PUT', {**scope, 'matchMode': 'and'})
         self.assertFalse(any(c['hostId'] == approved['host']['id'] for c in self.call('/api/workflow')[1]['candidates']))
 
+    def test_inventory_import_requires_dns_match_then_bulk_approval(self):
+        scope = self.workspace.save_scope({'cidrs': ['100.95.95.2/32'],
+            'domains': ['03.crimsonia.net'], 'matchMode': 'or'})
+        good = 'www.dev.03.crimsonia.net'
+        bad = 'mail.dev.03.crimsonia.net'
+        def runner(program, args, timeout):
+            self.assertEqual(program, 'dig')
+            if '-x' in args:
+                return {'ok': True, 'stdout': f'57.3.99.100.in-addr.arpa. 60 IN PTR {good}.\n', 'stderr': ''}
+            name = args[-2]
+            ip = '100.99.3.57' if name == good else '100.99.3.99'
+            return {'ok': True, 'stdout': f'{name}. 60 IN A {ip}\n', 'stderr': ''}
+        self.workspace.runner = runner
+        content = (f'<host><fqdn>{good}</fqdn><connection-address>100.99.3.57</connection-address></host>'
+                   f'<host><fqdn>{bad}</fqdn><connection-address>100.99.3.25</connection-address></host>')
+        request = {'content': content, 'teamNumber': '03', 'suffix': 'dev.03.crimsonia.net',
+                   'resolvers': ['100.95.95.2'], 'authorizedScope': scope, 'authorized': True}
+        self.assertEqual(self.call('/api/discovery/inventory', 'POST', request | {'resolvers': ['8.8.8.8']})[0], 400)
+        status, result = self.call('/api/discovery/inventory', 'POST', request)
+        self.assertEqual(status, 200)
+        self.assertEqual([h['status'] for h in result['inventory']], ['verified', 'dns-mismatch'])
+        self.assertEqual(self.call('/api/workflow')[1]['candidates'], [])
+        pairs = [{'ip': '100.99.3.57', 'name': good}, {'ip': '100.99.3.25', 'name': bad}]
+        self.assertEqual(self.call('/api/discovery/inventory/approve', 'POST',
+            {'hosts': pairs, 'authorizedScope': scope, 'authorized': True})[0], 400)
+        status, approval = self.call('/api/discovery/inventory/approve', 'POST',
+            {'hosts': pairs[:1], 'authorizedScope': scope, 'authorized': True})
+        self.assertEqual(status, 200)
+        self.assertEqual([h['name'] for h in approval['approved']], [good])
+        self.assertTrue(self.call('/api/workflow')[1]['candidates'])
+        self.assertEqual(self.call('/api/autonomy/survey-inventory', 'POST',
+            {'model': '', 'authorizedScope': scope, 'authorized': True})[0], 400)
+        self.workspace.runner = lambda program, args, timeout: {'ok': True,
+            'stdout': f'{good}. 60 IN A 100.99.3.99\n', 'stderr': ''}
+        self.assertEqual(self.call('/api/discovery/inventory', 'POST', request)[0], 200)
+        self.assertEqual(self.call('/api/workflow')[1]['candidates'], [])
+
     def test_discovery_saves_each_chunk_and_resumes_after_failure(self):
         self.call('/api/scope', 'PUT', {'cidrs': ['100.96.1.0/24'], 'domains': ['crimsonia.net']})
         attempted = []
