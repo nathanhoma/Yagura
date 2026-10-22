@@ -146,3 +146,16 @@ def parse_export(data, host, scope):
     if skipped:
         warnings.append(f'{skipped} export entries did not match the selected approved host and were skipped.')
     return dict(schemaVersion=F.SCHEMA_VERSION, findings=findings, evidence=[ev], warnings=warnings)
+
+
+def parse_burp_live(host, scope, url, response):
+    """Adapt one bounded Burp MCP GET into the existing metadata-only parser."""
+    root = ElementTree.Element('items')
+    item = ElementTree.SubElement(root, 'item')
+    for tag, value in (('url', url), ('method', 'GET'), ('status', response['status']),
+                       ('mimetype', response.get('mime', ''))):
+        ElementTree.SubElement(item, tag).text = str(value)
+    parsed = parse_export({'tool': 'burp', 'output': ElementTree.tostring(root, encoding='unicode')}, host, scope)
+    parsed['evidence'][0]['command'] = 'Burp MCP: GET / (approved IP pin)'
+    parsed['warnings'] = []
+    return parsed

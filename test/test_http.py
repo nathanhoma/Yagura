@@ -66,6 +66,24 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/import', 'POST', payload)[0], 201)
         self.assertNotIn('secret', json.dumps(self.workspace.load()))
 
+    def test_burp_mcp_run_requires_current_scope_and_saves_metadata(self):
+        scope = self.workspace.save_scope({'cidrs': ['192.168.56.0/24'], 'domains': []})
+        xml = '<nmaprun><host><status state="up"/><address addrtype="ipv4" addr="192.168.56.10"/><hostnames><hostname name="www.lab.test"/></hostnames><ports><port protocol="tcp" portid="80"><state state="open"/><service name="http"/></port></ports></host></nmaprun>'
+        self.workspace.save(F.parse_import({'tool': 'nmap', 'output': xml}))
+        doc = self.workspace.load()
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        service = next(f for f in doc['findings'] if f['kind'] == 'service')
+        payload = {'hostId': host['id'], 'serviceId': service['id'], 'authorizedScope': scope, 'authorized': True}
+        with patch('backend.server.burp_mcp_get', return_value={'status': '200', 'mime': 'text/html'}) as get:
+            self.assertEqual(self.call('/api/tools/burp/run', 'POST', {**payload, 'authorized': False})[0], 400)
+            self.assertEqual(self.call('/api/tools/burp/run', 'POST', {**payload, 'authorizedScope': None})[0], 400)
+            self.assertEqual(get.call_count, 0)
+            status, result = self.call('/api/tools/burp/run', 'POST', payload)
+        self.assertEqual(status, 200)
+        get.assert_called_once_with('http://www.lab.test:80/', '192.168.56.10')
+        self.assertTrue(any(f['title'] == 'Burp HTTP history' for f in self.workspace.load()['findings']))
+        self.assertEqual(result['status'], '200')
+
     def test_llm_metrics_endpoint_returns_only_measurements(self):
         self.workspace.llm_metrics.record({'model': 'test-model', 'status': 'completed',
             'finishReason': 'stop', 'inputChars': 120, 'outputChars': 30,

@@ -31,7 +31,8 @@ from .check_proposals import CheckProposals
 from .activity import ActivityTracker
 from .attention import review_flags
 from .vulnerabilities import match_versions
-from .tool_imports import TOOLS as EXPORT_TOOLS, parse_export
+from .tool_imports import TOOLS as EXPORT_TOOLS, parse_export, parse_burp_live
+from .burp_mcp import run_get as burp_mcp_get
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -780,6 +781,43 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         summary = F.merge_parsed(doc, parsed)
                         workspace.save(doc)
                     return self.send_json(201, {**sanitize_document(doc), 'summary': summary, 'warnings': parsed['warnings']})
+                if self.command == 'POST' and path == '/api/tools/burp/run':
+                    data = self.body(4000)
+                    if not isinstance(data, dict) or set(data) != {'hostId', 'serviceId', 'authorizedScope', 'authorized'} or data['authorized'] is not True:
+                        raise ValueError('Review and authorize one recorded web service before running Burp MCP.')
+                    with workspace.lock:
+                        scope = workspace.load_scope()
+                        if data['authorizedScope'] != scope:
+                            raise ValueError('Saved target scope changed. Refresh before running.')
+                        doc = workspace.load()
+                        host = next((f for f in doc['findings'] if f['kind'] == 'host' and f['id'] == data['hostId']), None)
+                        service = next((f for f in doc['findings'] if f['kind'] == 'service' and f['id'] == data['serviceId'] and f.get('hostId') == data['hostId']), None)
+                        if not host or not service or service.get('state') != 'open' or service.get('protocol') != 'tcp':
+                            raise ValueError('Choose a recorded open TCP web service.')
+                        url = website_url(host, service)
+                        require_web_origin(url, host, scope)
+                        if not (service.get('name', '').lower().startswith(('http', 'https')) or service['port'] in (80, 443, 8080, 8443)):
+                            raise ValueError('Choose a recorded web service.')
+                        key = 'burp-mcp:' + service['id']
+                        if key in workspace.active_checks:
+                            raise CheckBusy('Burp MCP check is already running for this service.')
+                        workspace.active_checks.add(key)
+                    try:
+                        result = burp_mcp_get(url, host['ip'])
+                        parsed = parse_burp_live(host, scope, url, result)
+                        with workspace.lock:
+                            if workspace.load_scope() != scope:
+                                raise ValueError('Target scope changed during Burp MCP check. Result was not saved.')
+                            latest = workspace.load()
+                            if not any(f['id'] == host['id'] for f in latest['findings']) or not any(f['id'] == service['id'] for f in latest['findings']):
+                                raise ValueError('Target changed during Burp MCP check. Result was not saved.')
+                            summary = F.merge_parsed(latest, parsed)
+                            workspace.save(latest)
+                        return self.send_json(200, {'status': result['status'], 'mime': result['mime'],
+                                                    'summary': summary, 'evidenceId': parsed['evidence'][0]['id']})
+                    finally:
+                        with workspace.lock:
+                            workspace.active_checks.discard(key)
                 if self.command == 'POST' and path == '/api/discovery/local':
                     activity_id = workspace.activity.begin('local', 'Read server network state',
                         'ip -j -4 addr / ip -j -4 neigh', detail='Reading interfaces and neighbor table.')
