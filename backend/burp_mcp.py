@@ -80,7 +80,7 @@ def run_get(url, pinned_ip):
     try:
         with requests.Session() as session:
             session.trust_env = False
-            with session.get(BASE + '/sse', stream=True, timeout=(3, 20),
+            with session.get(BASE + '/sse', stream=True, timeout=(3, 180),
                              allow_redirects=False, headers={'Accept': 'text/event-stream', 'Accept-Encoding': 'identity'}) as stream:
                 stream.raise_for_status()
                 events = _events(_bounded_lines(stream))
