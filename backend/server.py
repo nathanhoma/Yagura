@@ -31,7 +31,9 @@ from .check_proposals import CheckProposals
 from .activity import ActivityTracker
 from .attention import review_flags
 from .vulnerabilities import match_versions
-from .tool_imports import TOOLS as EXPORT_TOOLS, parse_export
+from .tool_imports import TOOLS as EXPORT_TOOLS, parse_export, parse_burp_live
+from .burp_mcp import run_get as burp_mcp_get
+from .web_fingerprint import KNOWN_TECHNOLOGIES
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -98,6 +100,8 @@ def invocation(candidate, doc):
         return sys.executable, [str(ROOT / 'backend/web_exposure.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-exposure'
     if kind == 'web-inventory':
         return sys.executable, [str(ROOT / 'backend/web_inventory.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-inventory'
+    if kind == 'web-fingerprint':
+        return sys.executable, [str(ROOT / 'backend/web_fingerprint.py'), '--url', website_url(host, services[0]), '--ip', ip], 'web-fingerprint'
     if kind == 'tls-certificate' and len(services) == 1 and is_tls_service(services[0]):
         return 'nmap', ['-n', '-Pn', '-sT', '-p', str(services[0]['port']), '--script', 'ssl-cert', '-oX', '-', ip], 'nmap'
     if kind in ('ssh-hostkey', 'smb-security', 'nfs-exports'):
@@ -156,7 +160,7 @@ def parse_check_result(candidate, tool, output):
         return F.parse_import(dict(tool=tool, output=output, command=candidate['command'], observedAt=F.now()))
     time = F.now()
     ev = dict(id=F.uid('evidence'), tool=tool, command=candidate['command'], output=output,
-              observedAt=time, importedAt=time, format='json' if tool in ('web-contacts', 'web-inventory', 'web-exposure') else 'jsonl' if tool == 'nuclei-git' else 'text')
+              observedAt=time, importedAt=time, format='json' if tool in ('web-contacts', 'web-inventory', 'web-exposure', 'web-fingerprint') else 'jsonl' if tool == 'nuclei-git' else 'text')
     host_id = candidate['hostId']
     service_id = candidate['serviceIds'][0] if candidate['serviceIds'] else None
     observations = []
@@ -207,6 +211,20 @@ def parse_check_result(candidate, tool, output):
                 for hint in report['discoveryHints'][:100]))
         if report.get('errors'):
             add('Web inventory errors', '\n'.join(map(str, report['errors'][:10])))
+    elif tool == 'web-fingerprint':
+        report = json.loads(output)
+        if not isinstance(report, dict) or not isinstance(report.get('technologies'), list) or len(report['technologies']) > 30:
+            raise ValueError('Invalid web technology report.')
+        command = shlex.split(candidate['command'])
+        expected_url, expected_ip = command[command.index('--url') + 1], command[command.index('--ip') + 1]
+        if report.get('url') != expected_url or report.get('ip') != expected_ip or not isinstance(report.get('status'), int):
+            raise ValueError('Web technology report target differs from the selected check.')
+        labels = []
+        for item in report['technologies']:
+            if not isinstance(item, dict) or item.get('name') not in KNOWN_TECHNOLOGIES or not isinstance(item.get('version'), str) or not re.fullmatch(r'[0-9A-Za-z._-]{0,31}', item['version']):
+                raise ValueError('Invalid web technology signal.')
+            labels.append(item['name'] + ('/' + item['version'] if item['version'] else ''))
+        add('Web technologies', ', '.join(labels) if labels else 'No curated technology signals detected on the root page.')
     elif tool == 'http-headers':
         if not output.lstrip().startswith('HTTP/'):
             raise ValueError('No HTTP response headers found.')
@@ -387,7 +405,7 @@ class Workspace:
                 raise ValueError('The selected check changed before execution.')
             host = next(f for f in doc['findings'] if f['id'] == candidate['hostId'])
             require_target(host, scope)
-            if candidate['catalogId'] in ('http-headers', 'web-contacts', 'web-exposure', 'web-inventory'):
+            if candidate['catalogId'] in ('http-headers', 'web-contacts', 'web-exposure', 'web-inventory', 'web-fingerprint'):
                 service = next(f for f in doc['findings'] if f['id'] == candidate['serviceIds'][0])
                 require_web_origin(website_url(host, service), host, scope)
             if candidate['id'] in self.active_checks:
@@ -780,6 +798,43 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         summary = F.merge_parsed(doc, parsed)
                         workspace.save(doc)
                     return self.send_json(201, {**sanitize_document(doc), 'summary': summary, 'warnings': parsed['warnings']})
+                if self.command == 'POST' and path == '/api/tools/burp/run':
+                    data = self.body(4000)
+                    if not isinstance(data, dict) or set(data) != {'hostId', 'serviceId', 'authorizedScope', 'authorized'} or data['authorized'] is not True:
+                        raise ValueError('Review and authorize one recorded web service before running Burp MCP.')
+                    with workspace.lock:
+                        scope = workspace.load_scope()
+                        if data['authorizedScope'] != scope:
+                            raise ValueError('Saved target scope changed. Refresh before running.')
+                        doc = workspace.load()
+                        host = next((f for f in doc['findings'] if f['kind'] == 'host' and f['id'] == data['hostId']), None)
+                        service = next((f for f in doc['findings'] if f['kind'] == 'service' and f['id'] == data['serviceId'] and f.get('hostId') == data['hostId']), None)
+                        if not host or not service or service.get('state') != 'open' or service.get('protocol') != 'tcp':
+                            raise ValueError('Choose a recorded open TCP web service.')
+                        url = website_url(host, service)
+                        require_web_origin(url, host, scope)
+                        if not (service.get('name', '').lower().startswith(('http', 'https')) or service['port'] in (80, 443, 8080, 8443)):
+                            raise ValueError('Choose a recorded web service.')
+                        key = 'burp-mcp:' + service['id']
+                        if key in workspace.active_checks:
+                            raise CheckBusy('Burp MCP check is already running for this service.')
+                        workspace.active_checks.add(key)
+                    try:
+                        result = burp_mcp_get(url, host['ip'])
+                        parsed = parse_burp_live(host, scope, url, result)
+                        with workspace.lock:
+                            if workspace.load_scope() != scope:
+                                raise ValueError('Target scope changed during Burp MCP check. Result was not saved.')
+                            latest = workspace.load()
+                            if not any(f['id'] == host['id'] for f in latest['findings']) or not any(f['id'] == service['id'] for f in latest['findings']):
+                                raise ValueError('Target changed during Burp MCP check. Result was not saved.')
+                            summary = F.merge_parsed(latest, parsed)
+                            workspace.save(latest)
+                        return self.send_json(200, {'status': result['status'], 'mime': result['mime'],
+                                                    'summary': summary, 'evidenceId': parsed['evidence'][0]['id']})
+                    finally:
+                        with workspace.lock:
+                            workspace.active_checks.discard(key)
                 if self.command == 'POST' and path == '/api/discovery/local':
                     activity_id = workspace.activity.begin('local', 'Read server network state',
                         'ip -j -4 addr / ip -j -4 neigh', detail='Reading interfaces and neighbor table.')
