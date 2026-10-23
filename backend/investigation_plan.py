@@ -36,8 +36,9 @@ def refresh(plan, document, flags=()):
             signals.append(f'{len(observed)} observed open services')
         row['signals'] = signals
         row['score'] = (20 if row['hostId'] in flagged else 0) + (10 if len(signals) > 1 else 0) + min(len(observed), 9)
-        row['openQuestion'] = ('Which check would verify the goal from the saved service evidence?'
-                               if observed else 'Which services, if any, are reachable on this approved host?')
+        row['openQuestion'] = row.get('modelQuestion') or (
+            'Which check would verify the goal from the saved service evidence?'
+            if observed else 'Which services, if any, are reachable on this approved host?')
     pending = sorted((row for row in plan['candidates'] if row['status'] == 'pending'),
                      key=lambda row: (-row['score'], row['name'], row['ip']))
     plan['nextHostId'] = pending[0]['hostId'] if pending else None
@@ -54,5 +55,6 @@ def create(goal, hosts, document, flags=()):
                                 status='pending', checks=0, evidenceIds=[], signals=[], score=0,
                                 openQuestion='') for host in hosts],
             'nextHostId': None, 'reviewedHosts': 0, 'openQuestions': [],
-            'nextStep': '', 'completedSteps': []}
+            'nextStep': '', 'completedSteps': [], 'modelFailures': 0,
+            'latestAssessment': None}
     return refresh(plan, document, flags)

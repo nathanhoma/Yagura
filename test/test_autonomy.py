@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 from backend import findings as F
 from backend.autonomy import FLAG_PROMPT, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS, TOOL_SELECTION_PROMPT
+from backend.goal_evaluation import PROMPT as GOAL_EVALUATION_PROMPT
+from backend.goal_evaluation import validate as validate_goal_evaluation
 from backend.llm import LlmError
 from backend.reviewed_check import validate as validate_reviewed_check
 from backend.server import Workspace
@@ -76,6 +78,12 @@ class AutonomyTests(unittest.TestCase):
                 payload = json.loads(messages[1]['content'])
                 if messages[0]['content'] == FLAG_PROMPT:
                     return {'model': 'fake', 'data': {'flag': None}}
+                if messages[0]['content'] == GOAL_EVALUATION_PROMPT:
+                    return {'model': 'fake', 'data': {'decision': 'switch-host',
+                        'hostId': saved_second['id'], 'progress': 'uncertain',
+                        'reason': 'Saved reachability alone does not verify the goal.',
+                        'openQuestion': 'Check whether this approved host has useful services.',
+                        'findingIds': [], 'evidenceIds': []}}
                 if messages[0]['content'] == TOOL_SELECTION_PROMPT:
                     self.hosts.append(payload['hostIp'])
                     self.calls += 1
@@ -99,7 +107,7 @@ class AutonomyTests(unittest.TestCase):
         run = self.ws.autonomy.history()['runs'][0]
         self.assertEqual(run['status'], 'completed')
         self.assertEqual(model.hosts[0], self.host['ip'])
-        self.assertIn(second['ip'], model.hosts)
+        self.assertEqual(model.hosts[1], second['ip'])
         self.assertEqual(run['goalPlan']['reviewedHosts'], 2)
         self.assertEqual(run['goalPlan']['status'], 'unverified')
         self.assertEqual(len(run['goalPlan']['completedSteps']), 3)
@@ -108,6 +116,74 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(len([e for e in run['events'] if e['type'] == 'check']), 1)
         self.assertTrue(next(r for r in run['goalPlan']['candidates']
                              if r['hostId'] == self.host['id'])['evidenceIds'])
+        self.assertEqual(run['goalPlan']['latestAssessment']['hostId'], saved_second['id'])
+
+    def test_goal_evaluation_rejects_unapproved_host_and_unlinked_evidence(self):
+        context = {'currentHostId': 'host-a', 'hosts': [
+            {'hostId': 'host-a', 'status': 'pending'},
+            {'hostId': 'host-b', 'status': 'pending'}]}
+        answer = {'decision': 'switch-host', 'hostId': 'outside-scope', 'progress': 'uncertain',
+                  'reason': 'Check another host.', 'openQuestion': 'What services are present?',
+                  'findingIds': [], 'evidenceIds': []}
+        with self.assertRaisesRegex(ValueError, 'unavailable host'):
+            validate_goal_evaluation(answer, context, {'finding-1': {'evidence-1'}})
+        answer.update(hostId='host-b', progress='lead', findingIds=['finding-1'],
+                      evidenceIds=['unlinked-evidence'])
+        with self.assertRaisesRegex(ValueError, 'unlinked evidence'):
+            validate_goal_evaluation(answer, context, {'finding-1': {'evidence-1'}})
+        answer.update(hostId=['host-b'], progress='uncertain', findingIds=[], evidenceIds=[])
+        with self.assertRaisesRegex(ValueError, 'invalid host'):
+            validate_goal_evaluation(answer, context, {'finding-1': {'evidence-1'}})
+
+    def test_goal_plan_moves_to_next_host_after_one_model_failure(self):
+        other = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for quiet.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'})
+        doc = self.ws.load()
+        F.merge_parsed(doc, other)
+        second = next(f for f in doc['findings'] if f.get('kind') == 'host' and f['ip'] == '100.96.1.71')
+        second['approval'] = {'ip': second['ip'], 'name': second['name'], 'scope': self.scope}
+        self.ws.save(doc)
+
+        class FlakyModel:
+            def __init__(self):
+                self.hosts = []
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                host_id = json.loads(messages[1]['content'])['hostIp']
+                self.hosts.append(host_id)
+                if host_id == '100.96.1.70':
+                    raise LlmError('invalid-response', 'The local model response was truncated.')
+                return {'model': 'fake', 'data': {'toolId': None, 'unlistedTool': None,
+                    'reason': 'No justified check on this host.'}}
+
+        model = FlakyModel()
+        self.ws.llm = model
+        with patch('backend.autonomy.available_tools', return_value=[]):
+            self.ws.autonomy.start_goal_plan([self.host['id'], second['id']], self.scope,
+                goal='Investigate approved exercise hosts for initial access.')
+            self.ws.autonomy.thread.join(5)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(run['goalPlan']['modelFailures'], 1)
+        self.assertEqual(run['goalPlan']['reviewedHosts'], 2)
+        self.assertIn(second['ip'], model.hosts)
+
+    def test_paused_goal_plan_resumes_with_same_candidates(self):
+        class ReadyModel:
+            def assert_configuration(self):
+                pass
+        self.ws.llm = ReadyModel()
+        with patch.object(self.ws.autonomy, '_goal_worker'):
+            started = self.ws.autonomy.start_goal_plan([self.host['id']], self.scope,
+                goal='Investigate saved evidence on this approved host.')
+            self.ws.autonomy.thread.join(2)
+            self.ws.autonomy._update(started['id'], status='awaiting-discovery')
+            resumed = self.ws.autonomy.resume_discover_group(started['id'], self.scope)
+            self.ws.autonomy.thread.join(2)
+        self.assertEqual(resumed['status'], 'running')
+        self.assertEqual(resumed['goalPlan']['candidates'][0]['hostId'], self.host['id'])
 
     def test_first_catalogued_ai_check_runs_automatically(self):
         class ToolLlm(FakeLlm):

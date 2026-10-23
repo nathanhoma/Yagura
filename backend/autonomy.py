@@ -15,6 +15,8 @@ from . import findings as F
 from .investigation_plan import create as create_goal_plan, refresh as refresh_goal_plan
 from .discovery import discovery_chunks, discovery_progress, dns_review, validate_resolvers
 from .findings import now, uid
+from .goal_evaluation import PROMPT as GOAL_EVALUATION_PROMPT
+from .goal_evaluation import snapshot as goal_evaluation_snapshot, validate as validate_goal_evaluation
 from .llm import LlmError
 from .outbound import require_target
 from .reviewed_check import validate as validate_reviewed_check
@@ -28,6 +30,7 @@ from .vulnerabilities import match_versions
 MAX_SECONDS = 1200
 GROUP_MAX_SECONDS = 1800
 MAX_RESPONSE_TOKENS = 32000
+GOAL_EVALUATION_TOKENS = 3200
 TOOL_SELECTION_TOKENS = 3200
 TOOL_SELECTION_RETRY_TOKENS = 8192
 FLAG_RESPONSE_TOKENS = 8000
@@ -407,22 +410,28 @@ class AutonomyController:
         ws = self.workspace
         with ws.lock:
             run = next((r for r in self._load()['runs'] if r['id'] == run_id), None)
-            if not run or run.get('mode') not in ('group', 'discover-group', 'port-scan') or run['status'] not in ('awaiting-host-review', 'awaiting-discovery'):
+            if not run or run.get('mode') not in ('group', 'discover-group', 'port-scan', 'goal-plan') or run['status'] not in ('awaiting-host-review', 'awaiting-discovery'):
                 raise ValueError('No matching survey or discovery run is waiting to continue.')
-            if run.get('mode') in ('group', 'port-scan') and run['status'] != 'awaiting-discovery':
+            if run.get('mode') in ('group', 'port-scan', 'goal-plan') and run['status'] != 'awaiting-discovery':
                 raise ValueError('No matching group survey is waiting to continue.')
             if ws.load_scope() != scope or run['scope'] != scope:
                 raise ValueError('Authorized scope changed.')
             if self.thread and self.thread.is_alive():
                 raise ValueError('Another AI run is already in progress.')
+            if run.get('mode') == 'goal-plan':
+                self._group_state(run_id, scope)
             self._update(run_id, status='running')
             self.stop_event = threading.Event()
             model = run['model'] if run['model'] != 'server default' else ''
-            self.activity_ids[run_id] = ws.activity.begin('ai-run', 'Continue host survey' if run.get('mode') in ('group', 'port-scan') else 'Continue scoped discovery',
-                target=f"{len(run['hostIds'])} selected hosts" if run.get('mode') in ('group', 'port-scan') else ', '.join(scope['cidrs']),
-                detail='Continuing saved host survey.' if run.get('mode') in ('group', 'port-scan') else 'Checking saved discovery and approved hosts.')
-            worker = self._portscan_worker if run.get('mode') == 'port-scan' else self._group_worker if run.get('hostIds') and run.get('phase') == 'survey' else self._discover_group_worker
-            args = (run_id, scope, self.stop_event) if worker == self._portscan_worker else (run_id, scope, model, self.stop_event) if worker == self._group_worker else (run_id, scope, model, self.stop_event, True)
+            grouped = run.get('mode') in ('group', 'port-scan', 'goal-plan')
+            self.activity_ids[run_id] = ws.activity.begin('ai-run', 'Continue goal investigation' if run.get('mode') == 'goal-plan' else 'Continue host survey' if grouped else 'Continue scoped discovery',
+                target=f"{len(run['hostIds'])} selected hosts" if grouped else ', '.join(scope['cidrs']),
+                detail='Continuing the saved goal plan.' if run.get('mode') == 'goal-plan' else 'Continuing saved host survey.' if grouped else 'Checking saved discovery and approved hosts.')
+            worker = (self._goal_worker if run.get('mode') == 'goal-plan' else
+                      self._portscan_worker if run.get('mode') == 'port-scan' else
+                      self._group_worker if run.get('hostIds') and run.get('phase') == 'survey' else
+                      self._discover_group_worker)
+            args = (run_id, scope, self.stop_event) if worker == self._portscan_worker else (run_id, scope, model, self.stop_event) if worker in (self._goal_worker, self._group_worker) else (run_id, scope, model, self.stop_event, True)
             self.thread = threading.Thread(target=worker,
                 args=args, daemon=True,
                 name='yagura-ai-discover-group')
@@ -1253,7 +1262,8 @@ class AutonomyController:
                            'No justified tool check for this host.'))
                 self._save(data)
 
-    def _update_goal_plan(self, run_id, scope, host_id=None, result=None, finished=False):
+    def _update_goal_plan(self, run_id, scope, host_id=None, result=None, finished=False,
+                          failure_reason=''):
         """Persist the observation and re-rank the still-open host questions."""
         with self.workspace.lock:
             if self.workspace.load_scope() != scope:
@@ -1265,14 +1275,18 @@ class AutonomyController:
             if host_id:
                 row = next(r for r in plan['candidates'] if r['hostId'] == host_id)
                 if result is None:
-                    row['status'] = 'reviewed'
+                    row['status'] = 'blocked' if failure_reason else 'reviewed'
+                    if failure_reason:
+                        row['blockedReason'] = redact(failure_reason)[:180]
+                        plan['modelFailures'] = plan.get('modelFailures', 0) + 1
                 else:
                     row['checks'] += 1
+                    plan['latestAssessment'] = None
                     row['evidenceIds'] = list(dict.fromkeys(row['evidenceIds'] + result['evidenceIds']))[-24:]
                     if result['outcome'] == 'failed':
                         row['status'] = 'blocked'
                 plan['completedSteps'].append(dict(hostId=host_id,
-                    outcome=result['outcome'] if result else 'no-further-check',
+                    outcome=result['outcome'] if result else 'model-failure' if failure_reason else 'no-further-check',
                     evidenceIds=result['evidenceIds'] if result else [], at=now()))
             refresh_goal_plan(plan, doc, run.get('flags', []))
             if finished:
@@ -1281,9 +1295,49 @@ class AutonomyController:
                                       nextHostId=plan['nextHostId'], reviewedHosts=plan['reviewedHosts'],
                                       totalHosts=len(plan['candidates']),
                                       reason=('Evidence saved; remaining hosts re-ranked.' if result else
+                                              'Model failure on this host; continue with another candidate.' if failure_reason else
                                               'No further justified check on this host; move to the next candidate.')))
             self._save(data)
             return plan
+
+    def _evaluate_goal(self, run_id, host_id, scope, model, result):
+        """Ask a bounded cross-host evaluator to revise direction; fall back safely."""
+        if result['outcome'] not in ('completed', 'denied') or not result['imported'] or not result['evidenceIds']:
+            return
+        if self.stop_event.is_set():
+            return
+        run, doc, _ = self._group_state(run_id, scope)
+        context, visible = goal_evaluation_snapshot(run['goalPlan'], doc, host_id,
+                                                    result['evidenceIds'])
+        try:
+            response = self._model_call(run_id, 'goal evaluation',
+                [{'role': 'system', 'content': GOAL_EVALUATION_PROMPT},
+                 {'role': 'user', 'content': json.dumps(context, ensure_ascii=False)}],
+                max_tokens=GOAL_EVALUATION_TOKENS, model=model)
+            assessment = validate_goal_evaluation(response['data'], context, visible)
+            with self.workspace.lock:
+                if self.workspace.load_scope() != scope:
+                    raise ValueError('Authorized scope changed.')
+                data = self._load()
+                run = next(r for r in data['runs'] if r['id'] == run_id)
+                if run['status'] != 'running' or self.stop_event.is_set():
+                    return
+                plan = run['goalPlan']
+                target = next((row for row in plan['candidates'] if row['hostId'] == assessment['hostId']), None)
+                if target is None or target['status'] != 'pending':
+                    raise ValueError('Goal evaluation target changed.')
+                target['modelQuestion'] = redact(assessment['openQuestion'])[:200]
+                target['openQuestion'] = target['modelQuestion']
+                plan['nextHostId'] = target['hostId']
+                plan['nextStep'] = f"Investigate {target['name']}: {target['openQuestion']}"
+                plan['latestAssessment'] = {**assessment, 'reason': redact(assessment['reason'])[:300],
+                                            'openQuestion': target['openQuestion'], 'model': response.get('model')}
+                run['events'].append(dict(type='goal-evaluation', at=now(), reviewedHostId=host_id,
+                                          **plan['latestAssessment']))
+                self._save(data)
+        except (ValueError, LlmError, RuntimeError) as exc:
+            self._event(run_id, dict(type='goal-evaluation-fallback', hostId=host_id,
+                                      reason=redact(str(exc))[:180]))
 
     def _goal_worker(self, run_id, scope, model, stop_event, reviewed_command=None):
         """Iterate a saved goal across hosts instead of ending after one deep dive."""
@@ -1297,13 +1351,15 @@ class AutonomyController:
                 result = self._run_reviewed(run_id, run['hostId'], scope, reviewed_command, 45)
                 self._review_check_result(run_id, run['hostId'], scope, model, result)
                 self._update_goal_plan(run_id, scope, run['hostId'], result)
+                self._evaluate_goal(run_id, run['hostId'], scope, model, result)
                 last = {'check': reviewed_command, 'outcome': result['outcome'],
                         'evidenceIds': result['evidenceIds']}
             while True:
                 if stop_event.is_set():
                     return self._finish(run_id, 'stopped', 'Stopped by operator after the current check.')
                 if time.monotonic() - started >= GROUP_MAX_SECONDS:
-                    return self._finish(run_id, 'stopped', 'Goal investigation time limit reached; saved plan remains unverified.')
+                    return self._pause_discovery(run_id, 'awaiting-discovery',
+                        'Goal investigation time limit reached; saved plan remains unverified. Continue to resume.')
                 run, doc, hosts = self._group_state(run_id, scope)
                 plan = run['goalPlan']
                 host_id = plan['nextHostId']
@@ -1320,7 +1376,15 @@ class AutonomyController:
                             reason='Next approved host chosen from the refreshed evidence ranking.'))
                         self._save(data)
                     last = {'summary': 'New candidate host; use its saved evidence and the unresolved goal question.'}
-                proposal = self._propose(run_id, host_id, scope, model, last)
+                try:
+                    proposal = self._propose(run_id, host_id, scope, model, last)
+                except LlmError as exc:
+                    plan = self._update_goal_plan(run_id, scope, host_id,
+                                                  failure_reason=str(exc))
+                    if plan['modelFailures'] >= 2:
+                        return self._finish(run_id, 'stopped',
+                            'Model selection failed on two hosts; remaining goal steps require model recovery.')
+                    continue
                 if proposal is None:
                     self._update_goal_plan(run_id, scope, host_id)
                     continue
@@ -1329,6 +1393,7 @@ class AutonomyController:
                 result = self._run_reviewed(run_id, host_id, scope, proposal['command'], 45, reviewed=False)
                 self._review_check_result(run_id, host_id, scope, model, result)
                 self._update_goal_plan(run_id, scope, host_id, result)
+                self._evaluate_goal(run_id, host_id, scope, model, result)
                 last = {'check': proposal['command'], 'outcome': result['outcome'],
                         'evidenceIds': result['evidenceIds']}
         except (ValueError, LlmError, RuntimeError) as exc:
