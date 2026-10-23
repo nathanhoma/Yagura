@@ -27,10 +27,22 @@ def prepare_auto_command(command, host):
         return command
     if not parts or parts[0] != 'curl':
         return command
-    args = [part for part in parts[1:] if part != '-q']
+    args = []
+    i = 1
+    while i < len(parts):
+        token = parts[i]
+        if token == '-q':
+            i += 1
+            continue
+        if token == '--noproxy':
+            i += 1
+            if i < len(parts) and not parts[i].startswith(('-', 'http://', 'https://')):
+                i += 1
+            continue
+        args.append(token)
+        i += 1
     args.insert(0, '-q')
-    if '--noproxy' not in args:
-        args[1:1] = ['--noproxy', '*']
+    args[1:1] = ['--noproxy', '*']
     if '--max-time' not in args:
         args[1:1] = ['--max-time', '10']
     urls = [part for part in args if part.startswith(('http://', 'https://'))]

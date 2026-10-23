@@ -89,6 +89,12 @@ class AutoCommandTests(unittest.TestCase):
         self.assertIn('--resolve web.03.crimsonia.net:443:100.96.1.70', command)
         self.assertNotIn('https://100.96.1.70/', command)
 
+    def test_curl_proxy_bypass_is_replaced_with_exact_safe_value(self):
+        command = prepare_auto_command('curl --noproxy web.03.crimsonia.net -I https://100.96.1.70/', self.host)
+        self.check(command)
+        self.assertEqual(command.count('--noproxy'), 1)
+        self.assertIn("--noproxy '*'", command)
+
     def test_tool_process_gets_no_model_key_or_proxy_configuration(self):
         completed = subprocess.CompletedProcess(['nmap', '--version'], 0, stdout='Nmap', stderr='')
         with patch.dict(os.environ, {'LLM_API_KEY': 'secret', 'HTTPS_PROXY': 'http://proxy.example'}, clear=False), \
