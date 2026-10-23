@@ -29,6 +29,7 @@ from .sensitive import redact, sanitize_document
 from .outbound import require_target, require_web_origin
 from .autonomy import AutonomyController
 from .briefing import answer_question
+from .briefing_orchestrator import plan_turn
 from .check_proposals import CheckProposals
 from .activity import ActivityTracker
 from .attention import review_flags
@@ -663,6 +664,13 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     if not isinstance(body, dict) or set(body) != {'question', 'model'}:
                         raise ValueError('Supply a question and optional model.')
                     return self.send_json(200, answer_question(workspace, body['question'], body['model']))
+                if self.command == 'POST' and path == '/api/briefing/plan':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) !=
+                            {'message', 'model', 'authorizedScope'}):
+                        raise ValueError('Supply one message, model, and the saved scope.')
+                    return self.send_json(200, plan_turn(
+                        workspace, body['message'], body['model'], body['authorizedScope']))
                 if self.command == 'POST' and path == '/api/briefing/investigate/resolve':
                     body = self.body(4000)
                     if not isinstance(body, dict) or set(body) - {'goal', 'authorizedScope', 'selectedTarget'} or not {'goal', 'authorizedScope'} <= set(body):

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from backend import findings as F
 from backend.autonomy import TOOL_SELECTION_PROMPT
+from backend.briefing_orchestrator import PLAN_PROMPT
 from backend.llm import LlmService
 from backend.server import Workspace, create_server
 
@@ -146,6 +147,55 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(answer['findingIds'], [host['id']])
         self.assertEqual(self.workspace.llm.max_tokens, 32768)
         self.assertEqual(self.calls, [])
+
+    def test_chat_planner_reads_or_previews_checks_without_executing(self):
+        scope = self.workspace.save_scope({'cidrs': ['100.96.1.0/24'], 'domains': ['lab.test']})
+        doc = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for web.lab.test (100.96.1.70)\nHost is up.\n'
+            '443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        self.workspace.save(doc)
+        class PlannerModel:
+            def complete(self, messages, max_tokens=0, model=''):
+                if messages[0]['content'] == PLAN_PROMPT:
+                    message = json.loads(messages[1]['content'])['message']
+                    action = ('discover-services' if 'all hosts' in message.lower() else
+                              'investigate' if 'check' in message.lower() else 'answer')
+                    return {'model': 'fake', 'data': {'action': action,
+                        'plan': 'Read evidence.' if action == 'answer' else 'Review selected targets.',
+                        'reason': 'The saved inventory determines the next step.'}}
+                context = json.loads(messages[1]['content'])['context']
+                finding = context['findings'][0]
+                return {'model': 'fake', 'data': {'supported': True,
+                    'answer': 'A saved host is recorded.', 'uncertainty': 'Further testing may be needed.',
+                    'findingIds': [finding['id']], 'evidenceIds': finding['evidenceIds'],
+                    'candidateIds': []}}
+        self.workspace.llm = PlannerModel()
+        payload = {'message': 'What is recorded?', 'model': '', 'authorizedScope': scope}
+        status, answer = self.call('/api/briefing/plan', 'POST', payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(answer['action'], 'answer')
+        self.assertTrue(answer['reply']['supported'])
+        status, investigation = self.call('/api/briefing/plan', 'POST',
+            {**payload, 'message': 'Check web.lab.test for web issues'})
+        self.assertEqual(status, 200)
+        self.assertEqual(investigation['action'], 'investigate')
+        self.assertEqual(investigation['resolution']['hostId'], host['id'])
+        status, discovery = self.call('/api/briefing/plan', 'POST',
+            {**payload, 'message': 'Check services on all hosts'})
+        self.assertEqual(status, 200)
+        self.assertEqual(discovery['action'], 'discover-services')
+        self.assertEqual(discovery['resolution']['mode'], 'port-scan-all')
+        self.assertEqual(discovery['resolution']['hostCount'], 1)
+        status, gap = self.call('/api/briefing/plan', 'POST',
+            {**payload, 'message': 'DNSサービスがあるホストを調査して'})
+        self.assertEqual(status, 200, gap)
+        self.assertEqual(gap['action'], 'discover-services')
+        self.assertEqual(gap['resolution']['mode'], 'port-scan-all')
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.call('/api/briefing/plan', 'POST',
+            {**payload, 'authorizedScope': {'cidrs': ['100.96.2.0/24'], 'domains': []}})[0], 400)
 
     def test_unlisted_autonomy_proposal_requires_exact_human_approval(self):
         class ProposalModel:
