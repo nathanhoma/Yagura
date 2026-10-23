@@ -565,6 +565,15 @@ function briefingChatMessage(message,index){
   const suggestions=(reply.candidates||[]).map(candidate=>briefingCandidateCard(candidate,index,message.results?.[candidate.id])).join('');
   const action=message.resolution?(workflowMode==='manual'?'<a class="btn primary" href="#checks">Open manual checks</a>':'<button class="btn primary" type="button" data-briefing-plan="'+index+'">'+
     (message.resolution.needsSelection?'Choose target':'Review targets')+'</button>'):'';
+  if(message.action==='answer'||(!message.action&&!message.resolution&&reply.answer)){
+    const sources=briefingSources(reply.findingIds,reply.evidenceIds);
+    const evidenceDetail=sources||coverage||plan||reason
+      ?`<details class="briefing-answer-detail" data-briefing-section="answer-${index}-sources"><summary>Sources and context</summary>${sources}${coverage}${plan}${reason}</details>`:'';
+    const followUps=suggestions
+      ?`<details class="briefing-answer-detail" data-briefing-section="answer-${index}-checks"><summary>Optional follow-up checks</summary>${suggestions}</details>`:'';
+    return briefingTurn('user','<p>'+esc(message.question)+'</p>')+
+      briefingTurn('assistant',answer+uncertainty+evidenceDetail+followUps);
+  }
   return briefingTurn('user','<p>'+esc(message.question)+'</p>')+
     briefingTurn('assistant',plan+reason+answer+uncertainty+coverage+
       briefingSources(reply.findingIds,reply.evidenceIds)+suggestions+action);
@@ -784,7 +793,7 @@ $('#briefingSend').onclick=async()=>{
       history:briefingRecentHistory()});
     if(contextKey!==briefingContextKey||JSON.stringify(checkScope())!==JSON.stringify(scope))throw new Error('Scope or conversation changed while planning. Send the request again.');
     briefingSelectedRunId='';
-    const item={question:decision.safeMessage||question,plan:decision.plan,reason:decision.reason,reply:decision.reply||{},
+    const item={question:decision.safeMessage||question,action:decision.action,plan:decision.plan,reason:decision.reason,reply:decision.reply||{},
       resolution:decision.resolution,goal:decision.goal,scope,model,results:{},runId:''};
     briefingMessages.push(item);
     $('#briefingQuestion').value='';
