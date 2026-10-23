@@ -8,7 +8,7 @@ const autoKinds=['ping','nmap-ports','nmap-service','http-headers','ssh-hostkey'
 function checkOutcome(result){return result.outcome==='no-response'?'No response':result.outcome==='completed'?'Completed':result.outcome==='failed'?'Failed':result.ok?'Completed':'Failed';}
 let emailContacts=[],emailDrafts=[],activeDraft=null,draftDirty=false,draftBusy=false;
 const views={drafts:'Prepare, review, and save email drafts. Sender infrastructure can be configured later.',scope:'Define and save the authorized target ranges and domains before working with evidence or checks.',briefing:'Review what the saved evidence supports and ask grounded follow-up questions.',review:'Import output, inspect linked evidence, and correct findings.',checks:'Review grounded checks, then run a check against an authorized local target.',autonomy:'See exactly what the AI chose, what Yagura executed, and why it stopped.',triage:'Choose a host for deeper investigation from saved, linked evidence.'};
-const viewTitles={scope:'Scope',briefing:'Briefing',review:'Findings',checks:'Next checks',drafts:'Email drafts',autonomy:'AI investigation',triage:'Deep-dive candidates'};
+const viewTitles={scope:'Scope',briefing:'Investigation chat',review:'Findings',checks:'Next checks',drafts:'Email drafts',autonomy:'AI investigation',triage:'Deep-dive candidates'};
 const aiViews=new Set(['autonomy','triage','briefing']),manualViews=new Set(['checks','drafts']);
 let workflowMode='ai';
 try{workflowMode=localStorage.getItem('yagura-workflow-mode')==='manual'?'manual':'ai';}catch{}
@@ -494,18 +494,16 @@ function briefingRunEvent(event,index){
   const detail=(title,body)=>`<details data-briefing-section="event-${index}"><summary>${title}</summary>${body}</details>`;
   let title='',body='',extra='';
   if(event.type==='plan'){title=event.afterChecks?'Plan updated':'Investigation plan';body=event.reason||'';extra=detail('Planned check',`<p>Tool: ${esc(event.tool||'Unspecified')}</p><p>Expected: ${esc(event.expectedEvidence||'Unspecified')}</p>`);}
-  else if(event.type==='check'){title=`${host?host+' · ':''}Check ${event.outcome||'finished'}`;body=event.summary||event.warning||(event.imported?'Result and findings saved.':'Result recorded.');extra=source+detail('Check details',`<p>${event.reviewed?'Approved by a person':'Validated catalog check'} · ${event.imported?'Findings imported':'No findings imported'}</p>${event.command?`<pre>${esc(event.command)}</pre>`:''}`);}
+  else if(event.type==='check'){title=`${host?host+' · ':''}Check ${event.outcome||'finished'}`;body=(event.summary||event.warning||(event.imported?'Result and findings saved.':'Result recorded.')).replace(/\x1b\[[0-9;]*m/g,'').slice(0,200);extra=source+detail('Check details',`<p>${event.reviewed?'Approved by a person':'Validated catalog check'} · ${event.imported?'Findings imported':'No findings imported'}</p>${event.command?`<pre>${esc(event.command)}</pre>`:''}`);}
   else if(event.type==='observe'){title='Observation';body=event.reason||`Result: ${event.outcome||'recorded'}`;extra=source;}
-  else if(event.type==='flag-review'){title=event.flag?`${host||'Check'} · Flagged for review`:'No review flag';body=event.flag?.reason||'No additional review lead from this result.';extra=event.flag?`<p class="briefing-meta">Uncertainty: ${esc(event.flag.uncertainty||'Not recorded')}</p>${briefingSources(event.flag.findingIds,event.flag.evidenceIds)}`:'';}
+  else if(event.type==='flag-review'&&event.flag){title=`${host||'Check'} · Flagged for review`;body=event.flag.reason;extra=`<p class="briefing-meta">Uncertainty: ${esc(event.flag.uncertainty||'Not recorded')}</p>${briefingSources(event.flag.findingIds,event.flag.evidenceIds)}`;}
   else if(event.type==='deep-dive-selection'){title=`Deep dive selected · ${host}`;body=event.reason||'';extra=source;}
   else if(event.type==='approval'){title='Command approved';body='The reviewed revision was released for execution.';extra=detail('Exact command',`<pre>${esc(event.command||'')}</pre>`);}
-  else if(event.type==='auto-approval'){title='Catalog check validated';body=event.reason||'The command passed catalog validation.';extra=detail('Exact command',`<pre>${esc(event.command||'')}</pre>`);}
   else if(event.type==='proposal'){title='Command proposed';body=event.reason||'Review required before execution.';extra=detail('Exact command and review notes',`<pre>${esc(event.command||'')}</pre><p>${esc(event.reviewNotes||'')}</p>${event.revisionInstruction?`<p>Correction: ${esc(event.revisionInstruction)}</p>`:''}`);}
   else if(event.type==='decision'&&!event.choice){title='AI stopped';body=event.reason||'';}
   else if(event.type==='discovery'){title=`Discovery · ${event.cidr||'scope'}`;body=`${event.count||0} hosts found · ${event.completed||0}/${event.total||0} segments`;}
   else if(event.type==='selection'){title='Hosts selected';body=event.reason||'';extra=(event.hostIds||[]).map(id=>`<p>${esc(autonomyHostLabel(id))}</p>`).join('');}
   else if(event.type==='pause'){title='Waiting for review';body=event.reason||'';}
-  else if(event.type==='stop'){title='Investigation stopped';body=event.reason||'';}
   else return '';
   return `<div class="briefing-run-event">${briefingTurn('assistant',`<strong>${esc(title)}</strong>${body?`<p>${esc(body)}</p>`:''}${extra}<p class="briefing-meta">${esc(date(event.at))}</p>`)}</div>`;
 }
