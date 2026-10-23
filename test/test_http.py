@@ -9,6 +9,7 @@ import urllib.request
 from unittest.mock import patch
 
 from backend import findings as F
+from backend.autonomy import TOOL_SELECTION_PROMPT
 from backend.llm import LlmService
 from backend.server import Workspace, create_server
 
@@ -151,8 +152,11 @@ class HttpTests(unittest.TestCase):
             def assert_configuration(self):
                 pass
             def complete(self, messages, **kwargs):
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    return {'model': 'fake', 'data': {'toolId': 'nxc', 'reason': 'Inspect the SMB service.'}}
                 return {'model': 'fake', 'data': {'command': 'nxc smb 100.96.1.70',
-                    'reason': 'Inspect the approved host.', 'expectedEvidence': 'SMB response.'}}
+                    'reason': 'Inspect the approved host.', 'expectedEvidence': 'SMB response.',
+                    'reviewNotes': 'One approved host; no credential.'}}
         self.workspace.llm = ProposalModel()
         output = ('Nmap scan report for web.03.crimsonia.net (100.96.1.70)\n'
                   'Host is up.\nNmap done: 1 IP address (1 host up) scanned')
@@ -163,7 +167,9 @@ class HttpTests(unittest.TestCase):
         next(f for f in stored['findings'] if f['id'] == host['id'])['approval'] = {
             'ip': host['ip'], 'name': host['name'], 'scope': scope}
         self.workspace.save(stored)
-        with patch('backend.autonomy.workflow', return_value={'candidates': []}):
+        with patch('backend.autonomy.workflow', return_value={'candidates': []}), \
+             patch('backend.autonomy.available_tools', return_value=[{'id': 'nxc', 'purpose': 'SMB host metadata'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nxc', 'invocation': ['nxc', '--help'], 'text': 'usage', 'truncated': False}):
             status, run = self.call('/api/autonomy/start', 'POST', {'hostId': host['id'],
                 'authorizedScope': scope, 'authorized': True})
             self.assertEqual(status, 202)

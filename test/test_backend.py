@@ -4,7 +4,6 @@ import unittest
 
 from backend import findings as F
 from backend.analysis import analyze, build_context, validate_result
-from backend.autonomy import SAFE_KINDS
 from backend.llm import LlmService, LlmError, private_url
 from backend.server import Workspace, valid_cidr
 from backend.workflow import workflow
@@ -82,7 +81,6 @@ class BackendTests(unittest.TestCase):
         candidates = workflow(doc, '192.168.56.10/32')['candidates']
         self.assertTrue(any(c['catalogId'] == 'http-headers' for c in candidates))
         self.assertIn('sudo -n nmap -n -Pn -O --top-ports 100 --max-retries 1 -oX - 192.168.56.10', [c['command'] for c in candidates])
-        self.assertIn('nmap-os', SAFE_KINDS)
         self.assertTrue(all('{' not in c['command'] for c in candidates))
         self.assertEqual(workflow(doc, '192.168.56.11/32')['candidates'], [])
         result = analyze(doc, {}, FakeLlm())

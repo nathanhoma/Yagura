@@ -32,6 +32,7 @@ from .activity import ActivityTracker
 from .attention import review_flags
 from .vulnerabilities import match_versions
 from .tool_imports import TOOLS as EXPORT_TOOLS, parse_export, parse_burp_live
+from .tool_catalog import available_tools
 from .burp_mcp import run_get as burp_mcp_get
 from .web_fingerprint import KNOWN_TECHNOLOGIES
 
@@ -823,7 +824,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 if self.command == 'GET' and path in ('/api/findings', '/api/workflow', '/api/commands', '/api/attention', '/api/vulnerabilities'):
                     with workspace.lock:
                         scope = workspace.resolve_scope(parse_qs(url.query).get('cidr', [None])[0]) if path == '/api/workflow' else None
-                        data = {'/api/findings': lambda: sanitize_document(workspace.load()), '/api/workflow': lambda: workflow(sanitize_document(workspace.load()), scope), '/api/commands': lambda: {'commands': COMMAND_CATALOG + workspace.check_proposals.catalog_entries()}, '/api/attention': lambda: {'flags': review_flags(sanitize_document(workspace.load()), workspace.load_scope())}, '/api/vulnerabilities': lambda: match_versions(sanitize_document(workspace.load()), workspace.load_scope())}[path]()
+                        data = {'/api/findings': lambda: sanitize_document(workspace.load()), '/api/workflow': lambda: workflow(sanitize_document(workspace.load()), scope), '/api/commands': lambda: {'tools': available_tools(), 'commands': COMMAND_CATALOG + workspace.check_proposals.catalog_entries()}, '/api/attention': lambda: {'flags': review_flags(sanitize_document(workspace.load()), workspace.load_scope())}, '/api/vulnerabilities': lambda: match_versions(sanitize_document(workspace.load()), workspace.load_scope())}[path]()
                     return self.send_json(200, data)
                 if self.command == 'GET' and path == '/api/export':
                     with workspace.lock:
