@@ -14,7 +14,7 @@ try{workflowMode=localStorage.getItem('yagura-workflow-mode')==='manual'?'manual
 function applyWorkflowMode(){document.body.dataset.workflowMode=workflowMode;document.querySelectorAll('[data-workflow-switch]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.workflowSwitch===workflowMode)));$('#briefingNewRun').hidden=workflowMode==='manual';$('#workflowModeHint').textContent=(workflowMode==='ai'?'Yagura can investigate after target confirmation. Catalog checks run automatically; unlisted tools need review.':'Questions still use saved evidence. Investigation plans lead to manual checks.')+' Switching modes does not stop an active run.';}
 function switchWorkflowMode(mode){if(mode!==workflowMode){workflowMode=mode;try{localStorage.setItem('yagura-workflow-mode',mode);}catch{}}applyWorkflowMode();renderBriefing();}
 document.querySelectorAll('[data-workflow-switch]').forEach(button=>button.onclick=()=>switchWorkflowMode(button.dataset.workflowSwitch));
-let latestAnalysis=null,briefingMessages=[],briefingContextKey='',briefingBusy=false,briefingSavedCandidates=[],briefingSavedResults={},briefingSelectedRunId='',briefingActionKey='',inventoryRows=[];
+let latestAnalysis=null,briefingMessages=[],briefingContextKey='',briefingBusy=false,briefingSelectedRunId='',briefingActionKey='',inventoryRows=[];
 let autonomyInventoryReady=false,autonomyModelRequired=false,autonomyMode='group',autonomyLimits={maxSeconds:600,groupMaxSeconds:900};
 const autonomySelectedHosts=new Set();
 const emptyScope=()=>({cidrs:[],domains:[],matchMode:'and'});
@@ -556,7 +556,7 @@ function renderBriefing(){
   const box=$('#briefingTranscript');
   const hostIds=briefingHostIds(),selected=new Set(hostIds),latest=autonomyRuns.find(r=>r.scope&&JSON.stringify(r.scope)===JSON.stringify(savedScope)&&(r.hostIds||[r.hostId]).some(id=>selected.has(id)));
   const contextKey=JSON.stringify({scope:savedScope,hostIds});
-  if(briefingContextKey!==contextKey){briefingMessages=[];briefingSavedResults={};briefingContextKey=contextKey;}
+  if(briefingContextKey!==contextKey){briefingMessages=[];briefingContextKey=contextKey;}
   const history=$('#briefingRunHistory'),previous=briefingSelectedRunId;
   history.innerHTML='<option value="">Current workspace</option>'+autonomyRuns.map(r=>`<option value="${esc(r.id)}">${esc(date(r.startedAt))} · ${esc(r.hostName||r.hostIp||'Investigation')} · ${esc(r.status)}</option>`).join('');
   if(previous&&!autonomyRuns.some(r=>r.id===previous))briefingSelectedRunId='';
@@ -566,40 +566,55 @@ function renderBriefing(){
   $('#briefingSend').disabled=briefingBusy;
   const briefLabel=`Approved · ${hostIds.length} host${hostIds.length===1?'':'s'}`;
   $('#briefingUpdated').textContent=`${briefLabel} · ${findings.filter(f=>selected.has(f.id)||selected.has(f.hostId)).length} findings`;
-  const flags=autonomyRuns.filter(r=>r.scope&&JSON.stringify(r.scope)===JSON.stringify(savedScope)).flatMap(r=>(r.flags||[]).map(f=>({...f,runAt:r.endedAt||r.startedAt}))).filter(f=>selected.has(f.hostId)&&f.findingIds?.some(id=>findings.some(row=>row.id===id))&&f.evidenceIds?.some(id=>evidence.some(row=>row.id===id))).filter((f,i,rows)=>rows.findIndex(row=>row.hostId===f.hostId&&row.reason===f.reason)===i);
-  let found='';
-  if(flags.length){found=`<p class="briefing-meta">Review flags across approved hosts · hypotheses for review</p>`+flags.slice(0,3).map(f=>`<p><strong>${esc(recordLabel(findings.find(h=>h.id===f.hostId)||{title:f.hostId}))}</strong>: ${esc(f.reason)}</p><p class="briefing-meta">Still uncertain: ${esc(f.uncertainty)}</p>${briefingSources(f.findingIds,f.evidenceIds)}`).join('');}
-  else if(latestAnalysis&&!latestAnalysis.stale){const rows=(latestAnalysis.assessments||[]).filter(a=>a.findingIds?.length&&a.findingIds.every(id=>findings.some(f=>f.id===id&&(selected.has(f.id)||selected.has(f.hostId)))));found=rows.slice(0,3).map(a=>`<p>${esc(a.interpretation)}</p>${briefingSources(a.findingIds,a.evidenceIds)}`).join('');}
-  if(!found){const rows=findings.filter(f=>f.kind==='observation'&&selected.has(f.hostId)&&f.evidenceIds?.length).sort((a,b)=>String(b.lastSeen||'').localeCompare(String(a.lastSeen||''))).slice(0,3);found=rows.length?rows.map(f=>`<p><strong>${esc(f.title||'Observation')}</strong> · ${esc(recordLabel(findings.find(h=>h.id===f.hostId)||{title:f.hostId}))}: ${esc(f.detail||'Recorded observation')}</p>${briefingSources([f.id],f.evidenceIds.slice(0,1))}`).join(''):'<p>No linked observations have been recorded for these hosts yet.</p>';}
-  const recentCommands=new Set(evidence.filter(e=>e.command&&e.output&&Number.isFinite(Date.parse(e.observedAt))&&Date.now()-Date.parse(e.observedAt)<86400000).map(e=>e.command));
-  const candidateKeys=new Set(),candidates=map.candidates.filter(c=>selected.has(c.hostId)&&!recentCommands.has(c.command)).sort((a,b)=>Number(flags.some(f=>f.hostId===b.hostId))-Number(flags.some(f=>f.hostId===a.hostId))).filter(c=>{const key=c.hostId+'|'+c.title;if(candidateKeys.has(key))return false;candidateKeys.add(key);return true;}).slice(0,3);
-  briefingSavedCandidates=candidates;
-  const savedResults=Object.entries(briefingSavedResults).filter(([id])=>!candidates.some(c=>c.id===id)).map(([id,result])=>`<div class="briefing-check"><strong>${esc(result.title||'Completed check')}</strong><p class="status">${esc(checkOutcome(result))}</p><button class="btn" type="button" data-briefing-result="${esc(id)}" data-briefing-message="-1">View result</button></div>`).join('');
-  const next=(candidates.length?candidates.map(c=>briefingCandidateCard(c,-1,briefingSavedResults[c.id])+briefingSources(c.findingIds,c.evidenceIds)).join(''):'<p>No untried catalog check is currently available for this selection. Review the flagged findings, then describe a specific follow-up in <a href="#checks">Next checks</a> for human review.</p>')+savedResults;
-  const recent=latest?`<p>${esc(date(latest.startedAt))}: ${esc(latest.status)} · ${(latest.events||[]).filter(e=>e.type==='check').length} recorded check(s).</p>${latest.stopReason?`<p>${esc(latest.stopReason)}</p>`:''}`:'<p>No autonomous run has been recorded for these hosts yet.</p>';
   const follow=briefingNearBottom(),position=box.scrollTop;
   const openSections=new Set([...box.querySelectorAll('details[data-briefing-section][open]')].map(row=>row.dataset.briefingSection));
-  const section=(id,label,content)=>`<details data-briefing-section="${id}" ${openSections.has(id)?'open':''}><summary>${label}</summary><div class="briefing-section-body">${content}</div></details>`;
-  const overview=section('found','Current picture',found)+section('next',`Suggested checks · ${candidates.length}`,next)+section('recent','Latest run',recent);
   const selectedRun=autonomyRuns.find(r=>r.id===briefingSelectedRunId)||(briefingSelectedRunId?null:latest);
   const messages=briefingSelectedRunId?briefingMessages.filter(m=>m.runId===briefingSelectedRunId):briefingMessages.filter(m=>!m.runId);
-  box.innerHTML=(briefingSelectedRunId?'':`<section class="briefing-saved-summary" aria-label="Saved workspace overview"><span class="briefing-run-label">Saved workspace</span><div class="briefing-overview">${overview}</div></section>`)+briefingRunConversation(selectedRun)+messages.map(m=>briefingChatMessage(m,briefingMessages.indexOf(m))).join('');
+  box.innerHTML=briefingRunConversation(selectedRun)+messages.map(m=>briefingChatMessage(m,briefingMessages.indexOf(m))).join('')||'<div class="empty">Ask Yagura about saved findings or start an investigation.</div>';
   box.querySelectorAll('details[data-briefing-section]').forEach(row=>{if(openSections.has(row.dataset.briefingSection))row.open=true;});
   wireRefs(box);
   box.querySelectorAll('[data-briefing-review]').forEach(button=>button.onclick=()=>reviewBriefingCandidate(Number(button.dataset.briefingMessage),button.dataset.briefingReview));
   box.querySelectorAll('[data-briefing-plan]').forEach(button=>button.onclick=()=>reviewBriefingPlan(Number(button.dataset.briefingPlan)));
-  box.querySelectorAll('[data-briefing-result]').forEach(button=>button.onclick=()=>{const i=Number(button.dataset.briefingMessage),result=(i===-1?briefingSavedResults:briefingMessages[i]?.results)?.[button.dataset.briefingResult];if(result)showDialog('Check output',`<p class="mono">${esc(result.command)}</p><p class="status">${esc(checkOutcome(result))}${result.imported?' · Findings updated':''}</p><pre>${esc(result.output||result.stderr||'No output.')}</pre>`);});
+  box.querySelectorAll('[data-briefing-result]').forEach(button=>button.onclick=()=>{const i=Number(button.dataset.briefingMessage),result=briefingMessages[i]?.results?.[button.dataset.briefingResult];if(result)showDialog('Check output',`<p class="mono">${esc(result.command)}</p><p class="status">${esc(checkOutcome(result))}${result.imported?' · Findings updated':''}</p><pre>${esc(result.output||result.stderr||'No output.')}</pre>`);});
   box.scrollTop=follow?box.scrollHeight:position;
   updateBriefingLatest();
 }
 $('#briefingTranscript').addEventListener('scroll',updateBriefingLatest);
 $('#briefingLatest').onclick=boxScroll;
-$('#briefingRunHistory').onchange=()=>{briefingSelectedRunId=$('#briefingRunHistory').value;renderBriefing();boxScroll();};
+$('#briefingRunHistory').onchange=()=>{briefingSelectedRunId=$('#briefingRunHistory').value;renderBriefing();boxScroll();if($('#briefingUsageDialog').open)loadBriefingUsage();};
 $('#briefingNewRun').onclick=()=>openAutonomyNewRun();
 $('#briefingStop').onclick=async()=>{const active=autonomyRuns.find(r=>['running','awaiting-approval','awaiting-host-review','awaiting-discovery'].includes(r.status));if(!active)return;if(!await confirmScopedAction('Stop this investigation?',`Run: ${esc(active.id)} · ${esc(active.hostName||active.hostIp||'Selected hosts')}. A check already running may finish before the stop takes effect.`,'Stop run'))return;await briefingActionRequest('/api/autonomy/stop',{runId:active.id},'Stopping the investigation…');};
+function briefingUsageStat(label,value){return `<div class="briefing-usage-stat"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;}
+async function loadBriefingUsage(){
+  const approved=new Set(briefingHostIds());
+  const run=autonomyRuns.find(r=>r.id===briefingSelectedRunId)||(briefingSelectedRunId?null:autonomyRuns.find(r=>r.scope&&JSON.stringify(r.scope)===JSON.stringify(savedScope)&&(r.hostIds||[r.hostId]).some(id=>approved.has(id))));
+  const stats=$('#briefingUsageStats'),note=$('#briefingUsageNote');
+  if(!run){$('#briefingUsageRun').textContent='No investigation selected.';stats.innerHTML='';note.textContent='Start an AI investigation to measure its usage.';$('#briefingUsageStages').innerHTML='';$('#briefingUsageCalls').innerHTML='';return;}
+  $('#briefingUsageRun').textContent=`${date(run.startedAt)} · ${run.hostName||run.hostIp||'Investigation'} · ${run.status}`;
+  stats.innerHTML='<p class="status">Loading measurements…</p>';
+  try{
+    const data=await api('/api/llm/metrics?runId='+encodeURIComponent(run.id)),summary=data.summary;
+    const cycles=summary?.stages?.['tool selection']||0;
+    const noModel=run.model==='deterministic port scan';
+    const known=!!summary||noModel;
+    const total=(count,value)=>count?metricNumber(value):'—';
+    stats.innerHTML=briefingUsageStat('Decision cycles',known?metricNumber(cycles):'—')+
+      briefingUsageStat('Model calls',known?metricNumber(summary?.callCount||0):'—')+
+      briefingUsageStat('Input tokens · reported',summary?total(summary.inputTokenCalls,summary.inputTokens):noModel?'0':'—')+
+      briefingUsageStat('Output tokens · reported',summary?total(summary.outputTokenCalls,summary.outputTokens):noModel?'0':'—')+
+      briefingUsageStat('Largest input prompt',summary?total(summary.inputTokenCalls,summary.maxInputTokens):'—')+
+      briefingUsageStat('Largest input · characters',summary?metricNumber(summary.maxInputChars):'—');
+    note.textContent=summary?`Input token counts available for ${summary.inputTokenCalls}/${summary.callCount} calls; output for ${summary.outputTokenCalls}/${summary.callCount}. A decision cycle starts when Yagura selects the next tool; retries add model calls but not cycles. Largest input prompt is measured usage, not the model's context window.`:noModel?'This run used deterministic port scans without model calls.':'Run-level measurement was not recorded for this earlier investigation. Existing global model calls cannot be attributed to it reliably.';
+    $('#briefingUsageStages').innerHTML=summary?Object.entries(summary.stages||{}).map(([stage,count])=>`<div class="cmd"><strong>${esc(stage)}</strong><p>${metricNumber(count)} call${count===1?'':'s'}</p></div>`).join(''):'<div class="empty">No stage measurements for this run.</div>';
+    $('#briefingUsageCalls').innerHTML=(data.calls||[]).length?data.calls.map(row=>`<div class="cmd"><strong>${esc(row.stage||'Model call')} · ${esc(row.model||'Unknown model')}</strong><p>${esc(date(row.at))} · ${esc(row.status)} · finish: ${esc(row.finishReason||'unavailable')} · ${metricNumber(row.durationMs)} ms</p><p>Input: ${metricNumber(row.promptTokens)} tokens / ${metricNumber(row.inputChars)} characters · Output: ${metricNumber(row.completionTokens)} tokens / ${metricNumber(row.outputChars)} characters</p></div>`).join(''):'<div class="empty">No recent model calls linked to this run.</div>';
+  }catch(error){stats.innerHTML='';note.textContent='Measurements unavailable: '+error.message;}
+}
+$('#briefingUsageOpen').onclick=()=>{$('#briefingUsageDialog').showModal();loadBriefingUsage();};
+$('#briefingUsageClose').onclick=()=>$('#briefingUsageDialog').close();
+$('#briefingUsageRefresh').onclick=loadBriefingUsage;
 $('#briefingSettingsOpen').onclick=()=>$('#briefingSettingsDialog').showModal();
 $('#briefingSettingsClose').onclick=()=>$('#briefingSettingsDialog').close();
-$('#briefingRefresh').onclick=async()=>{const button=$('#briefingRefresh');button.disabled=true;$('#briefingState').textContent='Refreshing saved evidence…';try{briefingMessages=[];briefingSavedResults={};await refreshFindings();await loadAutonomyHistory();renderBriefing();$('#briefingState').textContent='';}catch(e){$('#briefingState').textContent=e.message;}finally{button.disabled=false;}};
+$('#briefingRefresh').onclick=async()=>{const button=$('#briefingRefresh');button.disabled=true;$('#briefingState').textContent='Refreshing saved evidence…';try{briefingMessages=[];await refreshFindings();await loadAutonomyHistory();renderBriefing();$('#briefingState').textContent='';}catch(e){$('#briefingState').textContent=e.message;}finally{button.disabled=false;}};
 let briefingTargetState=null;
 function showBriefingTargetChoices(goal,scope,model,resolution){
   briefingTargetState={goal,scope,model,candidates:resolution.candidates||[]};
@@ -733,12 +748,12 @@ $('#briefingQuestion').addEventListener('keydown',event=>{
 });
 function boxScroll(){const box=$('#briefingTranscript');box.scrollTop=box.scrollHeight;updateBriefingLatest();}
 async function reviewBriefingCandidate(messageIndex,candidateId){
-  const message=briefingMessages[messageIndex],proposed=(messageIndex===-1?briefingSavedCandidates:message?.reply?.candidates)?.find(c=>c.id===candidateId),contextKey=briefingContextKey;
+  const message=briefingMessages[messageIndex],proposed=message?.reply?.candidates?.find(c=>c.id===candidateId),contextKey=briefingContextKey;
   if(!proposed||!checkScope()){$('#briefingState').textContent='This suggestion is no longer available. Ask again with the current scope.';return;}
   $('#briefingState').textContent='Checking the current command and approved target…';
   try{
     const fresh=(await api('/api/workflow')).candidates.find(c=>c.id===candidateId&&c.hostId===proposed.hostId);
-    if(!fresh||contextKey!==briefingContextKey||messageIndex!==-1&&briefingMessages[messageIndex]!==message)throw new Error('The suggested check or conversation changed. Ask again before approving.');
+    if(!fresh||contextKey!==briefingContextKey||briefingMessages[messageIndex]!==message)throw new Error('The suggested check or conversation changed. Ask again before approving.');
     const host=findings.find(f=>f.id===fresh.hostId);
     if(!host)throw new Error('The approved host is no longer available.');
     showDialog('Review suggested check',`<p class="notice">Review this current, validated check before running it. No command runs when you open this review.</p><p><strong>${esc(fresh.title)}</strong> · ${esc(recordLabel(host))}</p><p>${esc(fresh.reason)}</p><pre>${esc(fresh.command)}</pre><p class="status">Saved scope: ${esc(scopeLabel())}</p><p class="status" id="briefingReviewState" role="status"></p><button class="btn primary" id="briefingRunCheck" type="button">Approve and run</button>`);
@@ -747,7 +762,7 @@ async function reviewBriefingCandidate(messageIndex,candidateId){
       const button=$('#briefingRunCheck');button.disabled=true;$('#briefingReviewState').textContent='Running the approved check…';
       try{
         const result=await post('/api/checks/run',{candidateId:fresh.id,expectedCommand:fresh.command,authorized:true,authorizedScope:checkScope()});
-        $('#reviewDialog').close();if(messageIndex===-1)briefingSavedResults[fresh.id]={...result,title:fresh.title};else message.results[fresh.id]=result;
+        $('#reviewDialog').close();message.results[fresh.id]=result;
         if(result.imported)await refreshFindings();else renderBriefing();
         $('#briefingState').textContent='';
       }catch(e){$('#briefingReviewState').textContent=e.message;button.disabled=false;}

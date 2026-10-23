@@ -5,6 +5,7 @@ import unittest
 from backend import findings as F
 from backend.analysis import analyze, build_context, validate_result
 from backend.llm import LlmService, LlmError, private_url
+from backend.llm_metrics import LlmMetrics
 from backend.server import Workspace, valid_cidr
 from backend.workflow import workflow
 
@@ -27,6 +28,29 @@ class FakeLlm:
 
 
 class BackendTests(unittest.TestCase):
+    def test_llm_metrics_keep_per_run_totals_beyond_recent_call_log(self):
+        with tempfile.TemporaryDirectory() as folder:
+            metrics = LlmMetrics(Path(folder) / 'llm-metrics.json')
+            metrics.path.write_text('[]')  # Existing installations stored a list.
+            with metrics.for_run('run-1', 'tool selection'):
+                for _ in range(101):
+                    metrics.record({'inputChars': 120, 'promptTokens': 40,
+                                    'completionTokens': 10})
+            with metrics.for_run('run-1', 'result review'):
+                metrics.record({'inputChars': 200, 'promptTokens': None,
+                                'completionTokens': None})
+            metrics.record({'inputChars': 9, 'promptTokens': 2,
+                            'completionTokens': 1})
+            summary = metrics.run_summary('run-1')
+            self.assertEqual(summary['callCount'], 102)
+            self.assertEqual(summary['inputTokens'], 4040)
+            self.assertEqual(summary['outputTokens'], 1010)
+            self.assertEqual(summary['inputTokenCalls'], 101)
+            self.assertEqual(summary['maxInputChars'], 200)
+            self.assertEqual(summary['stages'], {'tool selection': 101, 'result review': 1})
+            self.assertEqual(len(metrics.history()), 100)
+            self.assertNotIn('runId', metrics.history()[0])
+
     def test_llm_metrics_capture_usage_and_truncation_without_content(self):
         llm = LlmService(model='test-model')
         rows = []

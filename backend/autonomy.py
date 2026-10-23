@@ -95,6 +95,10 @@ class AutonomyController:
                 'groupMaxHosts': None, 'discoveryMaxSeconds': MAX_DISCOVERY_SECONDS,
                 'autoGroupHosts': AUTO_GROUP_HOSTS}
 
+    def _model_call(self, run_id, stage, messages, **kwargs):
+        with self.workspace.llm_metrics.for_run(run_id, stage):
+            return self.workspace.llm.complete(messages, **kwargs)
+
     def _load(self):
         try:
             data = json.loads(self.file.read_text())
@@ -404,7 +408,7 @@ class AutonomyController:
                                   recentCommands=recent_commands,
                                   revisionInstruction=redact(feedback)), ensure_ascii=False)}]
         try:
-            tool_choice = ws.llm.complete(selection_messages, max_tokens=1200, model=model)['data']
+            tool_choice = self._model_call(run_id, 'tool selection', selection_messages, max_tokens=1200, model=model)['data']
         except LlmError as exc:
             if exc.code != 'invalid-response' or 'truncated' not in str(exc).lower():
                 raise
@@ -414,7 +418,7 @@ class AutonomyController:
                 run['events'].append(dict(type='model-retry', at=now(),
                                           reason='Tool selection response was truncated.', maxTokens=3200))
                 self._save(data)
-            tool_choice = ws.llm.complete(selection_messages, max_tokens=3200, model=model)['data']
+            tool_choice = self._model_call(run_id, 'tool selection retry', selection_messages, max_tokens=3200, model=model)['data']
         if not isinstance(tool_choice, dict) or not isinstance(tool_choice.get('reason'), str):
             raise ValueError('AI tool selection format was invalid.')
         tool_id = tool_choice.get('toolId')
@@ -441,7 +445,7 @@ class AutonomyController:
         validation_issue = ''
         previous_command = ''
         for attempt in range(2):
-            response = ws.llm.complete([{'role': 'system', 'content': PROPOSAL_PROMPT},
+            response = self._model_call(run_id, 'command proposal', [{'role': 'system', 'content': PROPOSAL_PROMPT},
                                         {'role': 'user', 'content': json.dumps(dict(hostIp=host['ip'], context=context,
                                             lastResult=last, selectedTool=tool_id, toolHelp=documentation, goal=goal,
                                             recentCommands=recent_commands, validationIssue=validation_issue,
@@ -790,7 +794,7 @@ class AutonomyController:
                                          reason='Imported evidence has no linked finding on this host.',
                                          ruleChanges=rule_changes))
                 return
-            answer = self.workspace.llm.complete(
+            answer = self._model_call(run_id, 'result review',
                 [{'role': 'system', 'content': FLAG_PROMPT},
                  {'role': 'user', 'content': json.dumps(context, ensure_ascii=False)}],
                 max_tokens=FLAG_RESPONSE_TOKENS, model=model)['data']

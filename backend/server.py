@@ -654,7 +654,12 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 if self.command == 'GET' and path == '/api/llm/health':
                     return self.send_json(200, workspace.llm.health())
                 if self.command == 'GET' and path == '/api/llm/metrics':
-                    return self.send_json(200, {'calls': workspace.llm_metrics.history()[:30]})
+                    run_id = parse_qs(url.query).get('runId', [''])[0]
+                    calls = workspace.llm_metrics.history()
+                    if run_id:
+                        calls = [row for row in calls if row.get('runId') == run_id]
+                    return self.send_json(200, {'calls': calls[:30],
+                        'summary': workspace.llm_metrics.run_summary(run_id) if run_id else None})
                 if self.command == 'GET' and path == '/api/activity':
                     return self.send_json(200, workspace.activity.snapshot())
                 if self.command == 'GET' and path == '/api/autonomy':
