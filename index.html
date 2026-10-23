@@ -102,12 +102,12 @@ body[data-view]:not([data-view="scope"]):not([data-scope-state="ready"]) .grid{d
 .briefing-check p{margin:5px 0 8px}
 @media(max-width:620px){.briefing-chat{height:48dvh;min-height:260px;padding:10px}.briefing-composer{bottom:67px}}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-body[data-view="briefing"] .main{--briefing-main-gutter:38px;--briefing-side-gutter:clamp(20px,4vw,56px);width:100%;max-width:none;height:100dvh;display:flex;flex-direction:column;overflow:hidden;padding-bottom:12px}
+body[data-view="briefing"] .main{height:100dvh;display:flex;flex-direction:column;overflow:hidden;padding-bottom:12px}
 body[data-view="briefing"] .top{margin-bottom:10px}
 body[data-view="briefing"] .heading,body[data-view="briefing"] .workflow-mode-hint,body[data-view="briefing"] .view-intro,body[data-view="briefing"] #workspaceFooter{display:none}
 body[data-view="briefing"] .grid{display:flex;flex:1;flex-direction:column;min-height:0}
-body[data-view="briefing"] #briefingPanel{display:flex;flex:1;flex-direction:column;min-height:0;width:100%;max-width:none;margin:0;padding:0 var(--briefing-side-gutter);position:relative;border:0;border-radius:0;background:transparent}
-body[data-view="briefing"] #briefingTranscript{flex:1;min-height:0;height:auto;margin:0 calc(0px - var(--briefing-main-gutter) - var(--briefing-side-gutter)) 0 0;padding:0 calc(var(--briefing-main-gutter) + var(--briefing-side-gutter)) 0 0;border:0;border-radius:0;background:transparent}
+body[data-view="briefing"] #briefingPanel{display:flex;flex:1;flex-direction:column;min-height:0;width:100%;max-width:none;margin:0;padding:0 clamp(20px,4vw,56px);position:relative;border:0;border-radius:0;background:transparent}
+body[data-view="briefing"] #briefingTranscript{flex:1;min-height:0;height:auto;margin:0;padding:0;border:0;border-radius:0;background:transparent}
 .briefing-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
 .briefing-header h2{font-size:17px;margin:0 0 3px}
 .briefing-header .briefing-meta{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(68vw,820px)}
@@ -122,9 +122,9 @@ body[data-view="briefing"] .briefing-composer textarea{min-height:48px;height:54
 body[data-view="briefing"] #briefingState{margin:5px 0 0}
 body[data-view="briefing"] #briefingState:empty{display:none}
 .briefing-header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.briefing-header-actions [hidden]{display:none}.briefing-run-picker{display:flex;align-items:center;gap:7px;margin:0 0 9px;color:var(--muted);font-size:11px}.briefing-run-picker select{min-width:0;max-width:100%;flex:1}.briefing-action{flex-shrink:0;max-height:min(42dvh,360px);overflow:auto;border:1px solid var(--cyan);border-radius:8px;background:var(--panel2);padding:12px;margin-top:8px}.briefing-action[hidden]{display:none}.briefing-action strong{display:block;margin-bottom:5px}.briefing-action p{margin:5px 0}.briefing-action pre{max-height:110px;overflow:auto;margin:8px 0}.briefing-action .toolbar{margin-top:9px}.briefing-action .field{margin-top:9px}.briefing-run-event .briefing-bubble{max-width:100%}.briefing-run-event details{margin-top:7px}.briefing-run-event pre{max-height:180px;overflow:auto}.briefing-run-event .briefing-meta{margin-top:5px}
-body[data-view="briefing"] .briefing-latest{position:absolute;right:calc(var(--briefing-side-gutter) + 8px);bottom:112px;z-index:5;margin:0;box-shadow:0 4px 14px #0009}
-@media(max-width:950px){body[data-view="briefing"] .main{--briefing-main-gutter:18px;padding-bottom:10px}body[data-view="briefing"] .main .workflow-switch{margin-bottom:8px}}
-@media(max-width:620px){body[data-view="briefing"] .main{--briefing-main-gutter:13px;--briefing-side-gutter:8px;height:calc(100dvh - 70px);padding-bottom:8px}body[data-view="briefing"] .briefing-latest{right:18px;bottom:130px}body[data-view="briefing"] .briefing-composer{display:flex;align-items:end}body[data-view="briefing"] .briefing-composer button{width:auto;margin:0}}
+body[data-view="briefing"] .briefing-latest{position:absolute;right:calc(clamp(20px,4vw,56px) + 8px);bottom:112px;z-index:5;margin:0;box-shadow:0 4px 14px #0009}
+@media(max-width:950px){body[data-view="briefing"] .main{padding-bottom:10px}body[data-view="briefing"] .main .workflow-switch{margin-bottom:8px}}
+@media(max-width:620px){body[data-view="briefing"] .main{height:calc(100dvh - 70px);padding-bottom:8px}body[data-view="briefing"] #briefingPanel{padding-inline:8px}body[data-view="briefing"] .briefing-latest{right:18px;bottom:130px}body[data-view="briefing"] .briefing-composer{display:flex;align-items:end}body[data-view="briefing"] .briefing-composer button{width:auto;margin:0}}
 .workflow-mode-hint,.view-intro{display:none}
 .autonomy-card-actions{display:flex;align-items:center;justify-content:flex-end;gap:9px;flex-wrap:wrap}
 .icon-close{width:34px;height:34px;padding:0;display:grid;place-items:center;font-size:22px;line-height:1;flex:none;color:var(--muted)}.icon-close:hover{color:var(--text)}#actionConfirmDialog{width:min(560px,calc(100vw - 28px))}#actionConfirmDialog::backdrop{background:#0005}#actionConfirmDetails{margin-top:12px;line-height:1.5}#actionConfirmDetails p{margin:8px 0}#actionConfirmDetails pre{margin:8px 0;max-height:220px}#autonomyState:empty,#autonomyModelState:empty{display:none}
