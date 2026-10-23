@@ -106,8 +106,8 @@ body[data-view="briefing"] .main{height:100dvh;display:flex;flex-direction:colum
 body[data-view="briefing"] .top{margin-bottom:10px}
 body[data-view="briefing"] .heading,body[data-view="briefing"] .workflow-mode-hint,body[data-view="briefing"] .view-intro,body[data-view="briefing"] #workspaceFooter{display:none}
 body[data-view="briefing"] .grid{display:flex;flex:1;flex-direction:column;min-height:0}
-body[data-view="briefing"] #briefingPanel{display:flex;flex:1;flex-direction:column;min-height:0;width:100%;max-width:none;margin:0;padding:14px;position:relative}
-body[data-view="briefing"] #briefingTranscript{flex:1;min-height:0;height:auto;margin:0}
+body[data-view="briefing"] #briefingPanel{display:flex;flex:1;flex-direction:column;min-height:0;width:100%;max-width:none;margin:0;padding:0;position:relative;border:0;border-radius:0;background:transparent}
+body[data-view="briefing"] #briefingTranscript{flex:1;min-height:0;height:auto;margin:0;padding:0;border:0;border-radius:0;background:transparent}
 .briefing-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
 .briefing-header h2{font-size:17px;margin:0 0 3px}
 .briefing-header .briefing-meta{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(68vw,820px)}
@@ -117,14 +117,14 @@ body[data-view="briefing"] #briefingTranscript{flex:1;min-height:0;height:auto;m
 .briefing-overview details{border:1px solid var(--line);border-radius:7px;background:#101a1d}
 .briefing-overview summary{cursor:pointer;padding:9px 11px;font-weight:650}
 .briefing-section-body{padding:0 11px 10px}
-body[data-view="briefing"] .briefing-composer{position:static;padding:10px 0 0;flex-shrink:0}
+body[data-view="briefing"] .briefing-composer{position:static;padding:10px 0 0;flex-shrink:0;background:transparent}
 body[data-view="briefing"] .briefing-composer textarea{min-height:48px;height:54px;resize:vertical}
 body[data-view="briefing"] #briefingState{margin:5px 0 0}
 body[data-view="briefing"] #briefingState:empty{display:none}
 .briefing-header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.briefing-header-actions [hidden]{display:none}.briefing-run-picker{display:flex;align-items:center;gap:7px;margin:0 0 9px;color:var(--muted);font-size:11px}.briefing-run-picker select{min-width:0;max-width:100%;flex:1}.briefing-action{flex-shrink:0;max-height:min(42dvh,360px);overflow:auto;border:1px solid var(--cyan);border-radius:8px;background:var(--panel2);padding:12px;margin-top:8px}.briefing-action[hidden]{display:none}.briefing-action strong{display:block;margin-bottom:5px}.briefing-action p{margin:5px 0}.briefing-action pre{max-height:110px;overflow:auto;margin:8px 0}.briefing-action .toolbar{margin-top:9px}.briefing-action .field{margin-top:9px}.briefing-run-event .briefing-bubble{max-width:100%}.briefing-run-event details{margin-top:7px}.briefing-run-event pre{max-height:180px;overflow:auto}.briefing-run-event .briefing-meta{margin-top:5px}
 body[data-view="briefing"] .briefing-latest{position:absolute;right:24px;bottom:112px;z-index:5;margin:0;box-shadow:0 4px 14px #0009}
 @media(max-width:950px){body[data-view="briefing"] .main{padding-bottom:10px}body[data-view="briefing"] .main .workflow-switch{margin-bottom:8px}}
-@media(max-width:620px){body[data-view="briefing"] .main{height:calc(100dvh - 70px);padding-bottom:8px}body[data-view="briefing"] #briefingPanel{padding:10px}body[data-view="briefing"] .briefing-latest{right:18px;bottom:130px}body[data-view="briefing"] .briefing-composer{display:flex;align-items:end}body[data-view="briefing"] .briefing-composer button{width:auto;margin:0}}
+@media(max-width:620px){body[data-view="briefing"] .main{height:calc(100dvh - 70px);padding-bottom:8px}body[data-view="briefing"] .briefing-latest{right:18px;bottom:130px}body[data-view="briefing"] .briefing-composer{display:flex;align-items:end}body[data-view="briefing"] .briefing-composer button{width:auto;margin:0}}
 .workflow-mode-hint,.view-intro{display:none}
 .autonomy-card-actions{display:flex;align-items:center;justify-content:flex-end;gap:9px;flex-wrap:wrap}
 .icon-close{width:34px;height:34px;padding:0;display:grid;place-items:center;font-size:22px;line-height:1;flex:none;color:var(--muted)}.icon-close:hover{color:var(--text)}#actionConfirmDialog{width:min(560px,calc(100vw - 28px))}#actionConfirmDialog::backdrop{background:#0005}#actionConfirmDetails{margin-top:12px;line-height:1.5}#actionConfirmDetails p{margin:8px 0}#actionConfirmDetails pre{margin:8px 0;max-height:220px}#autonomyState:empty,#autonomyModelState:empty{display:none}
