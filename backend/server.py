@@ -758,10 +758,13 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                                                                          body['model'], body['goal']))
                 if self.command == 'POST' and path == '/api/autonomy/start-portscan-all':
                     body = self.body(4000)
-                    if (not isinstance(body, dict) or set(body) !=
-                            {'goal', 'targetSet', 'authorizedScope', 'authorized'} or
+                    required = {'goal', 'targetSet', 'authorizedScope', 'authorized'}
+                    if (not isinstance(body, dict) or not required <= set(body) or
+                            set(body) - required - {'continuationGoal', 'model'} or
                             body['authorized'] is not True or not isinstance(body['goal'], str) or
-                            not isinstance(body['targetSet'], str)):
+                            not isinstance(body['targetSet'], str) or
+                            not isinstance(body.get('continuationGoal', ''), str) or
+                            not isinstance(body.get('model', ''), str)):
                         raise ValueError('Review the complete approved host set and confirm the port scan.')
                     with workspace.lock:
                         scope = workspace.resolve_scope(body['authorizedScope'])
@@ -769,7 +772,8 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         if targets.get('mode') != 'port-scan-all' or targets['targetSet'] != body['targetSet']:
                             raise ValueError('Approved target set changed; review the host list again.')
                         run = workspace.autonomy.start_portscan_all(
-                            [row['hostId'] for row in targets['hosts']], scope, body['goal'])
+                            [row['hostId'] for row in targets['hosts']], scope, body['goal'],
+                            body.get('model', ''), body.get('continuationGoal', ''))
                     return self.send_json(202, run)
                 if self.command == 'POST' and path == '/api/autonomy/start-selected-goal':
                     body = self.body(4000)

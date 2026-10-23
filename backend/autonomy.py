@@ -228,13 +228,17 @@ class AutonomyController:
             self.thread.start()
             return run
 
-    def start_portscan_all(self, host_ids, scope, goal):
-        """Scan the top 100 TCP ports on every explicitly approved host."""
+    def start_portscan_all(self, host_ids, scope, goal, model='', continuation_goal=''):
+        """Survey approved hosts, optionally continuing the original AI goal afterward."""
         ws = self.workspace
         if not isinstance(host_ids, list) or not host_ids or len(host_ids) != len(set(host_ids)):
             raise ValueError('No distinct approved hosts were selected for the port scan.')
         if not isinstance(goal, str) or not 5 <= len(goal.strip()) <= 500:
             raise ValueError('Describe the all-host port scan in 5–500 characters.')
+        if (not isinstance(model, str) or len(model) > 200 or
+                not isinstance(continuation_goal, str) or
+                (continuation_goal and not 5 <= len(continuation_goal.strip()) <= 500)):
+            raise ValueError('Choose a valid model and continuation goal.')
         with ws.lock:
             if self.thread and self.thread.is_alive() or any(r.get('status') in
                     ('awaiting-approval', 'awaiting-host-review', 'awaiting-discovery') for r in self._load()['runs']):
@@ -246,14 +250,23 @@ class AutonomyController:
                 raise ValueError('An approved host changed; review the host list again.')
             for host in hosts.values():
                 require_target(host, scope)
+            if continuation_goal:
+                ws.llm.assert_configuration()
+                if model:
+                    ws.llm.select_model(requested=model)
             run = dict(id=uid('ai-run'), mode='port-scan', phase='survey', source='approved-hosts',
                        hostIds=host_ids, surveyedHostIds=[], hostSnapshots={hid:
                        {'ip': hosts[hid]['ip'], 'name': hosts[hid].get('name')} for hid in host_ids},
                        hostId=host_ids[0], hostName=f'{len(host_ids)} approved hosts', hostIp='',
-                       model='deterministic port scan', scope=scope, status='running',
+                       model=(model or 'server default') if continuation_goal else 'deterministic port scan',
+                       requestedModel=model if continuation_goal else '', scope=scope, status='running',
                        startedAt=now(), endedAt=None, maxChecks=None, stopReason='',
-                       goal=redact(goal.strip()), flags=[], events=[dict(type='plan', at=now(),
-                       reason='Scan each confirmed host separately, save the result, and continue after a host failure.',
+                       goal=redact(continuation_goal.strip() or goal.strip()),
+                       scanGoal=redact(goal.strip()), continuationGoal=bool(continuation_goal),
+                       flags=[], events=[dict(type='plan', at=now(),
+                       reason=('Scan each confirmed host, then select an evidence-backed host and continue the original goal.'
+                               if continuation_goal else
+                               'Scan each confirmed host separately, save the result, and continue after a host failure.'),
                        tool='nmap', expectedEvidence='Open TCP ports among the top 100 common ports.')])
             data = self._load()
             data['runs'] = [run] + data['runs'][:19]
@@ -726,8 +739,10 @@ class AutonomyController:
             sources = ai_flags + version_leads + rule_leads
             rows.append(dict(hostId=hid, score=(bool(ai_flags), bool(version_leads),
                 bool(rule_leads), len(services)), signals=signals,
-                findingIds=sorted({fid for item in sources for fid in item.get('findingIds', [])})[:12],
-                evidenceIds=sorted({eid for item in sources for eid in item.get('evidenceIds', [])})[:12]))
+                findingIds=sorted({fid for item in sources for fid in item.get('findingIds', [])} |
+                                  {service['id'] for service in services})[:12],
+                evidenceIds=sorted({eid for item in sources for eid in item.get('evidenceIds', [])} |
+                                   {eid for service in services for eid in service.get('evidenceIds', [])})[:12]))
         if not rows:
             return None
         chosen = max(rows, key=lambda row: row['score'])
@@ -1113,6 +1128,19 @@ class AutonomyController:
                 if not remaining:
                     failures = sum(e.get('type') == 'check' and e.get('outcome') != 'completed'
                                    for e in run['events'])
+                    if run.get('continuationGoal'):
+                        self._event(run_id, dict(type='observe',
+                            reason=f'Port survey saved results for {len(run["hostIds"])} approved hosts; '
+                                   f'{failures} failed checks. Select a host from linked evidence and replan '
+                                   'toward the original goal.'))
+                        host_id = self._select_deep_dive(run_id, scope)
+                        if host_id is None:
+                            return self._finish(run_id, 'completed',
+                                'Port survey ended without imported evidence for a justified deep dive; '
+                                'the original goal remains unverified.')
+                        ws.activity.update(self.activity_ids[run_id],
+                            detail='Port survey complete; continuing the original goal on an evidence-backed host.')
+                        return self._worker(run_id, host_id, scope, run.get('requestedModel', ''), stop_event)
                     return self._finish(run_id, 'completed',
                         f'Port scan attempted on {len(run["hostIds"])} approved hosts; {failures} failed checks need review.')
                 if time.monotonic() - started >= GROUP_MAX_SECONDS:

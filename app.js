@@ -532,7 +532,7 @@ function briefingRunAssessment(run){
   if(run.status==='awaiting-approval')return {status:'Needs your decision',reason:'A proposed command is waiting for review; the goal is not yet verified.',next:'Review the exact command in the action panel below.'};
   if(run.status==='awaiting-host-review')return {status:'Needs host approval',reason:'New host names need review before the investigation can continue.',next:'Review the discovered hosts in Targets & scope.'};
   if(run.status==='awaiting-discovery')return {status:'Paused',reason:detail||'The current survey segment ended before the investigation finished.',next:'Continue the saved investigation from the action panel.'};
-  const portScanComplete=run.mode==='port-scan'&&run.status==='completed'&&
+  const portScanComplete=run.mode==='port-scan'&&!run.continuationGoal&&run.status==='completed'&&
     (run.hostIds||[]).length>0&&(run.surveyedHostIds||[]).length===(run.hostIds||[]).length&&failed===0;
   if(portScanComplete)return {status:'Goal achieved',reason:`The saved run scanned all ${run.hostIds.length} approved hosts without a failed check.`,next:flags?'Review flagged results and select follow-up hosts in Findings.':'Review open services in Findings and choose follow-up hosts.'};
   if(run.status==='completed')return {status:goal?'Goal not verified':'Investigation finished',reason:detail||'The loop ended, but no explicit goal verdict was recorded.',next:flags?'Review the flagged evidence in Findings, then choose a follow-up.':'Review saved findings and ask a narrower follow-up question if the goal remains open.'};
@@ -690,18 +690,23 @@ $('#briefingTargetFilter').oninput=renderBriefingTargetChoices;
 $('#briefingTargetClose').onclick=()=>$('#briefingTargetDialog').close();
 $('#briefingTargetDialog').addEventListener('close',()=>{briefingTargetState=null;});
 $('#briefingTargetRetry').onclick=()=>{const corrected=$('#briefingTargetCorrection').value.trim();if(corrected.length<5){$('#briefingTargetCorrection').focus();return;}$('#briefingTargetDialog').close();$('#briefingQuestion').value=corrected;$('#briefingSend').click();};
-async function launchBriefingAllPortScan(goal,scope,resolution){
+async function launchBriefingAllPortScan(goal,scope,resolution,surveyGoal=goal,model='',messageIndex=-1){
   briefingBusy=true;$('#briefingSend').disabled=true;
   try{
     if(JSON.stringify(checkScope())!==JSON.stringify(scope))throw new Error('Saved scope changed. Review the host list again.');
-    const fresh=await post('/api/briefing/investigate/resolve',{goal,authorizedScope:scope});
+    const fresh=await post('/api/briefing/investigate/resolve',{goal:surveyGoal,authorizedScope:scope});
     if(fresh.mode!=='port-scan-all'||fresh.targetSet!==resolution.targetSet)throw new Error('Approved host list changed. Review the request again.');
     const hostList=fresh.hosts.map(host=>`${host.name} (${host.ip})`).join('\n');
     const excluded=fresh.excludedUnapproved?`<p>${fresh.excludedUnapproved} unapproved saved host${fresh.excludedUnapproved===1?' is':'s are'} excluded. Approve them in Scope before starting if they should be included.</p>`:'';
-    if(!await confirmScopedAction('Scan all approved hosts?',`<p>Goal: ${esc(goal)}</p><p>${fresh.hostCount} approved hosts · ${esc(fresh.profile)}. Yagura runs one validated Nmap TCP connection scan per host, saves results, and continues after individual host failures. A 30-minute segment can be resumed.</p>${excluded}<details><summary>Review every target</summary><pre>${esc(hostList)}</pre></details>`,'Start port scan'))return;
-    const run=await post('/api/autonomy/start-portscan-all',{goal,targetSet:fresh.targetSet,authorizedScope:scope,authorized:true});
+    const continuing=surveyGoal!==goal;
+    const continuation=continuing?'<p>After the survey, Yagura selects one host using saved evidence and continues toward the original goal. Validated catalog checks may run automatically; unlisted tools pause for exact command approval. The original goal is not complete when the port scan ends.</p>':'';
+    if(!await confirmScopedAction(continuing?'Start scoped investigation?':'Scan all approved hosts?',`<p>Goal: ${esc(goal)}</p><p>First step: ${fresh.hostCount} approved hosts · ${esc(fresh.profile)}. Yagura runs one validated Nmap TCP connection scan per host and saves the results. A 30-minute segment can be resumed.</p>${continuation}${excluded}<details><summary>Review every target</summary><pre>${esc(hostList)}</pre></details>`,continuing?'Start investigation':'Start port scan'))return;
+    const payload={goal:surveyGoal,targetSet:fresh.targetSet,authorizedScope:scope,authorized:true};
+    if(continuing){payload.continuationGoal=goal;payload.model=model;}
+    const run=await post('/api/autonomy/start-portscan-all',payload);
+    if(messageIndex>=0&&briefingMessages[messageIndex])briefingMessages[messageIndex].runId=run.id;
     $('#briefingQuestion').value='';autonomyCurrent=run.id;briefingSelectedRunId=run.id;await loadAutonomyHistory();renderBriefing();
-    $('#briefingState').textContent='Port scan started. Results appear in this conversation.';
+    $('#briefingState').textContent=continuing?'Investigation started. The port survey is the first step.':'Port scan started. Results appear in this conversation.';
   }catch(error){$('#briefingState').textContent=error.message;}finally{briefingBusy=false;$('#briefingSend').disabled=false;}
 }
 async function launchBriefingSelectedHosts(goal,scope,model,resolution){
@@ -753,7 +758,7 @@ async function reviewBriefingPlan(index){
   if(workflowMode==='manual'){$('#briefingState').textContent='Manual control is selected. Open Manual checks to choose a check.';return;}
   if(JSON.stringify(scope)!==JSON.stringify(item.scope)){$('#briefingState').textContent='Saved scope changed. Send the request again.';return;}
   const goal=item.goal,model=item.model,resolution=item.resolution;
-  if(resolution.mode==='port-scan-all')return launchBriefingAllPortScan(goal,scope,resolution);
+  if(resolution.mode==='port-scan-all')return launchBriefingAllPortScan(goal,scope,resolution,item.surveyGoal||goal,model,index);
   if(resolution.mode==='selected-hosts')return launchBriefingSelectedHosts(goal,scope,model,resolution);
   if(resolution.needsSelection){showBriefingTargetChoices(goal,scope,model,resolution);$('#briefingState').textContent='Choose the intended host.';return;}
   return launchBriefingGoal(goal,scope,model,{ip:resolution.ip,name:resolution.name});
@@ -795,7 +800,7 @@ $('#briefingSend').onclick=async()=>{
     if(contextKey!==briefingContextKey||JSON.stringify(checkScope())!==JSON.stringify(scope))throw new Error('Scope or conversation changed while planning. Send the request again.');
     briefingSelectedRunId='';
     const item={question:decision.safeMessage||question,action:decision.action,plan:decision.plan,reason:decision.reason,reply:decision.reply||{},
-      resolution:decision.resolution,goal:decision.goal,scope,model,results:{},runId:''};
+      resolution:decision.resolution,goal:decision.goal,surveyGoal:decision.surveyGoal,scope,model,results:{},runId:''};
     briefingMessages.push(item);
     $('#briefingQuestion').value='';
     renderBriefing();

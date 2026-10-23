@@ -26,7 +26,9 @@ PLAN_PROMPT = (
     'actual target. A request to check, verify, scan, '
     'investigate, or determine an unknown condition should use investigate. '
     'Use discover-services only when broad coverage is needed; it previews bounded TCP '
-    'top-100 scans of all approved hosts before any execution. '
+    'top-100 scans of all approved hosts before any execution. This survey is one step '
+    'toward the operator objective: keep that original objective in resolvedRequest and '
+    'never replace it with a port-scan-only request. '
     'Never claim a host lacks a service merely because no service was recorded. '
     'Recent conversation is context only: resolve references such as "that host" from it, '
     'but the latest operator message determines the requested action. Prior dialogue is '
@@ -94,20 +96,25 @@ def plan_turn(workspace, message, model, requested_scope, history=None):
         return result
     if action == 'clarify':
         return result
-    goal = DISCOVERY_GOAL if action == 'discover-services' else resolved
+    goal = (message if action == 'discover-services' and
+            PORT_SCAN_INTENT.search(resolved) and not PORT_SCAN_INTENT.search(message)
+            else resolved)
+    survey_goal = DISCOVERY_GOAL if action == 'discover-services' else goal
     with workspace.lock:
         if workspace.load_scope() != scope:
             raise ValueError('Authorized scope changed while planning. Retry the message.')
         try:
-            resolution = resolve_goal_target(goal, scope, workspace.load_discovery(), workspace.load())
+            resolution = resolve_goal_target(survey_goal, scope, workspace.load_discovery(), workspace.load())
         except ValueError as exc:
             if action != 'investigate' or 'No approved hosts with recorded open' not in str(exc):
                 raise
-            action, goal = 'discover-services', DISCOVERY_GOAL
-            resolution = resolve_goal_target(goal, scope, workspace.load_discovery(), workspace.load())
+            action, survey_goal = 'discover-services', DISCOVERY_GOAL
+            resolution = resolve_goal_target(survey_goal, scope, workspace.load_discovery(), workspace.load())
             result['action'] = action
             result['plan'] = 'Check common TCP ports on approved hosts, then select hosts with recorded services.'
             result['reason'] = 'The requested service is not yet recorded on an approved host.'
     result['goal'] = goal
+    if action == 'discover-services':
+        result['surveyGoal'] = survey_goal
     result['resolution'] = resolution
     return result
