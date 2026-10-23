@@ -665,11 +665,12 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(200, answer_question(workspace, body['question'], body['model']))
                 if self.command == 'POST' and path == '/api/briefing/investigate/resolve':
                     body = self.body(4000)
-                    if not isinstance(body, dict) or set(body) != {'goal', 'authorizedScope'}:
+                    if not isinstance(body, dict) or set(body) - {'goal', 'authorizedScope', 'selectedTarget'} or not {'goal', 'authorizedScope'} <= set(body):
                         raise ValueError('Supply one investigation goal and the current saved scope.')
                     with workspace.lock:
                         scope = workspace.resolve_scope(body['authorizedScope'])
-                        target = resolve_goal_target(body['goal'], scope, workspace.load_discovery(), workspace.load())
+                        target = resolve_goal_target(body['goal'], scope, workspace.load_discovery(),
+                                                     workspace.load(), body.get('selectedTarget'))
                     return self.send_json(200, target)
                 if self.command == 'GET' and path == '/api/check-proposals':
                     return self.send_json(200, workspace.check_proposals.list())
@@ -724,15 +725,17 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(202, workspace.autonomy.start(body['hostId'], scope, body.get('model', '')))
                 if self.command == 'POST' and path == '/api/autonomy/start-goal':
                     body = self.body(4000)
-                    if (not isinstance(body, dict) or set(body) !=
-                            {'hostId', 'goal', 'model', 'authorizedScope', 'authorized'} or
+                    if (not isinstance(body, dict) or set(body) -
+                            {'hostId', 'goal', 'model', 'authorizedScope', 'authorized', 'selectedTarget'} or
+                            not {'hostId', 'goal', 'model', 'authorizedScope', 'authorized'} <= set(body) or
                             body['authorized'] is not True or not isinstance(body['hostId'], str) or
                             not isinstance(body['model'], str) or len(body['model']) > 200):
                         raise ValueError('Confirm one approved target and investigation goal.')
                     with workspace.lock:
                         scope = workspace.resolve_scope(body['authorizedScope'])
-                        target = resolve_goal_target(body['goal'], scope, workspace.load_discovery(), workspace.load())
-                        if not target['approved'] or target['hostId'] != body['hostId']:
+                        target = resolve_goal_target(body['goal'], scope, workspace.load_discovery(),
+                                                     workspace.load(), body.get('selectedTarget'))
+                        if target.get('needsSelection') or not target['approved'] or target['hostId'] != body['hostId']:
                             raise ValueError('Goal target must be an approved, exact inventory IP/name pair.')
                     return self.send_json(202, workspace.autonomy.start(body['hostId'], scope,
                                                                          body['model'], body['goal']))

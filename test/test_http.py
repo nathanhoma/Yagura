@@ -582,7 +582,9 @@ class HttpTests(unittest.TestCase):
     def test_inventory_host_without_dns_can_be_approved_and_goal_run_replans(self):
         scope = self.workspace.save_scope({'cidrs': ['100.99.3.0/24'], 'domains': ['dev.03.crimsonia.net']})
         name = 'future.dev.03.crimsonia.net'
-        request = {'content': f'<host><fqdn>{name}</fqdn><connection-address>100.99.3.88</connection-address></host>',
+        other = 'booking.dev.03.crimsonia.net'
+        request = {'content': (f'<host><fqdn>{name}</fqdn><connection-address>100.99.3.88</connection-address></host>'
+                               f'<host><fqdn>{other}</fqdn><connection-address>100.99.3.21</connection-address></host>'),
                    'teamNumber': '03', 'suffix': 'dev.03.crimsonia.net', 'resolvers': [],
                    'authorizedScope': scope, 'authorized': True}
         status, imported = self.call('/api/discovery/inventory', 'POST', request)
@@ -591,8 +593,24 @@ class HttpTests(unittest.TestCase):
         goal = f'Inspect web services on {name} and report what the evidence supports.'
         target_body = {'goal': goal, 'authorizedScope': scope}
         self.assertEqual(self.call('/api/briefing/investigate/resolve', 'POST', target_body)[1]['approved'], False)
+        vague = self.call('/api/briefing/investigate/resolve', 'POST',
+                          {'goal': 'Inspect the dev web host', 'authorizedScope': scope})[1]
+        self.assertTrue(vague['needsSelection'])
+        self.assertEqual({h['name'] for h in vague['candidates']}, {name, other})
+        multiple = self.call('/api/briefing/investigate/resolve', 'POST',
+                             {'goal': f'Compare {name} with {other}', 'authorizedScope': scope})[1]
+        self.assertEqual(multiple['reason'], 'multiple-matches')
+        self.assertEqual({h['name'] for h in multiple['candidates']}, {name, other})
+        selected = {'ip': '100.99.3.88', 'name': name}
         self.assertEqual(self.call('/api/briefing/investigate/resolve', 'POST',
-                                   {'goal': 'Inspect unknown.dev.03.crimsonia.net', 'authorizedScope': scope})[0], 400)
+                                   {'goal': 'Inspect the dev web host', 'authorizedScope': scope,
+                                    'selectedTarget': selected})[1]['name'], name)
+        self.assertEqual(self.call('/api/briefing/investigate/resolve', 'POST',
+                                   {**target_body, 'selectedTarget': {'ip': '100.99.3.21', 'name': other}})[0], 400)
+        self.assertEqual(self.call('/api/briefing/investigate/resolve', 'POST',
+                                   {**target_body, 'selectedTarget': {'ip': [], 'name': other}})[0], 400)
+        self.assertEqual(self.call('/api/briefing/investigate/resolve', 'POST',
+                                   {'goal': 'Inspect unknown.dev.03.crimsonia.net', 'authorizedScope': scope})[1]['needsSelection'], True)
         status, approval = self.call('/api/discovery/inventory/approve', 'POST',
                                      {'hosts': [{'ip': '100.99.3.88', 'name': name}],
                                       'authorizedScope': scope, 'authorized': True})
@@ -621,6 +639,14 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(saved['goal'], goal)
         self.assertEqual(saved['events'][0]['type'], 'goal')
         self.assertFalse(self.calls)
+        self.assertEqual(self.call('/api/autonomy/start-goal', 'POST',
+                                   {'hostId': host_id, 'goal': 'Inspect the dev web host', 'model': '',
+                                    'authorizedScope': scope, 'authorized': True})[0], 400)
+        status, _ = self.call('/api/autonomy/start-goal', 'POST',
+                              {'hostId': host_id, 'goal': 'Inspect the dev web host', 'model': '',
+                               'selectedTarget': selected, 'authorizedScope': scope, 'authorized': True})
+        self.assertEqual(status, 202)
+        self.workspace.autonomy.thread.join(3)
 
     def test_discovery_saves_each_chunk_and_resumes_after_failure(self):
         self.call('/api/scope', 'PUT', {'cidrs': ['100.96.1.0/24'], 'domains': ['crimsonia.net']})

@@ -526,7 +526,63 @@ $('#briefingSettingsOpen').onclick=()=>$('#briefingSettingsDialog').showModal();
 $('#briefingSettingsClose').onclick=()=>$('#briefingSettingsDialog').close();
 $('#briefingRefresh').onclick=async()=>{const button=$('#briefingRefresh');button.disabled=true;$('#briefingState').textContent='Refreshing saved evidence…';try{briefingMessages=[];briefingSavedResults={};await refreshFindings();await loadAutonomyHistory();renderBriefing();$('#briefingState').textContent='';}catch(e){$('#briefingState').textContent=e.message;}finally{button.disabled=false;}};
 $('#briefingAsk').onclick=async()=>{const question=$('#briefingQuestion').value.trim();if(question.length<3||!briefingHostIds().length){$('#briefingState').textContent='Enter a question after approving hosts in Scope.';return;}const button=$('#briefingAsk'),contextKey=briefingContextKey;briefingBusy=true;button.disabled=true;$('#briefingState').textContent='Reading the approved inventory and linked evidence…';try{const reply=await post('/api/briefing/ask',{question,model:$('#briefingModel').value});if(contextKey===briefingContextKey){briefingMessages.push({question,reply,results:{}});$('#briefingQuestion').value='';renderBriefing();$('#briefingState').textContent='';}}catch(e){$('#briefingState').textContent=e.message;}finally{briefingBusy=false;button.disabled=!briefingHostIds().length;}};
-$('#briefingInvestigate').onclick=async()=>{const goal=$('#briefingQuestion').value.trim(),scope=checkScope(),model=$('#briefingModel').value;if(!scope||goal.length<5){$('#briefingState').textContent='Save scope and name one exact inventory hostname or IP in the goal.';return;}if(briefingBusy)return;briefingBusy=true;$('#briefingInvestigate').disabled=true;try{const target=await post('/api/briefing/investigate/resolve',{goal,authorizedScope:scope});const dnsNote=target.inventoryStatus==='verified'?'DNS verified':'DNS is absent or was not checked; Yagura will pin checks to the inventory IP';if(!await confirmScopedAction('Start AI investigation?',`<p>Goal: ${esc(goal)}</p><p>Target: ${esc(target.name)} · ${esc(target.ip)}</p><p>${esc(dnsNote)}${target.approved?'':' · This exact pair will be approved first'}.</p><p>Catalogued bounded checks can run automatically; unlisted tools pause for your approval.</p>`,'Start investigation'))return;let hostId=target.hostId;if(!target.approved){const approval=await post('/api/discovery/inventory/approve',{hosts:[{ip:target.ip,name:target.name}],authorizedScope:scope,authorized:true});hostId=approval.approved[0].hostId;await loadPendingDiscovery();await refreshFindings();}const run=await post('/api/autonomy/start-goal',{hostId,goal,model,authorizedScope:scope,authorized:true});briefingMessages.push({question:goal,runId:run.id,hostName:target.name,hostIp:target.ip});$('#briefingQuestion').value='';autonomyCurrent=run.id;await loadAutonomyHistory();renderBriefing();$('#briefingState').textContent='Investigation started. Open AI investigation for live steps.';}catch(e){$('#briefingState').textContent=e.message;}finally{briefingBusy=false;$('#briefingInvestigate').disabled=false;}};
+let briefingTargetState=null;
+function showBriefingTargetChoices(goal,scope,model,resolution){
+  briefingTargetState={goal,scope,model,candidates:resolution.candidates||[]};
+  const baseHint=resolution.reason==='multiple-matches'?'Several saved hosts are named. Choose one target.':'No exact host was named. Choose a saved target or correct the instruction.';
+  $('#briefingTargetHint').textContent=baseHint+(resolution.totalCandidates>briefingTargetState.candidates.length?` Showing ${briefingTargetState.candidates.length} of ${resolution.totalCandidates}; use Other to name a more specific host.`:'');
+  $('#briefingTargetFilter').value='';
+  $('#briefingTargetCorrection').value=goal;
+  renderBriefingTargetChoices();
+  $('#briefingTargetDialog').showModal();
+}
+function renderBriefingTargetChoices(){
+  const state=briefingTargetState,filter=$('#briefingTargetFilter').value.trim().toLowerCase();
+  if(!state)return;
+  const shown=state.candidates.map((row,index)=>({row,index})).filter(({row})=>!filter||row.name.toLowerCase().includes(filter)||row.ip.includes(filter));
+  $('#briefingTargetChoices').innerHTML=shown.length?shown.map(({row,index})=>`<button class="btn briefing-target-choice" type="button" data-target-choice="${index}"><span><strong>${esc(row.name)}</strong><small>${esc(row.ip)} · ${row.approved?'Approved':'Approval required'} · ${row.inventoryStatus==='verified'?'DNS verified':'Inventory IP'}</small></span><span aria-hidden="true">→</span></button>`).join(''):'<p class="empty">No candidates match this filter. Correct the instruction below.</p>';
+  $('#briefingTargetChoices').querySelectorAll('[data-target-choice]').forEach(button=>button.onclick=async()=>{
+    const chosen=state.candidates[Number(button.dataset.targetChoice)];
+    $('#briefingTargetDialog').close();
+    briefingTargetState=null;
+    await launchBriefingGoal(state.goal,state.scope,state.model,{ip:chosen.ip,name:chosen.name});
+  });
+}
+$('#briefingTargetFilter').oninput=renderBriefingTargetChoices;
+$('#briefingTargetClose').onclick=()=>$('#briefingTargetDialog').close();
+$('#briefingTargetDialog').addEventListener('close',()=>{briefingTargetState=null;});
+$('#briefingTargetRetry').onclick=()=>{const corrected=$('#briefingTargetCorrection').value.trim();if(corrected.length<5){$('#briefingTargetCorrection').focus();return;}$('#briefingTargetDialog').close();$('#briefingQuestion').value=corrected;$('#briefingInvestigate').click();};
+async function launchBriefingGoal(goal,scope,model,selectedTarget){
+  if(briefingBusy)return;
+  briefingBusy=true;$('#briefingInvestigate').disabled=true;
+  try{
+    if(JSON.stringify(checkScope())!==JSON.stringify(scope))throw new Error('Saved scope changed. Review the target again.');
+    const target=await post('/api/briefing/investigate/resolve',{goal,authorizedScope:scope,selectedTarget});
+    const dnsNote=target.inventoryStatus==='verified'?'DNS verified':target.inventoryStatus==='no-answer'?'No DNS answer; checks use the inventory IP':target.inventoryStatus==='inventory-only'?'DNS not checked; checks use the inventory IP':'Checks use the approved IP';
+    if(!await confirmScopedAction('Start AI investigation?',`<p>Goal: ${esc(goal)}</p><p>Target: ${esc(target.name)} · ${esc(target.ip)}</p><p>${esc(dnsNote)}${target.approved?'':' · This exact pair will be approved first'}.</p><p>Catalogued bounded checks can run automatically; unlisted tools pause for your approval.</p>`,'Start investigation'))return;
+    let hostId=target.hostId;
+    if(!target.approved){
+      const approval=await post('/api/discovery/inventory/approve',{hosts:[{ip:target.ip,name:target.name}],authorizedScope:scope,authorized:true});
+      hostId=approval.approved[0].hostId;
+      await loadPendingDiscovery();await refreshFindings();
+    }
+    const run=await post('/api/autonomy/start-goal',{hostId,goal,model,selectedTarget:{ip:target.ip,name:target.name},authorizedScope:scope,authorized:true});
+    briefingMessages.push({question:goal,runId:run.id,hostName:target.name,hostIp:target.ip});
+    $('#briefingQuestion').value='';autonomyCurrent=run.id;await loadAutonomyHistory();renderBriefing();
+    $('#briefingState').textContent='Investigation started. Open AI investigation for live steps.';
+  }catch(e){$('#briefingState').textContent=e.message;}finally{briefingBusy=false;$('#briefingInvestigate').disabled=false;}
+}
+$('#briefingInvestigate').onclick=async()=>{
+  const goal=$('#briefingQuestion').value.trim(),scope=checkScope(),model=$('#briefingModel').value;
+  if(!scope||goal.length<5){$('#briefingState').textContent='Save scope and describe the investigation goal.';return;}
+  if(briefingBusy)return;
+  briefingBusy=true;$('#briefingInvestigate').disabled=true;
+  try{
+    const resolution=await post('/api/briefing/investigate/resolve',{goal,authorizedScope:scope});
+    if(resolution.needsSelection){showBriefingTargetChoices(goal,scope,model,resolution);$('#briefingState').textContent='Choose the intended host.';}
+    else {briefingBusy=false;await launchBriefingGoal(goal,scope,model,{ip:resolution.ip,name:resolution.name});}
+  }catch(e){$('#briefingState').textContent=e.message;}finally{briefingBusy=false;$('#briefingInvestigate').disabled=false;}
+};
 function boxScroll(){const box=$('#briefingTranscript');box.scrollTop=box.scrollHeight;updateBriefingLatest();}
 async function reviewBriefingCandidate(messageIndex,candidateId){
   const message=briefingMessages[messageIndex],proposed=(messageIndex===-1?briefingSavedCandidates:message?.reply.candidates)?.find(c=>c.id===candidateId),contextKey=briefingContextKey;
