@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from backend import findings as F
 from backend.autonomy import FLAG_PROMPT, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS, TOOL_SELECTION_PROMPT
+from backend.llm import LlmError
 from backend.reviewed_check import validate as validate_reviewed_check
 from backend.server import Workspace
 
@@ -81,6 +82,25 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertIn('[REDACTED]', json.dumps(self.ws.load()))
         self.assertNotIn('very-secret', self.ws.findings_file.read_text())
+
+    def test_truncated_tool_selection_retries_once_with_larger_output_cap(self):
+        class TruncatedSelection(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                self.response_limits.append(max_tokens)
+                if max_tokens == 1200:
+                    raise LlmError('invalid-response', 'The local model response was truncated.')
+                return {'model': 'fake', 'data': {'toolId': None, 'unlistedTool': None,
+                        'reason': 'No further check is justified.'}}
+
+        model = TruncatedSelection()
+        self.ws.llm = model
+        with patch('backend.autonomy.available_tools', return_value=[]):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(model.response_limits, [1200, 3200])
+        self.assertEqual(run['events'][0]['type'], 'model-retry')
 
     def test_exact_catalogued_nmap_discovery_runs_without_review(self):
         class DiscoveryModel(FakeLlm):

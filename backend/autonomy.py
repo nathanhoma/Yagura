@@ -347,12 +347,23 @@ class AutonomyController:
                             if e.get('type') == 'check' and e.get('hostId') == host_id and e.get('command')]
             recent_commands = list(dict.fromkeys(saved_commands + run_commands))[-20:]
         tools = available_tools()
-        tool_choice = ws.llm.complete([{'role': 'system', 'content': TOOL_SELECTION_PROMPT},
-                                       {'role': 'user', 'content': json.dumps(dict(hostIp=host['ip'],
-                                           context=context, lastResult=last, tools=tools,
-                                           recentCommands=recent_commands,
-                                           revisionInstruction=redact(feedback)), ensure_ascii=False)}],
-                                      max_tokens=1200, model=model)['data']
+        selection_messages = [{'role': 'system', 'content': TOOL_SELECTION_PROMPT},
+                              {'role': 'user', 'content': json.dumps(dict(hostIp=host['ip'],
+                                  context=context, lastResult=last, tools=tools,
+                                  recentCommands=recent_commands,
+                                  revisionInstruction=redact(feedback)), ensure_ascii=False)}]
+        try:
+            tool_choice = ws.llm.complete(selection_messages, max_tokens=1200, model=model)['data']
+        except LlmError as exc:
+            if exc.code != 'invalid-response' or 'truncated' not in str(exc).lower():
+                raise
+            with ws.lock:
+                data = self._load()
+                run = next(r for r in data['runs'] if r['id'] == run_id)
+                run['events'].append(dict(type='model-retry', at=now(),
+                                          reason='Tool selection response was truncated.', maxTokens=3200))
+                self._save(data)
+            tool_choice = ws.llm.complete(selection_messages, max_tokens=3200, model=model)['data']
         if not isinstance(tool_choice, dict) or not isinstance(tool_choice.get('reason'), str):
             raise ValueError('AI tool selection format was invalid.')
         tool_id = tool_choice.get('toolId')
@@ -1078,7 +1089,7 @@ class AutonomyController:
                     return
                 result = self._run_reviewed(run_id, host_id, scope, proposal['command'], 45, reviewed=False)
                 if result['outcome'] != 'completed':
-                    return self._finish(run_id, 'stopped', 'Automatic host discovery failed or could not be imported.')
+                    return self._finish(run_id, 'stopped', 'Automatic check failed or could not be imported.')
                 self._review_check_result(run_id, host_id, scope, model, result)
                 last = {'check': proposal['command'], 'outcome': result['outcome'],
                         'evidenceIds': result['evidenceIds']}
