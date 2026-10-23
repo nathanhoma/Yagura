@@ -8,12 +8,11 @@ const autoKinds=['ping','nmap-ports','nmap-service','http-headers','ssh-hostkey'
 function checkOutcome(result){return result.outcome==='no-response'?'No response':result.outcome==='completed'?'Completed':result.outcome==='failed'?'Failed':result.ok?'Completed':'Failed';}
 let emailContacts=[],emailDrafts=[],activeDraft=null,draftDirty=false,draftBusy=false;
 const views={drafts:'Prepare, review, and save email drafts. Sender infrastructure can be configured later.',scope:'Define and save the authorized target ranges and domains before working with evidence or checks.',briefing:'Review what the saved evidence supports and ask grounded follow-up questions.',review:'Import output, inspect linked evidence, and correct findings.',checks:'Review grounded checks, then run a check against an authorized local target.',autonomy:'See exactly what the AI chose, what Yagura executed, and why it stopped.',triage:'Choose a host for deeper investigation from saved, linked evidence.'};
-const viewTitles={scope:'Scope',briefing:'Investigation chat',review:'Findings',checks:'Next checks',drafts:'Email drafts',autonomy:'AI investigation',triage:'Deep-dive candidates'};
-const aiViews=new Set(['autonomy','triage','briefing']),manualViews=new Set(['checks','drafts']);
+const viewTitles={scope:'Targets & scope',briefing:'Investigation chat',review:'Findings',checks:'Manual checks',drafts:'Email drafts',autonomy:'AI investigation',triage:'Deep-dive candidates'};
 let workflowMode='ai';
 try{workflowMode=localStorage.getItem('yagura-workflow-mode')==='manual'?'manual':'ai';}catch{}
-function applyWorkflowMode(){document.body.dataset.workflowMode=workflowMode;document.querySelectorAll('[data-workflow-switch]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.workflowSwitch===workflowMode)));$('#workflowModeHint').textContent=(workflowMode==='ai'?'Yagura chooses follow-up checks within the saved scope. You approve each run. Validated catalog commands run automatically; unlisted tools need review.':'Choose and review each check yourself. Optional AI suggestions and a previewed short sequence are available.')+' Switching modes does not stop an active run.';}
-function switchWorkflowMode(mode){if(mode!==workflowMode){workflowMode=mode;try{localStorage.setItem('yagura-workflow-mode',mode);}catch{}}location.hash=mode==='ai'?'#briefing':'#checks';showView();}
+function applyWorkflowMode(){document.body.dataset.workflowMode=workflowMode;document.querySelectorAll('[data-workflow-switch]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.workflowSwitch===workflowMode)));$('#briefingNewRun').hidden=workflowMode==='manual';$('#workflowModeHint').textContent=(workflowMode==='ai'?'Yagura can investigate after target confirmation. Catalog checks run automatically; unlisted tools need review.':'Questions still use saved evidence. Investigation plans lead to manual checks.')+' Switching modes does not stop an active run.';}
+function switchWorkflowMode(mode){if(mode!==workflowMode){workflowMode=mode;try{localStorage.setItem('yagura-workflow-mode',mode);}catch{}}applyWorkflowMode();renderBriefing();}
 document.querySelectorAll('[data-workflow-switch]').forEach(button=>button.onclick=()=>switchWorkflowMode(button.dataset.workflowSwitch));
 let latestAnalysis=null,briefingMessages=[],briefingContextKey='',briefingBusy=false,briefingSavedCandidates=[],briefingSavedResults={},briefingSelectedRunId='',briefingActionKey='',inventoryRows=[];
 let autonomyInventoryReady=false,autonomyModelRequired=false,autonomyMode='group',autonomyLimits={maxSeconds:600,groupMaxSeconds:900};
@@ -22,7 +21,7 @@ const emptyScope=()=>({cidrs:[],domains:[],matchMode:'and'});
 let savedScope=emptyScope(),scopeLoaded=false,scopeLoadError='';
 let stopDiscovery=false;
 const scopeLabel=()=>[savedScope.cidrs.join(', '),savedScope.domains.length?`${(savedScope.matchMode||'and').toUpperCase()} domains: `+savedScope.domains.join(', '):''].filter(Boolean).join(' · ');
-function showView(){const hash=location.hash.slice(1);const view=hash==='recon'?'scope':hash==='analysis'?'triage':hash;const selected=views[view]?view:'scope';if(!['autonomy','briefing'].includes(selected)&&$('#autonomyNewRun')?.open)$('#autonomyNewRun').close();if(selected!=='triage'&&$('#analysisNewDialog')?.open)$('#analysisNewDialog').close();if(aiViews.has(selected))workflowMode='ai';else if(manualViews.has(selected))workflowMode='manual';try{localStorage.setItem('yagura-workflow-mode',workflowMode);}catch{}applyWorkflowMode();document.body.dataset.view=selected;$('#viewTitle').textContent=viewTitles[selected];document.title=viewTitles[selected]+' · Yagura';$('#viewIntro').textContent=views[selected];document.querySelectorAll('.nav a,.mobile-nav a').forEach(a=>{const active=a.hash==='#'+selected;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});updateScopeGate();window.scrollTo(0,0);if(selected==='briefing')requestAnimationFrame(boxScroll);}
+function showView(){const hash=location.hash.slice(1);const view=hash==='recon'?'scope':['analysis','triage'].includes(hash)?'review':hash;const selected=views[view]?view:'briefing';if(!['autonomy','briefing'].includes(selected)&&$('#autonomyNewRun')?.open)$('#autonomyNewRun').close();if(selected!=='review'&&$('#analysisNewDialog')?.open)$('#analysisNewDialog').close();applyWorkflowMode();document.body.dataset.view=selected;$('#viewTitle').textContent=viewTitles[selected];document.title=viewTitles[selected]+' · Yagura';$('#viewIntro').textContent=views[selected];document.querySelectorAll('.nav a,.mobile-nav a').forEach(a=>{const active=a.hash==='#'+selected;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});const advanced=document.querySelector('.nav-advanced');if(advanced&&['checks','drafts'].includes(selected))advanced.open=true;updateScopeGate();window.scrollTo(0,0);if(selected==='briefing')requestAnimationFrame(boxScroll);if(['analysis','triage'].includes(hash))requestAnimationFrame(()=>setReviewTab('candidates'));}
 function updateScopeGate(){
   const ready=scopeLoaded&&savedScope.cidrs.length>0;
   document.body.dataset.scopeState=ready?'ready':scopeLoaded?'required':scopeLoadError?'error':'loading';
@@ -524,8 +523,8 @@ function briefingChatMessage(message,index){
   const uncertainty=reply.uncertainty?'<p class="briefing-meta">Uncertainty: '+esc(reply.uncertainty)+'</p>':'';
   const coverage=reply.coverage?'<p class="briefing-meta">Inventory: '+esc(reply.coverage.inventoryHosts)+'/'+esc(reply.coverage.approvedHosts)+' approved hosts · Detailed evidence: '+esc(reply.coverage.detailHosts)+' hosts</p>':'';
   const suggestions=(reply.candidates||[]).map(candidate=>briefingCandidateCard(candidate,index,message.results?.[candidate.id])).join('');
-  const action=message.resolution?'<button class="btn primary" type="button" data-briefing-plan="'+index+'">'+
-    (message.resolution.needsSelection?'Choose target':'Review targets')+'</button>':'';
+  const action=message.resolution?(workflowMode==='manual'?'<a class="btn primary" href="#checks">Open manual checks</a>':'<button class="btn primary" type="button" data-briefing-plan="'+index+'">'+
+    (message.resolution.needsSelection?'Choose target':'Review targets')+'</button>'):'';
   return briefingTurn('user','<p>'+esc(message.question)+'</p>')+
     briefingTurn('assistant',plan+reason+answer+uncertainty+coverage+
       briefingSources(reply.findingIds,reply.evidenceIds)+suggestions+action);
@@ -686,6 +685,7 @@ async function launchBriefingGoal(goal,scope,model,selectedTarget){
 async function reviewBriefingPlan(index){
   const item=briefingMessages[index],scope=checkScope();
   if(!item?.resolution||!scope)return;
+  if(workflowMode==='manual'){$('#briefingState').textContent='Manual control is selected. Open Manual checks to choose a check.';return;}
   if(JSON.stringify(scope)!==JSON.stringify(item.scope)){$('#briefingState').textContent='Saved scope changed. Send the request again.';return;}
   const goal=item.goal,model=item.model,resolution=item.resolution;
   if(resolution.mode==='port-scan-all')return launchBriefingAllPortScan(goal,scope,resolution);
@@ -710,7 +710,7 @@ $('#briefingSend').onclick=async()=>{
     $('#briefingQuestion').value='';
     renderBriefing();
     $('#briefingState').textContent='';
-    if(item.resolution){briefingBusy=false;await reviewBriefingPlan(briefingMessages.length-1);}
+    if(item.resolution&&workflowMode==='ai'){briefingBusy=false;await reviewBriefingPlan(briefingMessages.length-1);}
   }catch(error){$('#briefingState').textContent=error.message;}finally{briefingBusy=false;$('#briefingSend').disabled=false;}
 };
 $('#briefingQuestion').addEventListener('keydown',event=>{
