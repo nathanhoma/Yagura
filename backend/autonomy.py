@@ -397,7 +397,20 @@ class AutonomyController:
                     if run['status'] not in ('running', 'awaiting-approval') or self.stop_event.is_set():
                         raise ValueError('Run stopped while preparing the proposal.')
                 return None
-            command, program, _ = validate_reviewed_check(answer['command'], host['ip'])
+            try:
+                command, program, _ = validate_reviewed_check(answer['command'], host['ip'])
+            except ValueError as exc:
+                if not catalogued or feedback:
+                    raise
+                validation_issue = str(exc)[:300]
+                previous_command = str(answer['command'])[:1000]
+                if attempt:
+                    raise ValueError('AI could not form a valid catalog command: ' + validation_issue) from exc
+                try:
+                    documentation = read_help(tool_id, 'man')
+                except ValueError:
+                    pass
+                continue
             if program != tool_id:
                 raise ValueError('AI proposal used a different executable from the selected tool.')
             if redact(command) != command:

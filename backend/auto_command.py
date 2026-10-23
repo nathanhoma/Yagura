@@ -137,8 +137,12 @@ def _curl(args, host):
             i += 1
             continue
         _fail('remove unsupported curl option or argument ' + token[:40] + '.')
-    if len(urls) != 1 or not no_proxy or not max_time:
-        _fail('use one approved URL, --noproxy "*", and --max-time 1–15.')
+    if len(urls) != 1:
+        _fail('use exactly one URL on the approved host.')
+    if not no_proxy:
+        _fail("add the exact option --noproxy '*' to bypass proxy configuration.")
+    if not max_time:
+        _fail('add --max-time followed by a whole number from 1 to 15.')
     parsed, port = _url(urls[0], host)
     if parsed.hostname != host['ip'] and resolve != f"{host['name']}:{port}:{host['ip']}":
         _fail('pin the approved hostname with --resolve name:port:approved-IP.')

@@ -67,6 +67,12 @@ class AutoCommandTests(unittest.TestCase):
         self.scope['domains'] = ['other.example']
         self.reject('nmap -sn 100.96.1.70')
 
+    def test_curl_repair_feedback_names_the_missing_constraint(self):
+        with self.assertRaisesRegex(ValueError, "--noproxy"):
+            validate_auto_command('curl -q --max-time 5 http://100.96.1.70/', self.host, self.scope)
+        with self.assertRaisesRegex(ValueError, "--max-time"):
+            validate_auto_command("curl -q --noproxy '*' http://100.96.1.70/", self.host, self.scope)
+
     def test_tool_process_gets_no_model_key_or_proxy_configuration(self):
         completed = subprocess.CompletedProcess(['nmap', '--version'], 0, stdout='Nmap', stderr='')
         with patch.dict(os.environ, {'LLM_API_KEY': 'secret', 'HTTPS_PROXY': 'http://proxy.example'}, clear=False), \

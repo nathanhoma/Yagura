@@ -314,6 +314,45 @@ class AutonomyTests(unittest.TestCase):
         self.assertIn('could not form a bounded catalog command', run['stopReason'])
         self.assertEqual(self.calls, [])
 
+    def test_malformed_catalog_command_is_rebuilt_from_local_documentation(self):
+        class RepairModel(FakeLlm):
+            def __init__(self):
+                super().__init__()
+                self.selections = 0
+                self.proposals = 0
+
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                user = json.loads(messages[1]['content'])
+                self.prompts.append(user)
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.selections += 1
+                    return {'model': 'fake', 'data': {'toolId': 'nmap' if self.selections == 1 else None,
+                            'reason': 'Inspect the approved host.'}}
+                self.proposals += 1
+                command = ('nmap -sn 100.96.1.70\nwhoami' if self.proposals == 1
+                           else 'nmap -sn 100.96.1.70')
+                return {'model': 'fake', 'data': {'command': command,
+                        'reason': 'Check host response.', 'expectedEvidence': 'Host state.',
+                        'reviewNotes': 'One approved IP.'}}
+
+        model = RepairModel()
+        self.ws.llm = model
+        self.ws.runner = lambda program, args, timeout: self.calls.append((program, args, timeout)) or {
+            'ok': True, 'stdout': 'Nmap scan report for web.03.crimsonia.net (100.96.1.70)\nHost is up.\nNmap done: 1 IP address (1 host up) scanned',
+            'stderr': ''}
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Discovery'}]), \
+             patch('backend.autonomy.read_help', side_effect=lambda tool, source='help': {
+                 'tool': tool, 'invocation': ['nmap', '--help'] if source == 'help' else ['man', 'nmap'],
+                 'text': 'usage', 'truncated': False}) as docs:
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        self.assertEqual(self.ws.autonomy.history()['runs'][0]['status'], 'completed')
+        self.assertEqual([call.args for call in docs.call_args_list], [('nmap',), ('nmap', 'man')])
+        self.assertEqual(len(self.calls), 1)
+        self.assertTrue(model.prompts[2]['validationIssue'])
+
     def test_reviewed_command_parser_accepts_any_program_without_implicit_shell(self):
         good, program, args = validate_reviewed_check('nxc smb 100.96.1.70 --shares', '100.96.1.70')
         self.assertEqual(good, 'nxc smb 100.96.1.70 --shares')
