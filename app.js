@@ -534,7 +534,7 @@ function briefingRunAssessment(run){
   if(run.status==='awaiting-discovery')return {status:'Paused',reason:detail||'The current survey segment ended before the investigation finished.',next:'Continue the saved investigation from the action panel.'};
   const portScanComplete=run.mode==='port-scan'&&!run.continuationGoal&&run.status==='completed'&&
     (run.hostIds||[]).length>0&&(run.surveyedHostIds||[]).length===(run.hostIds||[]).length&&failed===0;
-  if(portScanComplete)return {status:'Goal achieved',reason:`The saved run scanned all ${run.hostIds.length} approved hosts without a failed check.`,next:flags?'Review flagged results and select follow-up hosts in Findings.':'Review open services in Findings and choose follow-up hosts.'};
+  if(portScanComplete)return {status:'Port scan completed',reason:`The saved run scanned all ${run.hostIds.length} approved hosts without a failed check.`,next:flags?'Review flagged results and select follow-up hosts in Findings.':'Review open services in Findings and choose follow-up hosts.'};
   if(run.status==='completed')return {status:goal?'Goal not verified':'Investigation finished',reason:detail||'The loop ended, but no explicit goal verdict was recorded.',next:flags?'Review the flagged evidence in Findings, then choose a follow-up.':'Review saved findings and ask a narrower follow-up question if the goal remains open.'};
   const next=/bounded catalog command|valid catalog command|unsupported .*option/i.test(detail)
     ?'Ask Yagura to replan this goal using supported options from the tool’s local help.'
