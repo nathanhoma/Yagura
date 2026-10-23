@@ -81,7 +81,7 @@ After an approved manual command has actually been run, the operator can record 
 
 A ping with complete statistics but zero replies is shown as **No response**, not **Failed**. Its observation is still saved, and an automatic run stops before the next check; no ICMP reply does not prove the host is down. Tool errors and results that cannot be imported remain **Failed**.
 
-The reference catalog still describes ffuf and Nuclei, but neither is executable through Yagura until an independently tested, host-level egress boundary is installed. The application-level pinning and approval checks are not a substitute for a host firewall or isolated network namespace, especially for third-party tools or a browser. Do not run ZAP or a browser-based crawler on kaliai05 before that boundary is verified.
+The reference catalog still describes ffuf and Nuclei, but neither is offered as an executable check. The four bounded Kali adapters below are manual checks with fixed targets and parameters. Their application-level pinning is not a substitute for a host firewall or isolated network namespace; do not enable broader third-party scanners, a browser crawler, or automatic execution of these adapters before an independently tested egress boundary is installed.
 
 Optional local LLM configuration uses an OpenAI-compatible endpoint:
 
@@ -114,6 +114,10 @@ Open **Email drafts** to select a discovered contact or enter a recipient manual
 Drafts are stored separately in `data/email-drafts.json` with recipient source references derived from saved contact findings. Conflicting edits from another browser tab are rejected rather than overwriting newer content. Drafts are not part of the findings JSON/CSV export; use `.eml` export for messages. The API provides `GET/POST /api/email-drafts`, `PATCH/DELETE /api/email-drafts/{id}`, `GET /api/email-drafts/{id}/export`, `GET /api/email-contacts`, and `POST /api/email-drafts/generate`.
 
 ## Target scope and server diagnostics
+
+The check catalog also offers **WhatWeb**, **Gobuster**, **sslscan**, and **dnsrecon** when their binaries are installed. Each check requires a saved scope, an approved host, and a recorded open service. WhatWeb and Gobuster use a loopback proxy pinned to that service IP and port; redirects are not followed, and request counts and runtimes are bounded. Gobuster is offered only after saved web routes, form metadata, or discovery hints identify a reason to inspect more paths; its bundled list has 19 paths. The installed WhatWeb disables TLS certificate verification, so its check is offered only for HTTP. Gobuster retains TLS verification for HTTPS. sslscan connects to the selected literal IP, uses the approved name for SNI, and records enabled protocols and accepted cipher suites. dnsrecon offers distinct zone choices from the approved resolver name and saved domain scope; it queries the selected resolver over TCP without zone transfers, brute force, or external OSINT. Returned names are observations, not approved targets. These four catalog checks require a human click to run and are not part of the automatic loop.
+
+The catalog also offers fixed Nmap `ssh2-enum-algos` and `rdp-enum-encryption` checks for recorded open SSH and 3389/tcp services. They save script output as linked evidence. A script result is a configuration observation, not proof of a vulnerability.
 
 - Optional **Yagura server network** diagnostics run `ip -j -4 addr` and `ip -j -4 neigh` and save results as linked findings/evidence for server context without changing the target scope.
 - Nmap discovery runs with `-n -sn --max-rate 5 --max-retries 1` after authorization is checked. The target must be contained in a saved CIDR. Results stay quarantined until DNS review and approval; discovery never changes the saved scope.
