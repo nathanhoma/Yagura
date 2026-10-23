@@ -667,7 +667,11 @@ class AutonomyController:
                 imported = True
             except ValueError as exc:
                 warning = str(exc)
-        outcome = 'completed' if result.get('ok') and imported and not warning else 'failed'
+        anonymous_smb_denied = (os.path.basename(program) == 'smbclient' and
+            not result.get('ok') and imported and not warning and
+            re.search(r'\bNT_STATUS_(?:ACCESS_DENIED|LOGON_FAILURE)\b', output))
+        outcome = ('completed' if result.get('ok') and imported and not warning else
+                   'denied' if anonymous_smb_denied else 'failed')
         current_run = next(r for r in self.history()['runs'] if r['id'] == run_id)
         self._event(run_id, dict(type='check', step=1 + sum(e['type'] == 'check' for e in current_run['events']),
                                  hostId=host_id,
@@ -770,7 +774,7 @@ class AutonomyController:
 
     def _review_check_result(self, run_id, host_id, scope, model, result):
         """Judge only the newly imported evidence for this host, then save an audit event."""
-        if result['outcome'] != 'completed' or not result['imported'] or not result['evidenceIds']:
+        if result['outcome'] not in ('completed', 'denied') or not result['imported'] or not result['evidenceIds']:
             return
         rule_changes = []
         try:
@@ -1067,7 +1071,7 @@ class AutonomyController:
                 if stop_event.is_set():
                     return self._finish(run_id, 'stopped', 'Stopped before the approved check.')
                 result = self._run_reviewed(run_id, run['hostId'], scope, reviewed_command, 45)
-                if result['outcome'] != 'completed':
+                if result['outcome'] not in ('completed', 'denied'):
                     return self._finish(run_id, 'stopped', 'Approved check failed or could not be imported.')
                 self._mark_survey(run_id, run['hostId'], checked=True)
                 self._review_check_result(run_id, run['hostId'], scope, model, result)
@@ -1188,7 +1192,7 @@ class AutonomyController:
                 result = self._run_reviewed(run_id, host_id, scope, reviewed_command, 45)
                 last = {'check': reviewed_command, 'outcome': result['outcome'],
                         'evidenceIds': result['evidenceIds']}
-                if result['outcome'] != 'completed':
+                if result['outcome'] not in ('completed', 'denied'):
                     return self._finish(run_id, 'stopped', 'Approved check failed or could not be imported.')
                 self._review_check_result(run_id, host_id, scope, model, result)
                 if run.get('goal'):
@@ -1217,7 +1221,7 @@ class AutonomyController:
                 if not proposal['autoApproved']:
                     return
                 result = self._run_reviewed(run_id, host_id, scope, proposal['command'], 45, reviewed=False)
-                if result['outcome'] != 'completed':
+                if result['outcome'] not in ('completed', 'denied'):
                     return self._finish(run_id, 'stopped', 'Automatic check failed or could not be imported.')
                 self._review_check_result(run_id, host_id, scope, model, result)
                 if run.get('goal'):

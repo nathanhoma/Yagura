@@ -5,7 +5,7 @@ const runResults=new Map();
 let currentSuggestions=[];
 let autoPlan=null,autoRunning=false,autoStop=false,autoCurrentCheck='',autoStartedAt=null;
 const autoKinds=['ping','nmap-ports','nmap-service','http-headers','ssh-hostkey','dns-ptr'];
-function checkOutcome(result){return result.outcome==='no-response'?'No response':result.outcome==='completed'?'Completed':result.outcome==='failed'?'Failed':result.ok?'Completed':'Failed';}
+function checkOutcome(result){return result.outcome==='no-response'?'No response':result.outcome==='denied'?'Access denied':result.outcome==='completed'?'Completed':result.outcome==='failed'?'Failed':result.ok?'Completed':'Failed';}
 let emailContacts=[],emailDrafts=[],activeDraft=null,draftDirty=false,draftBusy=false;
 const views={drafts:'Prepare, review, and save email drafts. Sender infrastructure can be configured later.',scope:'Define and save the authorized target ranges and domains before working with evidence or checks.',briefing:'Review what the saved evidence supports and ask grounded follow-up questions.',review:'Import output, inspect linked evidence, and correct findings.',checks:'Review grounded checks, then run a check against an authorized local target.',autonomy:'See exactly what the AI chose, what Yagura executed, and why it stopped.',triage:'Choose a host for deeper investigation from saved, linked evidence.'};
 const viewTitles={scope:'Targets & scope',briefing:'Investigation chat',review:'Findings',checks:'Manual checks',drafts:'Email drafts',autonomy:'AI investigation',triage:'Deep-dive candidates'};
@@ -523,7 +523,7 @@ function briefingRunEvent(event,index){
 }
 function briefingRunAssessment(run){
   const checks=(run.events||[]).filter(event=>event.type==='check');
-  const completed=checks.filter(event=>event.outcome==='completed'&&event.imported).length;
+  const completed=checks.filter(event=>['completed','denied'].includes(event.outcome)&&event.imported).length;
   const failed=checks.length-completed;
   const flags=(run.flags||[]).length;
   const goal=run.goal||'';

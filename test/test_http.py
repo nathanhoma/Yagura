@@ -927,6 +927,42 @@ class HttpTests(unittest.TestCase):
         self.workspace.autonomy.thread.join(3)
         self.assertEqual({args[-1] for _, args in self.calls[-2:]}, {'100.99.3.45', '100.99.3.57'})
 
+    def test_anonymous_smb_denial_is_saved_and_goal_loop_replans(self):
+        scope = self.workspace.save_scope({'cidrs': ['100.99.3.0/24'],
+                                           'domains': ['dev.03.crimsonia.net']})
+        name, ip = 'mail.dev.03.crimsonia.net', '100.99.3.45'
+        doc = F.parse_import({'tool': 'nmap', 'output':
+            f'Nmap scan report for {name} ({ip})\nHost is up.\n'
+            '445/tcp open microsoft-ds\nNmap done: 1 IP address (1 host up) scanned'})
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        host['approval'] = {'ip': ip, 'name': name, 'scope': scope}
+        self.workspace.save(doc)
+        class Model:
+            def assert_configuration(self):
+                pass
+        self.workspace.llm = Model()
+        seen = []
+        command = f'smbclient -L {ip} -N'
+        def propose(run_id, host_id, current_scope, model, last, *args):
+            seen.append(last)
+            return {'autoApproved': True, 'command': command} if len(seen) == 1 else None
+        self.workspace.autonomy._propose = propose
+        self.workspace.autonomy._review_check_result = lambda *args: None
+        self.workspace.runner = lambda program, args, timeout: {
+            'ok': False, 'stdout': 'session setup failed: NT_STATUS_ACCESS_DENIED\n', 'stderr': ''}
+        run = self.workspace.autonomy.start(host['id'], scope,
+            goal='Check anonymous SMB access and replan')
+        self.workspace.autonomy.thread.join(3)
+        saved = self.call('/api/autonomy')[1]['runs'][0]
+        self.assertEqual(saved['status'], 'completed')
+        checks = [event for event in saved['events'] if event['type'] == 'check']
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0]['outcome'], 'denied')
+        self.assertTrue(checks[0]['imported'])
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[1]['outcome'], 'denied')
+        self.assertTrue(seen[1]['evidenceIds'])
+
     def test_discovery_survey_continues_original_goal_after_port_scan(self):
         scope = self.workspace.save_scope({'cidrs': ['100.99.3.0/24'], 'domains': ['dev.03.crimsonia.net']})
         name, ip = 'web.dev.03.crimsonia.net', '100.99.3.57'
