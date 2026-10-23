@@ -521,14 +521,32 @@ function briefingRunEvent(event,index){
   else return '';
   return kind==='ai'?briefingTurn('assistant',`<strong>${esc(title)}</strong>${body?`<p>${esc(body)}</p>`:''}${extra}<p class="briefing-meta">${esc(date(event.at))}</p>`):briefingRunRecord(kind,label,title,body,extra,event.at);
 }
+function briefingRunAssessment(run){
+  const checks=(run.events||[]).filter(event=>event.type==='check');
+  const completed=checks.filter(event=>event.outcome==='completed'&&event.imported).length;
+  const failed=checks.length-completed;
+  const flags=(run.flags||[]).length;
+  const goal=run.goal||'';
+  const detail=run.stopReason||'';
+  if(run.status==='running')return {status:'In progress',reason:`${completed} saved check result${completed===1?'':'s'} so far. The goal has not been assessed yet.`,next:'Wait for the current investigation to finish.'};
+  if(run.status==='awaiting-approval')return {status:'Needs your decision',reason:'A proposed command is waiting for review; the goal is not yet verified.',next:'Review the exact command in the action panel below.'};
+  if(run.status==='awaiting-host-review')return {status:'Needs host approval',reason:'New host names need review before the investigation can continue.',next:'Review the discovered hosts in Targets & scope.'};
+  if(run.status==='awaiting-discovery')return {status:'Paused',reason:detail||'The current survey segment ended before the investigation finished.',next:'Continue the saved investigation from the action panel.'};
+  const portScanComplete=run.mode==='port-scan'&&run.status==='completed'&&
+    (run.hostIds||[]).length>0&&(run.surveyedHostIds||[]).length===(run.hostIds||[]).length&&failed===0;
+  if(portScanComplete)return {status:'Goal achieved',reason:`The saved run scanned all ${run.hostIds.length} approved hosts without a failed check.`,next:flags?'Review flagged results and select follow-up hosts in Findings.':'Review open services in Findings and choose follow-up hosts.'};
+  if(run.status==='completed')return {status:goal?'Goal not verified':'Investigation finished',reason:detail||'The loop ended, but no explicit goal verdict was recorded.',next:flags?'Review the flagged evidence in Findings, then choose a follow-up.':'Review saved findings and ask a narrower follow-up question if the goal remains open.'};
+  return {status:goal?'Goal not verified':'Investigation stopped',reason:detail||'The investigation stopped before a goal verdict was recorded.',next:failed?'Review the failed check and its saved output, then retry with a revised goal.':'Review the stop reason and saved findings before starting a follow-up.'};
+}
 function briefingRunConversation(run){
   if(!run)return '';
   const target=run.hostName||run.hostIp||`${(run.hostIds||[]).length} hosts`;
-  const intro=briefingRunRecord('activity','Investigation goal',run.goal||`Investigate ${target}`,'','',run.startedAt);
-  const events=(run.events||[]).map(briefingRunEvent).join('');
-  const finished=['completed','stopped','interrupted'].includes(run.status);
-  const ending=finished?briefingRunRecord('activity','Run status',run.status==='completed'?'Investigation completed':'Investigation '+run.status,run.stopReason||'No further step recorded.',`<span class="briefing-meta">${(run.events||[]).filter(e=>e.type==='check').length} checks · ${(run.flags||[]).length} review flags</span>`,run.endedAt):'';
-  return intro+events+ending;
+  const assessment=briefingRunAssessment(run),events=(run.events||[]).map(briefingRunEvent).join('');
+  const checks=(run.events||[]).filter(event=>event.type==='check').length;
+  const flags=(run.flags||[]).length;
+  const summary=`<article class="briefing-outcome"><span class="briefing-run-label">Investigation outcome</span><h3>${esc(assessment.status)}</h3><p><strong>Goal:</strong> ${esc(run.goal||`Investigate ${target}`)}</p><p><strong>Why:</strong> ${esc(assessment.reason)}</p><p><strong>Next:</strong> ${esc(assessment.next)}</p><span class="briefing-meta">${checks} checks · ${flags} review flags · ${esc(date(run.endedAt||run.startedAt))}</span></article>`;
+  const details=events?`<details class="briefing-run-details" data-briefing-section="run-${esc(run.id)}"><summary>Show execution details</summary><div class="briefing-run-events">${events}</div></details>`:'';
+  return summary+details;
 }
 function briefingChatMessage(message,index){
   const reply=message.reply||{};
