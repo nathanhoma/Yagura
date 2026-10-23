@@ -729,11 +729,16 @@ class HttpTests(unittest.TestCase):
             f'<host><status state="up"/><address addrtype="ipv4" addr="{ip}"/>'
             f'<hostnames><hostname name="{name}"/></hostnames><ports><port protocol="tcp" portid="{port}">'
             f'<state state="open"/><service name="{service}"/></port></ports></host>'
-            for (name, ip), port, service in zip(names, [80, 443, 22, 8080],
+            for (name, ip), port, service in zip(names, [80, 443, 443, 8080],
                                                  ['http', 'https', 'ssh', 'http'])) + '</nmaprun>'
         doc = self.workspace.load()
         F.merge_parsed(doc, F.parse_import({'tool': 'nmap', 'output': xml}))
         self.workspace.save(doc)
+        ssh_status, ssh_preview = self.call('/api/briefing/investigate/resolve', 'POST',
+            {'goal': 'SSHサービスがあるホストを調査して', 'authorizedScope': scope})
+        self.assertEqual(ssh_status, 200, ssh_preview)
+        self.assertEqual(ssh_preview.get('mode'), 'selected-hosts', ssh_preview)
+        self.assertEqual(ssh_preview['hosts'][0]['name'], names[2][0])
         status, preview = self.call('/api/briefing/investigate/resolve', 'POST',
                                     {'goal': goal, 'authorizedScope': scope})
         self.assertEqual(status, 200, preview)

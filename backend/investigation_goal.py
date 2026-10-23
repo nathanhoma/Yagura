@@ -13,12 +13,12 @@ PORT_SCAN_INTENT = re.compile(r'ポート.{0,8}(?:スキャン|調査|確認)|\b
 ALL_HOSTS_INTENT = re.compile(r'全(?:ての)?(?:対象)?ホスト|すべての(?:対象)?ホスト|全対象|\b(?:all|every)\s+(?:approved\s+|exercise\s+|in-scope\s+)?(?:hosts?|targets?)\b|\bentire\s+scope\b', re.I)
 SERVICE_GROUPS = (
     ('web', re.compile(r'web|ウェブ|ホームページ|http', re.I), {80, 443, 8080, 8443, 8000, 8008, 8888}, ('http', 'https', 'http-proxy')),
-    ('ssh', re.compile(r'\bssh\b', re.I), {22}, ('ssh',)),
-    ('smb', re.compile(r'\bsmb\b|ファイル共有', re.I), {139, 445}, ('smb', 'microsoft-ds', 'netbios-ssn')),
-    ('rdp', re.compile(r'\brdp\b|リモートデスクトップ', re.I), {3389}, ('ms-wbt-server', 'rdp')),
-    ('dns', re.compile(r'\bdns\b', re.I), {53}, ('domain', 'dns')),
-    ('mail', re.compile(r'\b(?:mail|smtp|imap|pop3)\b|メール', re.I), {25, 110, 143, 465, 587, 993, 995}, ('smtp', 'imap', 'pop3')),
-    ('database', re.compile(r'\b(?:database|sql|mysql|postgres|mongodb|redis)\b|データベース', re.I), {1433, 1521, 3306, 5432, 6379, 27017}, ('mysql', 'postgres', 'ms-sql', 'redis', 'mongodb')),
+    ('ssh', re.compile(r'(?<![A-Za-z0-9])ssh(?![A-Za-z0-9])', re.I), {22}, ('ssh',)),
+    ('smb', re.compile(r'(?<![A-Za-z0-9])smb(?![A-Za-z0-9])|ファイル共有', re.I), {139, 445}, ('smb', 'microsoft-ds', 'netbios-ssn')),
+    ('rdp', re.compile(r'(?<![A-Za-z0-9])rdp(?![A-Za-z0-9])|リモートデスクトップ', re.I), {3389}, ('ms-wbt-server', 'rdp')),
+    ('dns', re.compile(r'(?<![A-Za-z0-9])dns(?![A-Za-z0-9])', re.I), {53}, ('domain', 'dns')),
+    ('mail', re.compile(r'(?<![A-Za-z0-9])(?:mail|smtp|imap|pop3)(?![A-Za-z0-9])|メール', re.I), {25, 110, 143, 465, 587, 993, 995}, ('smtp', 'imap', 'pop3')),
+    ('database', re.compile(r'(?<![A-Za-z0-9])(?:database|sql|mysql|postgres|mongodb|redis)(?![A-Za-z0-9])|データベース', re.I), {1433, 1521, 3306, 5432, 6379, 27017}, ('mysql', 'postgres', 'ms-sql', 'redis', 'mongodb')),
 )
 GROUP_HOST_INTENT = re.compile(r'ホスト|サーバー|対象|\b(?:hosts|servers|targets)\b', re.I)
 
@@ -30,6 +30,17 @@ def _service_group(goal):
     if len(matches) > 1:
         raise ValueError('Specify one service category at a time, or name the exact hosts.')
     return matches[0] if matches else None
+
+
+def _matches_service(service, category):
+    label, _, ports, names = category
+    name = (service.get('name') or '').lower()
+    if label == 'web':
+        if 'http' in name:
+            return True
+    elif any(name.startswith(prefix) for prefix in names):
+        return True
+    return service.get('port') in ports and name in ('', 'unknown', 'tcpwrapped', 'ssl')
 
 
 def selected_hosts(goal, scope, discovery, document, category=None):
@@ -45,9 +56,8 @@ def selected_hosts(goal, scope, discovery, document, category=None):
     for row in sorted(candidates, key=lambda item: (item['ip'], item['name'])):
         matched = []
         if category:
-            _, _, ports, names = category
             matched = [service for service in service_rows.get(row['hostId'], [])
-                       if service.get('port') in ports or any((service.get('name') or '').lower().startswith(name) for name in names)]
+                       if _matches_service(service, category)]
             if not matched:
                 continue
         if not row['approved']:
