@@ -579,6 +579,49 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/discovery/inventory', 'POST', request)[0], 200)
         self.assertEqual(self.call('/api/workflow')[1]['candidates'], [])
 
+    def test_inventory_host_without_dns_can_be_approved_and_goal_run_replans(self):
+        scope = self.workspace.save_scope({'cidrs': ['100.99.3.0/24'], 'domains': ['dev.03.crimsonia.net']})
+        name = 'future.dev.03.crimsonia.net'
+        request = {'content': f'<host><fqdn>{name}</fqdn><connection-address>100.99.3.88</connection-address></host>',
+                   'teamNumber': '03', 'suffix': 'dev.03.crimsonia.net', 'resolvers': [],
+                   'authorizedScope': scope, 'authorized': True}
+        status, imported = self.call('/api/discovery/inventory', 'POST', request)
+        self.assertEqual(status, 200)
+        self.assertEqual(imported['inventory'][0]['status'], 'inventory-only')
+        goal = f'Inspect web services on {name} and report what the evidence supports.'
+        target_body = {'goal': goal, 'authorizedScope': scope}
+        self.assertEqual(self.call('/api/briefing/investigate/resolve', 'POST', target_body)[1]['approved'], False)
+        self.assertEqual(self.call('/api/briefing/investigate/resolve', 'POST',
+                                   {'goal': 'Inspect unknown.dev.03.crimsonia.net', 'authorizedScope': scope})[0], 400)
+        status, approval = self.call('/api/discovery/inventory/approve', 'POST',
+                                     {'hosts': [{'ip': '100.99.3.88', 'name': name}],
+                                      'authorizedScope': scope, 'authorized': True})
+        self.assertEqual(status, 200)
+        host_id = approval['approved'][0]['hostId']
+        target = self.call('/api/briefing/investigate/resolve', 'POST', target_body)[1]
+        self.assertEqual(target['hostId'], host_id)
+        self.assertEqual(target['inventoryStatus'], 'inventory-only')
+        class StopModel:
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, **kwargs):
+                self.goal = json.loads(messages[1]['content'])['goal']
+                return {'model': 'fake', 'data': {'toolId': None, 'unlistedTool': None,
+                                                'reason': 'No further safe check is justified.'}}
+        model = StopModel()
+        self.workspace.llm = model
+        status, run = self.call('/api/autonomy/start-goal', 'POST',
+                                {'hostId': host_id, 'goal': goal, 'model': '',
+                                 'authorizedScope': scope, 'authorized': True})
+        self.assertEqual(status, 202)
+        self.workspace.autonomy.thread.join(3)
+        self.assertEqual(model.goal, goal)
+        saved = self.call('/api/autonomy')[1]['runs'][0]
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(saved['goal'], goal)
+        self.assertEqual(saved['events'][0]['type'], 'goal')
+        self.assertFalse(self.calls)
+
     def test_discovery_saves_each_chunk_and_resumes_after_failure(self):
         self.call('/api/scope', 'PUT', {'cidrs': ['100.96.1.0/24'], 'domains': ['crimsonia.net']})
         attempted = []

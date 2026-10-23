@@ -89,21 +89,26 @@ def parse_inventory(content, team_number, suffix, scope):
 
 
 def verify_inventory_host(host, resolvers, scope, runner):
-    """Require each resolver to map the inventory name to its exact listed IP."""
+    """Record DNS provenance; an exact scoped inventory pair can also lack DNS."""
+    if resolvers == []:
+        return {'status': 'inventory-only', 'queries': [], 'addresses': [], 'dns': None}
     validate_resolvers(resolvers, scope)
     queries = []
     answers = []
+    failures = []
     for resolver in resolvers:
         result = runner('dig', ['@' + resolver, '+time=2', '+tries=1', '+noall', '+answer',
                                 '+ttlid', host['name'], 'A'], 5)
         records = parse_dns_answer(result.get('stdout', ''), 'A') if result.get('ok') else []
+        failures.append(not result.get('ok'))
         addresses = sorted({r['value'] for r in records if r['name'] == host['name']})
         answers.append(addresses)
         queries.append({'resolver': resolver, 'queriedAt': now(), 'qtype': 'A',
                         'question': host['name'], 'records': records,
                         'error': str(result.get('stderr', ''))[:200] if not result.get('ok') else ''})
     if all(not row for row in answers):
-        return {'status': 'no-answer', 'queries': queries, 'addresses': [], 'dns': None}
+        return {'status': 'dns-unavailable' if any(failures) else 'no-answer',
+                'queries': queries, 'addresses': [], 'dns': None}
     if any(row != [host['ip']] for row in answers):
         return {'status': 'dns-mismatch', 'queries': queries,
                 'addresses': sorted({ip for row in answers for ip in row}), 'dns': None}

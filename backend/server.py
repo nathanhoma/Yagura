@@ -21,9 +21,10 @@ from .llm import LlmService, private_url
 from .llm_metrics import LlmMetrics
 from .workflow import COMMAND_CATALOG, is_local_ip, is_tls_service, workflow
 from .web_contacts import website_url
-from .scope import DOMAIN_LABEL, normalize_scope, valid_cidr
+from .scope import DOMAIN_LABEL, host_allowed, normalize_scope, valid_cidr
 from .discovery import contained_range, discovery_chunks, discovery_progress, dns_review, name_discovery, approval_name
 from .inventory import parse_inventory, verify_inventory_host
+from .investigation_goal import resolve_goal_target
 from .sensitive import redact, sanitize_document
 from .outbound import require_target, require_web_origin
 from .autonomy import AutonomyController
@@ -662,6 +663,14 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     if not isinstance(body, dict) or set(body) != {'question', 'model'}:
                         raise ValueError('Supply a question and optional model.')
                     return self.send_json(200, answer_question(workspace, body['question'], body['model']))
+                if self.command == 'POST' and path == '/api/briefing/investigate/resolve':
+                    body = self.body(4000)
+                    if not isinstance(body, dict) or set(body) != {'goal', 'authorizedScope'}:
+                        raise ValueError('Supply one investigation goal and the current saved scope.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                        target = resolve_goal_target(body['goal'], scope, workspace.load_discovery(), workspace.load())
+                    return self.send_json(200, target)
                 if self.command == 'GET' and path == '/api/check-proposals':
                     return self.send_json(200, workspace.check_proposals.list())
                 if self.command == 'POST' and path == '/api/check-proposals':
@@ -713,6 +722,20 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     with workspace.lock:
                         scope = workspace.resolve_scope(body.get('authorizedScope'))
                     return self.send_json(202, workspace.autonomy.start(body['hostId'], scope, body.get('model', '')))
+                if self.command == 'POST' and path == '/api/autonomy/start-goal':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) !=
+                            {'hostId', 'goal', 'model', 'authorizedScope', 'authorized'} or
+                            body['authorized'] is not True or not isinstance(body['hostId'], str) or
+                            not isinstance(body['model'], str) or len(body['model']) > 200):
+                        raise ValueError('Confirm one approved target and investigation goal.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                        target = resolve_goal_target(body['goal'], scope, workspace.load_discovery(), workspace.load())
+                        if not target['approved'] or target['hostId'] != body['hostId']:
+                            raise ValueError('Goal target must be an approved, exact inventory IP/name pair.')
+                    return self.send_json(202, workspace.autonomy.start(body['hostId'], scope,
+                                                                         body['model'], body['goal']))
                 if self.command == 'POST' and path == '/api/autonomy/start-group':
                     body = self.body()
                     if (not isinstance(body, dict) or set(body) - {'hostIds', 'model', 'authorizedScope', 'authorized'} or
@@ -949,7 +972,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     if (not isinstance(body, dict) or set(body) !=
                             {'content', 'teamNumber', 'suffix', 'resolvers', 'authorizedScope', 'authorized'} or
                             body['authorized'] is not True):
-                        raise ValueError('Supply the inventory, team number, hostname suffix, and internal resolvers.')
+                        raise ValueError('Supply the inventory, team number, hostname suffix, and optional resolver list.')
                     with workspace.lock:
                         scope = workspace.load_scope()
                         if normalize_scope(body['authorizedScope']) != scope:
@@ -974,7 +997,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                                 if current and current.get('approved') and current.get('approvedName') != item['name']:
                                     item['status'] = 'host-conflict'
                                 if (current and current.get('approved') and current.get('approvedName') == item['name']
-                                        and item['status'] != 'verified'):
+                                        and item['status'] in ('dns-mismatch', 'dns-review-needed', 'host-conflict')):
                                     current['approved'] = False
                                     current['dns'] = item['dns']
                                     host = next((h for h in doc['findings'] if h['kind'] == 'host' and
@@ -988,7 +1011,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             data['inventoryIssues'] = parsed['issues']
                             data['inventoryIssuesScope'] = scope
                             for item in checked:
-                                if item['status'] not in ('verified', 'dns-review-needed'):
+                                if item['status'] not in ('verified', 'dns-review-needed', 'no-answer', 'inventory-only'):
                                     continue
                                 row = next((h for h in data['hosts'] if h['ip'] == item['ip'] and
                                     normalize_scope(h.get('scope')) == scope), None)
@@ -1029,31 +1052,39 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             seen.add((item['ip'], item['name']))
                             inv = next((h for h in data.get('inventory', []) if h.get('ip') == item['ip'] and
                                 h.get('name') == item['name'] and h.get('scope') == scope and
-                                h.get('status') == 'verified'), None)
+                                h.get('status') in ('verified', 'no-answer', 'inventory-only')), None)
                             row = next((h for h in data['hosts'] if h.get('ip') == item['ip'] and
                                 h.get('inventoryName') == item['name'] and h.get('scope') == scope), None)
                             if not inv or not row or row.get('approved'):
-                                raise ValueError('Inventory host is unverified, changed, or already approved.')
-                            approval_name(row, item['name'], scope)
+                                raise ValueError('Inventory pair is ineligible, changed, or already approved.')
+                            if any(other.get('approved') and other.get('approvedName') == item['name'] and
+                                   other.get('ip') != item['ip'] and other.get('scope') == scope
+                                   for other in data['hosts']):
+                                raise ValueError('Hostname is already approved for another inventory IP.')
+                            if inv['status'] == 'verified':
+                                approval_name(row, item['name'], scope)
+                            elif not host_allowed({'ip': item['ip'], 'name': item['name']}, scope):
+                                raise ValueError('Inventory IP/name pair is outside the saved scope.')
                             selected.append((row, inv))
                         doc = workspace.load()
                         approved = []
                         for row, inv in selected:
                             when = F.now()
-                            ev = dict(id=F.uid('evidence'), tool='dns-review', command='Inventory host approval',
+                            ev = dict(id=F.uid('evidence'), tool='dns-review' if inv['status'] == 'verified' else 'inventory-approval', command='Inventory host approval',
                                 output=json.dumps({'ip': row['ip'], 'name': inv['name'],
-                                    'seedQueries': row['seedQueries'], 'review': row['dns']}),
+                                    'inventoryStatus': inv['status'], 'seedQueries': row['seedQueries'], 'review': row['dns']}),
                                 observedAt=when, importedAt=when, format='json')
                             host = next((h for h in doc['findings'] if h['kind'] == 'host' and h['ip'] == row['ip']), None)
                             if host is None:
                                 host = F.record('host', dict(ip=row['ip'], aliases=[], name=inv['name'],
                                     state=row['status'], local=False, title=row['ip'],
-                                    detail='Approved after inventory and DNS review.'), ev['id'], when)
+                                    detail='Approved exact inventory IP/name pair' + (' after DNS review.' if inv['status'] == 'verified' else ' without DNS verification.')), ev['id'], when)
                                 doc['findings'].append(host)
                             else:
                                 host['name'] = inv['name']
                                 host['evidenceIds'] = list(dict.fromkeys(host['evidenceIds'] + [ev['id']]))
-                            host['approval'] = dict(ip=row['ip'], name=inv['name'], scope=scope, approvedAt=when)
+                            host['approval'] = dict(ip=row['ip'], name=inv['name'], scope=scope, approvedAt=when,
+                                                    source='dns-verified-inventory' if inv['status'] == 'verified' else 'inventory-only')
                             doc['evidence'].append(ev)
                             row.update(approved=True, approvedName=inv['name'], approvedAt=when)
                             approved.append({'ip': row['ip'], 'name': inv['name'], 'hostId': host['id']})

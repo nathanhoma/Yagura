@@ -74,11 +74,15 @@ class AutonomyTests(unittest.TestCase):
         self.ws.llm = ToolLlm()
         with patch('backend.autonomy.available_tools', return_value=[{'id': 'curl', 'purpose': 'HTTP'}]), \
              patch('backend.autonomy.read_help', return_value={'tool': 'curl', 'invocation': ['curl', '--help'], 'text': 'usage', 'truncated': False}):
-            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.start(self.host['id'], self.scope,
+                                   goal='Inspect HTTP headers and report supported observations.')
             self.ws.autonomy.thread.join(3)
         saved = self.ws.autonomy.history()['runs'][0]
         self.assertEqual(saved['status'], 'completed')
-        self.assertEqual([e['type'] for e in saved['events']], ['proposal', 'auto-approval', 'check', 'flag-review', 'stop'])
+        self.assertEqual([e['type'] for e in saved['events']],
+                         ['goal', 'proposal', 'plan', 'auto-approval', 'check', 'flag-review', 'observe', 'stop'])
+        self.assertEqual(self.ws.llm.prompts[0]['goal'], saved['goal'])
+        self.assertTrue(any(p.get('lastResult', {}).get('evidenceIds') for p in self.ws.llm.prompts[2:]))
         self.assertEqual(len(self.calls), 1)
         self.assertIn('[REDACTED]', json.dumps(self.ws.load()))
         self.assertNotIn('very-secret', self.ws.findings_file.read_text())
