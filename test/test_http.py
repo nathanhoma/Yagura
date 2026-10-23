@@ -11,7 +11,7 @@ from unittest.mock import patch
 from backend import findings as F
 from backend.autonomy import TOOL_SELECTION_PROMPT
 from backend.briefing_orchestrator import PLAN_PROMPT
-from backend.briefing import _select_hosts
+from backend.briefing import GENERAL_PROMPT, _select_hosts
 from backend.llm import LlmService
 from backend.llm import LlmError
 from backend.server import Workspace, create_server
@@ -162,6 +162,51 @@ class HttpTests(unittest.TestCase):
         self.assertTrue(answer['supported'])
         self.assertEqual(answer['findingIds'], [host['id']])
         self.assertEqual(self.workspace.llm.max_tokens, 32768)
+        self.assertEqual(self.calls, [])
+
+    def test_general_chat_answers_without_scope_or_hosts(self):
+        class Model:
+            def __init__(self):
+                self.prompts = []
+            def complete(self, messages, max_tokens=0, model=''):
+                self.prompts.append(messages[0]['content'])
+                if messages[0]['content'] == PLAN_PROMPT:
+                    return {'model': 'fake', 'data': {'action': 'general',
+                        'plan': 'Explain the concept.', 'reason': 'No workspace facts are requested.'}}
+                self.payload = json.loads(messages[1]['content'])
+                return {'model': 'fake', 'data': {'answer': 'TLS protects data in transit.',
+                    'uncertainty': 'This does not verify any host.'}}
+        self.workspace.llm = Model()
+        status, result = self.call('/api/briefing/plan', 'POST',
+            {'message': 'What is TLS?', 'model': '', 'authorizedScope': None,
+             'history': [{'role': 'user', 'content': 'password=abc123'}]})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['action'], 'general')
+        self.assertEqual(result['reply']['kind'], 'general')
+        self.assertEqual(result['reply']['findingIds'], [])
+        self.assertEqual(self.workspace.llm.prompts, [PLAN_PROMPT, GENERAL_PROMPT])
+        self.assertNotIn('abc123', str(self.workspace.llm.payload))
+        self.assertEqual(self.calls, [])
+        scope = self.workspace.save_scope({'cidrs': ['100.96.1.0/24'], 'domains': []})
+        status, result = self.call('/api/briefing/plan', 'POST',
+            {'message': 'What is TLS?', 'model': '', 'authorizedScope': scope})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['action'], 'general')
+
+    def test_investigation_still_requires_scope_and_approved_hosts(self):
+        class Model:
+            def complete(self, messages, max_tokens=0, model=''):
+                return {'model': 'fake', 'data': {'action': 'investigate',
+                    'plan': 'Check the host.', 'reason': 'A live check was requested.'}}
+        self.workspace.llm = Model()
+        payload = {'message': 'Check this host', 'model': '', 'authorizedScope': None}
+        status, result = self.call('/api/briefing/plan', 'POST', payload)
+        self.assertEqual(status, 400)
+        self.assertIn('scope', str(result).lower())
+        scope = self.workspace.save_scope({'cidrs': ['100.96.1.0/24'], 'domains': []})
+        status, result = self.call('/api/briefing/plan', 'POST', {**payload, 'authorizedScope': scope})
+        self.assertEqual(status, 400)
+        self.assertIn('Approve hosts', str(result))
         self.assertEqual(self.calls, [])
 
     def test_chat_planner_reads_or_previews_checks_without_executing(self):

@@ -11,6 +11,19 @@ BRIEFING_MAX_OUTPUT_TOKENS = 32 * 1024
 BRIEFING_SELECTION_TOKENS = 2048
 BRIEFING_SELECTION_RETRY_TOKENS = 8192
 BRIEFING_DETAIL_HOSTS = 8
+GENERAL_MAX_OUTPUT_TOKENS = 4096
+
+
+GENERAL_PROMPT = (
+    'Answer the operator’s general or conceptual question clearly and concisely. '
+    'No workspace findings, live host state, or external sources are supplied. '
+    'Recent conversation may clarify a reference but is not evidence. '
+    'Do not claim to have checked a host, run a command, searched the web, or verified current facts. '
+    'If the question actually requires workspace evidence or a live check, say so without '
+    'inventing an answer. Do not provide credential values. '
+    'Return JSON only: {"answer":"plain-language answer",'
+    '"uncertainty":"brief limitation, or empty string"}.'
+)
 
 
 BRIEFING_PROMPT = (
@@ -82,6 +95,22 @@ def _select_hosts(workspace, question, inventory, model, history=None):
         if attempt == 0:
             messages.append({'role': 'user', 'content': 'Return one to eight distinct host IDs from the inventory only.'})
     raise ValueError('The model did not select valid approved hosts for detailed reading.')
+
+
+def answer_general_question(workspace, question, model='', history=None):
+    history = normalize_history(history)
+    messages = [{'role': 'system', 'content': GENERAL_PROMPT},
+                {'role': 'user', 'content': json.dumps({'question': redact_chat(question),
+                                                       'recentConversation': history}, ensure_ascii=False)}]
+    response = workspace.llm.complete(messages, max_tokens=GENERAL_MAX_OUTPUT_TOKENS, model=model)
+    data = response.get('data')
+    if (not isinstance(data, dict) or not isinstance(data.get('answer'), str) or
+            not data['answer'].strip() or len(data['answer']) > 4000 or
+            not isinstance(data.get('uncertainty'), str) or len(data['uncertainty']) > 500):
+        raise ValueError('The model did not return a valid general answer.')
+    return {'supported': True, 'kind': 'general', 'answer': redact_chat(data['answer'].strip()),
+            'uncertainty': redact_chat(data['uncertainty'].strip()),
+            'findingIds': [], 'evidenceIds': [], 'candidates': [], 'model': response.get('model')}
 
 
 def answer_question(workspace, question, model='', history=None):

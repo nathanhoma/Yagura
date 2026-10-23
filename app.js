@@ -25,7 +25,7 @@ function showView(){const hash=location.hash.slice(1);const view=hash==='recon'?
 function updateScopeGate(){
   const ready=scopeLoaded&&savedScope.cidrs.length>0;
   document.body.dataset.scopeState=ready?'ready':scopeLoaded?'required':scopeLoadError?'error':'loading';
-  $('#scopeGate').hidden=document.body.dataset.view==='scope'||ready;
+  $('#scopeGate').hidden=['scope','briefing'].includes(document.body.dataset.view)||ready;
   $('#scopeGateTitle').textContent=scopeLoadError?'Target scope could not be loaded':!scopeLoaded?'Loading target scope…':'Define the target scope first';
   $('#scopeGateMessage').textContent=scopeLoadError?'The saved scope could not be verified. Open Scope and refresh to retry. '+scopeLoadError:!scopeLoaded?'Checking the saved engagement scope.':`Save an authorized target range to continue in ${workflowMode==='ai'?'AI investigation':'Next checks'}. This server’s network is not the target network.`;
   $('#savedScopeDisplay').textContent=scopeLabel()||'Not defined';
@@ -565,14 +565,15 @@ function briefingChatMessage(message,index){
   const suggestions=(reply.candidates||[]).map(candidate=>briefingCandidateCard(candidate,index,message.results?.[candidate.id])).join('');
   const action=message.resolution?(workflowMode==='manual'?'<a class="btn primary" href="#checks">Open manual checks</a>':'<button class="btn primary" type="button" data-briefing-plan="'+index+'">'+
     (message.resolution.needsSelection?'Choose target':'Review targets')+'</button>'):'';
-  if(message.action==='answer'||(!message.action&&!message.resolution&&reply.answer)){
+  if(['answer','general'].includes(message.action)||(!message.action&&!message.resolution&&reply.answer)){
+    const generalNote=message.action==='general'?'<p class="briefing-meta">General knowledge · not verified against this workspace</p>':'';
     const sources=briefingSources(reply.findingIds,reply.evidenceIds);
-    const evidenceDetail=sources||coverage||plan||reason
+    const evidenceDetail=message.action!=='general'&&(sources||coverage||plan||reason)
       ?`<details class="briefing-answer-detail" data-briefing-section="answer-${index}-sources"><summary>Sources and context</summary>${sources}${coverage}${plan}${reason}</details>`:'';
     const followUps=suggestions
       ?`<details class="briefing-answer-detail" data-briefing-section="answer-${index}-checks"><summary>Optional follow-up checks</summary>${suggestions}</details>`:'';
     return briefingTurn('user','<p>'+esc(message.question)+'</p>')+
-      briefingTurn('assistant',answer+uncertainty+evidenceDetail+followUps);
+      briefingTurn('assistant',answer+generalNote+uncertainty+evidenceDetail+followUps);
   }
   return briefingTurn('user','<p>'+esc(message.question)+'</p>')+
     briefingTurn('assistant',plan+reason+answer+uncertainty+coverage+
@@ -582,7 +583,7 @@ function renderBriefingAction(){
   const active=autonomyRuns.find(r=>['running','awaiting-approval','awaiting-host-review','awaiting-discovery'].includes(r.status));
   const box=$('#briefingAction'),stop=$('#briefingStop');
   stop.hidden=!active;
-  $('#briefingNewRun').disabled=!!active;
+  $('#briefingNewRun').disabled=!!active||!checkScope();
   if(!active||active.status==='running'){box.hidden=true;briefingActionKey='';return;}
   const proposal=active.pendingProposal;
   const key=`${active.id}:${active.status}:${proposal?.id||''}:${proposal?.revision||''}`;
@@ -611,15 +612,14 @@ function renderBriefing(){
   if(previous&&!autonomyRuns.some(r=>r.id===previous))briefingSelectedRunId='';
   history.value=briefingSelectedRunId;
   renderBriefingAction();
-  if(!scopeLoaded||!checkScope()||!hostIds.length){box.innerHTML='<div class="empty">'+(checkScope()?'No approved hosts yet. Ask Yagura to discover hosts, then review names in Targets & scope.':'Save an authorized target scope to start.')+'</div>';$('#briefingUpdated').textContent='No approved hosts';$('#briefingSend').disabled=!checkScope()||briefingBusy;return;}
-  $('#briefingSend').disabled=briefingBusy;
-  const briefLabel=`Approved · ${hostIds.length} host${hostIds.length===1?'':'s'}`;
+  $('#briefingSend').disabled=!scopeLoaded||!workspaceReady||briefingBusy;
+  const briefLabel=hostIds.length?`Approved · ${hostIds.length} host${hostIds.length===1?'':'s'}`:'General questions available';
   $('#briefingUpdated').textContent=`${briefLabel} · ${findings.filter(f=>selected.has(f.id)||selected.has(f.hostId)).length} findings`;
   const follow=briefingNearBottom(),position=box.scrollTop;
   const openSections=new Set([...box.querySelectorAll('details[data-briefing-section][open]')].map(row=>row.dataset.briefingSection));
   const selectedRun=autonomyRuns.find(r=>r.id===briefingSelectedRunId)||(briefingSelectedRunId?null:latest);
   const messages=briefingSelectedRunId?briefingMessages.filter(m=>m.runId===briefingSelectedRunId):briefingMessages.filter(m=>!m.runId);
-  box.innerHTML=briefingRunConversation(selectedRun)+messages.map(m=>briefingChatMessage(m,briefingMessages.indexOf(m))).join('')||'<div class="empty">Ask Yagura about saved findings or start an investigation.</div>';
+  box.innerHTML=briefingRunConversation(selectedRun)+messages.map(m=>briefingChatMessage(m,briefingMessages.indexOf(m))).join('')||'<div class="empty">Ask a general question, ask about saved findings, or start an investigation.</div>';
   box.querySelectorAll('details[data-briefing-section]').forEach(row=>{if(openSections.has(row.dataset.briefingSection))row.open=true;});
   wireRefs(box);
   box.querySelectorAll('[data-briefing-review]').forEach(button=>button.onclick=()=>reviewBriefingCandidate(Number(button.dataset.briefingMessage),button.dataset.briefingReview));
@@ -773,16 +773,17 @@ function briefingRecentHistory(){
 }
 $('#briefingSend').onclick=async()=>{
   const question=$('#briefingQuestion').value.trim(),scope=checkScope(),model=$('#briefingModel').value;
-  if(!scope||question.length<3){$('#briefingState').textContent='Save scope and enter a message.';return;}
+  if(!scopeLoaded||question.length<3){$('#briefingState').textContent='Enter a message of at least three characters.';return;}
   if(!briefingHostIds().length){
     if(question===IMPORT_INVENTORY_PROMPT){location.hash='#scope';showView();$('#inventoryNewOpen').click();return;}
     const discovery=question===INITIAL_DISCOVERY_PROMPT||/\b(discover|find|enumerate)\b.*\bhosts?\b/i.test(question)||/ホスト.*(探索|発見)|(探索|発見).*ホスト/.test(question);
-    if(!discovery){$('#briefingState').textContent='Approve hosts in Targets & scope or ask Yagura to discover hosts first.';return;}
-    if(workflowMode==='manual'){$('#briefingState').textContent='Switch to AI mode to discover the saved scope.';return;}
-    $('#briefingState').textContent='Review the authorized ranges and internal DNS resolvers before starting discovery.';
-    openAutonomyNewRun('discover');
-    $('#autonomyResolvers').focus();
-    return;
+    if(discovery&&scope){
+      if(workflowMode==='manual'){$('#briefingState').textContent='Switch to AI mode to discover the saved scope.';return;}
+      $('#briefingState').textContent='Review the authorized ranges and internal DNS resolvers before starting discovery.';
+      openAutonomyNewRun('discover');
+      $('#autonomyResolvers').focus();
+      return;
+    }
   }
   if(briefingBusy)return;
   briefingBusy=true;$('#briefingSend').disabled=true;
