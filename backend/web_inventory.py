@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import uuid
 from urllib.parse import urljoin, urlsplit, parse_qsl
+from xml.etree import ElementTree
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -50,6 +51,46 @@ class PageLinks(HTMLParser):
 def evidence_url(url):
     """Keep route context but never persist query values from auth redirects."""
     return urlsplit(url)._replace(query='', fragment='').geturl()[:512]
+
+
+def discovery_hints(url, robots, sitemap):
+    """Extract bounded same-origin route hints without requesting listed paths."""
+    site = origin(url)
+    hints = []
+
+    def add(source, value, directive):
+        if len(hints) >= 100 or not value or len(value) > 512:
+            return
+        target = urljoin(url, value.strip())
+        try:
+            if origin(target) != site:
+                return
+        except ValueError:
+            return
+        path = urlsplit(target).path or '/'
+        if source == 'robots.txt' and ('*' in path or '$' in path):
+            return
+        item = dict(source=source, url=evidence_url(target), directive=directive)
+        if item not in hints:
+            hints.append(item)
+
+    if robots:
+        for line in robots.splitlines()[:1000]:
+            line = line.split('#', 1)[0].strip()
+            if ':' not in line:
+                continue
+            key, value = (part.strip() for part in line.split(':', 1))
+            if key.lower() in ('allow', 'disallow'):
+                add('robots.txt', value, key.lower())
+    if sitemap and '<!DOCTYPE' not in sitemap.upper() and '<!ENTITY' not in sitemap.upper():
+        try:
+            root = ElementTree.fromstring(sitemap)
+            for element in root.iter():
+                if element.tag.rsplit('}', 1)[-1] == 'loc' and element.text:
+                    add('sitemap.xml', element.text, 'listed')
+        except ElementTree.ParseError:
+            pass
+    return hints
 
 
 def inventory(url, ip, fetch=None):
@@ -110,6 +151,18 @@ def inventory(url, ip, fetch=None):
                     pending.append(route)
         except Exception as exc:
             errors.append(f'{evidence_url(current)}: {str(exc)[:160]}')
+    metadata, hints = [], []
+    for path in ('/robots.txt', '/sitemap.xml'):
+        target = f'{site.scheme}://{site.netloc}{path}'
+        try:
+            status, headers, body = fetch(target, ip, 5)
+            metadata.append(dict(url=target, status=status, contentType=headers.get('content-type', '')[:160]))
+            if status == 200:
+                hints.extend(discovery_hints(url, body if path == '/robots.txt' else '',
+                                             body if path == '/sitemap.xml' else ''))
+        except Exception as exc:
+            errors.append(f'{target}: {str(exc)[:160]}')
+    hints = list(dict(((h['source'], h['url'], h['directive']), h) for h in hints).values())[:100]
     baseline = None
     if native_fetch:
         marker = 'yagura-missing-' + uuid.uuid4().hex
@@ -127,8 +180,9 @@ def inventory(url, ip, fetch=None):
         except Exception as exc:
             errors.append(f'Not-found baseline: {str(exc)[:160]}')
     return dict(url=url, ip=ip, pages=pages, routes=sorted(routes)[:50], forms=forms, parameters=parameters,
-                redirects=redirects, notFoundBaseline=baseline, errors=errors,
-                coverage='Up to five same-origin pages plus one not-found baseline. Redirects to other origins are recorded but never followed; forms are not submitted.')
+                redirects=redirects, metadata=metadata, discoveryHints=hints,
+                notFoundBaseline=baseline, errors=errors,
+                coverage='Up to five same-origin pages, robots.txt, sitemap.xml, and one not-found baseline. Listed paths are recorded but not requested. Cross-origin redirects are not followed; forms are not submitted.')
 
 
 if __name__ == '__main__':

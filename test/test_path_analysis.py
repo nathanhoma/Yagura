@@ -302,12 +302,12 @@ class InvestigationChecksTests(unittest.TestCase):
         self.assertIn({'name':'csr', 'type':'file'}, form['fields'])
         self.assertNotIn('SECRET', json.dumps(report))
         self.assertEqual(report['parameters'][0]['names'], ['page'])
-        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(fetch.call_count, 3)
         self.assertTrue(all('outside.test' not in route for route in report['routes']))
 
     def test_redirect_loop_is_bounded(self):
         fetch = Mock(side_effect=lambda url, *_: (302, {'location':url + 'x'}, ''))
         report = inventory('http://lab.test/', '192.168.56.10', fetch)
-        self.assertEqual(fetch.call_count, 5)
+        self.assertEqual(fetch.call_count, 7)
         self.assertEqual(len(report['pages']), 5)
         self.assertEqual(len(report['redirects']), 5)

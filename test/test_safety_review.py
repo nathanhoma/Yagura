@@ -58,4 +58,5 @@ class SafetyReviewTests(unittest.TestCase):
         self.assertEqual(report['redirects'][0]['queryNames'], ['token'])
         self.assertNotIn('secret', json.dumps(report))
         self.assertEqual(len(report['forms']), 1)
-        self.assertEqual(called, ['http://www.lab.test/', 'http://www.lab.test/login?token=secret'])
+        self.assertEqual(called, ['http://www.lab.test/', 'http://www.lab.test/login?token=secret',
+                                  'http://www.lab.test/robots.txt', 'http://www.lab.test/sitemap.xml'])

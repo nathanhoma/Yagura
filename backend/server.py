@@ -200,6 +200,10 @@ def parse_check_result(candidate, tool, output):
             add('Web query parameters', json.dumps(report['parameters']))
         if report['routes']:
             add('Web routes', '\n'.join(str(route) for route in report['routes'][:50]))
+        if report.get('discoveryHints'):
+            add('Web discovery hints', '\n'.join(
+                f"{hint.get('source', '')} · {hint.get('directive', '')} · {hint.get('url', '')}"
+                for hint in report['discoveryHints'][:100]))
         if report.get('errors'):
             add('Web inventory errors', '\n'.join(map(str, report['errors'][:10])))
     elif tool == 'http-headers':
