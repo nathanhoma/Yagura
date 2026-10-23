@@ -536,7 +536,14 @@ function briefingRunAssessment(run){
     (run.hostIds||[]).length>0&&(run.surveyedHostIds||[]).length===(run.hostIds||[]).length&&failed===0;
   if(portScanComplete)return {status:'Goal achieved',reason:`The saved run scanned all ${run.hostIds.length} approved hosts without a failed check.`,next:flags?'Review flagged results and select follow-up hosts in Findings.':'Review open services in Findings and choose follow-up hosts.'};
   if(run.status==='completed')return {status:goal?'Goal not verified':'Investigation finished',reason:detail||'The loop ended, but no explicit goal verdict was recorded.',next:flags?'Review the flagged evidence in Findings, then choose a follow-up.':'Review saved findings and ask a narrower follow-up question if the goal remains open.'};
-  return {status:goal?'Goal not verified':'Investigation stopped',reason:detail||'The investigation stopped before a goal verdict was recorded.',next:failed?'Review the failed check and its saved output, then retry with a revised goal.':'Review the stop reason and saved findings before starting a follow-up.'};
+  const next=/bounded catalog command|valid catalog command|unsupported .*option/i.test(detail)
+    ?'Ask Yagura to replan this goal using supported options from the tool’s local help.'
+    :/timed out|time limit/i.test(detail)
+      ?'Retry with a narrower goal or fewer hosts.'
+      :failed?'Review the failed check and its saved output, then retry with a revised goal.'
+        :flags?'Review the flagged evidence in Findings and choose a focused follow-up.'
+          :'Review saved findings and choose a focused follow-up.';
+  return {status:goal?'Goal not verified':'Investigation stopped',reason:detail||'The investigation stopped before a goal verdict was recorded.',next};
 }
 function briefingRunConversation(run){
   if(!run)return '';
