@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from backend import findings as F
-from backend.autonomy import FLAG_PROMPT, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS, TOOL_SELECTION_PROMPT, auto_discovery_command
+from backend.autonomy import FLAG_PROMPT, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS, TOOL_SELECTION_PROMPT
 from backend.reviewed_check import validate as validate_reviewed_check
 from backend.server import Workspace
 
@@ -53,7 +53,7 @@ class AutonomyTests(unittest.TestCase):
         self.host['approval'] = {'ip': self.host['ip'], 'name': self.host['name'], 'scope': self.scope}
         self.ws.save(doc)
 
-    def test_first_ai_check_is_generated_and_waits_for_exact_approval(self):
+    def test_first_catalogued_ai_check_runs_automatically(self):
         class ToolLlm(FakeLlm):
             def __init__(self):
                 super().__init__()
@@ -66,36 +66,21 @@ class AutonomyTests(unittest.TestCase):
                     self.selected += 1
                     return {'model': 'fake', 'data': {'toolId': 'curl' if self.selected == 1 else None,
                         'reason': 'Inspect the approved web host.'}}
-                return {'model': 'fake', 'data': {'command': 'curl -I http://100.96.1.70/',
+                return {'model': 'fake', 'data': {'command': "curl -q -sS -I --noproxy '*' --max-time 5 http://100.96.1.70/",
                     'reason': 'Inspect HTTP headers.', 'expectedEvidence': 'HTTP status and headers',
                     'reviewNotes': 'One approved destination.'}}
 
         self.ws.llm = ToolLlm()
         with patch('backend.autonomy.available_tools', return_value=[{'id': 'curl', 'purpose': 'HTTP'}]), \
              patch('backend.autonomy.read_help', return_value={'tool': 'curl', 'invocation': ['curl', '--help'], 'text': 'usage', 'truncated': False}):
-            run = self.ws.autonomy.start(self.host['id'], self.scope)
-            self.ws.autonomy.thread.join(3)
-            pending = self.ws.autonomy.history()['runs'][0]
-            self.assertEqual(pending['status'], 'awaiting-approval')
-            self.assertEqual(self.calls, [])
-            proposal = pending['pendingProposal']
-            self.assertTrue(proposal['catalogued'])
-            self.ws.autonomy.approve(run['id'], proposal['id'], proposal['revision'], proposal['command'], self.scope)
+            self.ws.autonomy.start(self.host['id'], self.scope)
             self.ws.autonomy.thread.join(3)
         saved = self.ws.autonomy.history()['runs'][0]
         self.assertEqual(saved['status'], 'completed')
-        self.assertEqual([e['type'] for e in saved['events']], ['proposal', 'approval', 'check', 'flag-review', 'stop'])
+        self.assertEqual([e['type'] for e in saved['events']], ['proposal', 'auto-approval', 'check', 'flag-review', 'stop'])
         self.assertEqual(len(self.calls), 1)
         self.assertIn('[REDACTED]', json.dumps(self.ws.load()))
         self.assertNotIn('very-secret', self.ws.findings_file.read_text())
-
-    def test_only_exact_single_ip_nmap_discovery_is_automatic(self):
-        ip = self.host['ip']
-        for command in (f'nmap -sn {ip}', f'nmap -sn -n {ip}', f'nmap -n -sn {ip}'):
-            self.assertTrue(auto_discovery_command(command, ip))
-        for command in (f'nmap -sn {ip} 100.96.1.71', f'nmap -sn --script vuln {ip}',
-                        f'nmap -sV {ip}', f'nmap -sn 100.96.1.71', f'nmap -sn {ip}/24'):
-            self.assertFalse(auto_discovery_command(command, ip))
 
     def test_exact_catalogued_nmap_discovery_runs_without_review(self):
         class DiscoveryModel(FakeLlm):
@@ -268,55 +253,66 @@ class AutonomyTests(unittest.TestCase):
         pause.assert_called_once()
         self.assertEqual(pause.call_args.args[:2], (run['id'], 'awaiting-discovery'))
 
-    def test_exhausted_catalog_waits_for_review_and_revision_before_execution(self):
+    def test_invalid_catalog_command_uses_man_and_rebuilds_before_auto_execution(self):
         class ProposalLlm(FakeLlm):
+            def __init__(self):
+                super().__init__()
+                self.proposals = 0
+                self.selections = 0
             def complete(self, messages, max_tokens=400, model=''):
                 if messages[0]['content'] == FLAG_PROMPT:
                     return {'model': 'fake', 'data': {'flag': None}}
                 self.prompts.append(json.loads(messages[1]['content']))
                 if messages[0]['content'] == TOOL_SELECTION_PROMPT:
-                    return {'model': 'fake', 'data': {'toolId': 'nxc' if len(self.prompts) == 1 else 'smbclient',
+                    self.selections += 1
+                    return {'model': 'fake', 'data': {'toolId': 'nxc' if self.selections == 1 else None,
                             'reason': 'Inspect the selected SMB service.'}}
-                if len(self.prompts) == 2:
-                    command = 'nxc smb 100.96.1.70'
-                elif len(self.prompts) == 4:
-                    command = 'smbclient -L //100.96.1.70 -N'
-                else:
-                    command = None
+                self.proposals += 1
+                command = ('nxc smb 100.96.1.70 --exec-method smbexec' if self.proposals == 1
+                           else 'nxc smb 100.96.1.70')
                 return {'model': 'fake', 'data': {'command': command,
                         'reason': 'Inspect the selected host.',
                         'expectedEvidence': 'Service and share information.',
                         'reviewNotes': 'One approved host; no credential supplied.'}}
 
-        self.ws.llm = ProposalLlm()
+        model = ProposalLlm()
+        self.ws.llm = model
         self.ws.runner = lambda program, args, timeout: self.calls.append((program, args, timeout)) or {
             'ok': True, 'stdout': 'Sharename Type Comment\npublic Disk Example share', 'stderr': ''}
         with patch('backend.autonomy.workflow', return_value={'candidates': []}), \
-             patch('backend.autonomy.available_tools', return_value=[{'id': 'nxc', 'purpose': 'SMB'}, {'id': 'smbclient', 'purpose': 'SMB'}]), \
-             patch('backend.autonomy.read_help', side_effect=lambda tool: {'tool': tool, 'invocation': [tool, '--help'], 'text': 'usage', 'truncated': False}):
-            run = self.ws.autonomy.start(self.host['id'], self.scope)
+             patch('backend.autonomy.available_tools', return_value=[{'id': 'nxc', 'purpose': 'SMB'}]), \
+             patch('backend.autonomy.read_help', side_effect=lambda tool, source='help': {'tool': tool, 'source': source, 'invocation': [tool, '--help'] if source == 'help' else ['man', tool], 'text': 'usage', 'truncated': False}) as docs:
+            self.ws.autonomy.start(self.host['id'], self.scope)
             self.ws.autonomy.thread.join(3)
-            pending = self.ws.autonomy.history()['runs'][0]
-            self.assertEqual(pending['status'], 'awaiting-approval')
-            self.assertEqual(self.calls, [])
-            old = pending['pendingProposal']
-            revised = self.ws.autonomy.revise(run['id'], old['id'], old['revision'],
-                                               'Use smbclient share listing instead.', self.scope)
-            new = revised['pendingProposal']
-            self.assertEqual(new['revision'], old['revision'] + 1)
-            self.assertIn('smbclient', new['command'])
-            with self.assertRaisesRegex(ValueError, 'changed'):
-                self.ws.autonomy.approve(run['id'], old['id'], old['revision'], old['command'], self.scope)
-            self.assertEqual(self.calls, [])
-            self.ws.autonomy.approve(run['id'], new['id'], new['revision'], new['command'], self.scope)
+        saved = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][0], 'nxc')
+        self.assertEqual(self.calls[0][1], ['smb', '100.96.1.70'])
+        self.assertEqual([e['type'] for e in saved['events']],
+                         ['proposal', 'auto-approval', 'check', 'flag-review', 'stop'])
+        self.assertEqual([call.args for call in docs.call_args_list], [('nxc',), ('nxc', 'man')])
+        self.assertIn('Automatic catalog check', model.prompts[2]['validationIssue'])
+
+    def test_repeated_unsafe_catalog_command_stops_without_execution(self):
+        class UnsafeModel(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    return {'model': 'fake', 'data': {'toolId': 'nmap', 'reason': 'Inspect the host.'}}
+                return {'model': 'fake', 'data': {'command': 'nmap --script vuln 100.96.1.70',
+                    'reason': 'Inspect the host.', 'expectedEvidence': 'Service output.',
+                    'reviewNotes': 'One target.'}}
+
+        self.ws.llm = UnsafeModel()
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Ports'}]), \
+             patch('backend.autonomy.read_help', side_effect=lambda tool, source='help':
+                   {'tool': tool, 'invocation': [tool, '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start(self.host['id'], self.scope)
             self.ws.autonomy.thread.join(3)
-            saved = self.ws.autonomy.history()['runs'][0]
-            self.assertEqual(saved['status'], 'completed')
-            self.assertEqual(len(self.calls), 1)
-            self.assertEqual(self.calls[0][0], 'smbclient')
-            self.assertEqual(self.calls[0][1], ['-L', '//100.96.1.70', '-N'])
-            self.assertEqual([e['type'] for e in saved['events']],
-                     ['proposal', 'proposal', 'approval', 'check', 'flag-review', 'stop'])
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'stopped')
+        self.assertIn('could not form a bounded catalog command', run['stopReason'])
+        self.assertEqual(self.calls, [])
 
     def test_reviewed_command_parser_accepts_any_program_without_implicit_shell(self):
         good, program, args = validate_reviewed_check('nxc smb 100.96.1.70 --shares', '100.96.1.70')
@@ -390,7 +386,7 @@ class AutonomyTests(unittest.TestCase):
                     return {'model': 'fake', 'data': {'toolId': 'curl' if len(self.prompts) < 2 else None,
                         'reason': 'Check this surveyed host.'}}
                 self.prompts.append(user)
-                return {'model': 'fake', 'data': {'command': 'curl -I http://' + user['hostIp'] + '/',
+                return {'model': 'fake', 'data': {'command': "curl -q -sS -I --noproxy '*' --max-time 5 http://" + user['hostIp'] + '/',
                     'reason': 'Read the recorded service.', 'expectedEvidence': 'HTTP response.',
                     'reviewNotes': 'One approved destination.'}}
 
@@ -398,15 +394,8 @@ class AutonomyTests(unittest.TestCase):
         with patch('backend.autonomy.available_tools', return_value=[{'id': 'curl', 'purpose': 'HTTP'}]), \
              patch('backend.autonomy.read_help', return_value={'tool': 'curl', 'invocation': ['curl', '--help'], 'text': 'usage', 'truncated': False}), \
              patch.object(self.ws.autonomy, '_worker') as deep_dive:
-            run = self.ws.autonomy.start_group([self.host['id'], other['id']], self.scope)
+            self.ws.autonomy.start_group([self.host['id'], other['id']], self.scope)
             self.ws.autonomy.thread.join(3)
-            for expected in [self.host['id'], other['id']]:
-                pending = self.ws.autonomy.history()['runs'][0]
-                self.assertEqual(pending['status'], 'awaiting-approval')
-                self.assertEqual(pending['hostId'], expected)
-                proposal = pending['pendingProposal']
-                self.ws.autonomy.approve(run['id'], proposal['id'], proposal['revision'], proposal['command'], self.scope)
-                self.ws.autonomy.thread.join(3)
         saved = self.ws.autonomy.history()['runs'][0]
         self.assertEqual(saved['phase'], 'deep-dive')
         self.assertEqual(saved['surveyedHostIds'], [self.host['id'], other['id']])

@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs, unquote
@@ -59,7 +60,13 @@ def read_env(path):
 
 def run_command(program, args, timeout=15):
     try:
-        result = subprocess.run([program, *args], capture_output=True, text=True, timeout=timeout, check=False)
+        with tempfile.TemporaryDirectory(prefix='yagura-tool-') as home:
+            env = {key: os.environ[key] for key in
+                   ('PATH', 'LANG', 'LC_ALL', 'SSL_CERT_FILE', 'SSL_CERT_DIR') if key in os.environ}
+            env.update(HOME=home, XDG_CACHE_HOME=home, NO_COLOR='1',
+                       PYTHONDONTWRITEBYTECODE='1')
+            result = subprocess.run([program, *args], capture_output=True, text=True,
+                                    timeout=timeout, check=False, stdin=subprocess.DEVNULL, env=env)
         return dict(ok=result.returncode == 0, stdout=result.stdout[:1000000], stderr=result.stderr[:3000])
     except (OSError, subprocess.TimeoutExpired) as exc:
         return dict(ok=False, stdout='', stderr=str(exc)[:3000])

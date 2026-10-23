@@ -26,3 +26,14 @@ class ToolCatalogTests(unittest.TestCase):
         with patch('backend.tool_catalog.shutil.which', return_value=None):
             with self.assertRaisesRegex(ValueError, 'not installed'):
                 read_help('nmap')
+
+    def test_reads_local_man_page_without_pager_or_shell(self):
+        completed = subprocess.CompletedProcess(['man', '-P', 'cat', 'nmap'], 0,
+                                                stdout='NMAP(1)\n', stderr='')
+        with patch('backend.tool_catalog.shutil.which', side_effect=lambda name: '/usr/bin/' + name), \
+             patch('backend.tool_catalog.subprocess.run', return_value=completed) as run:
+            result = read_help('nmap', 'man')
+        self.assertEqual(result['source'], 'man')
+        self.assertEqual(result['invocation'], ['man', 'nmap'])
+        self.assertEqual(run.call_args.args[0], ['/usr/bin/man', '-P', 'cat', 'nmap'])
+        self.assertFalse(run.call_args.kwargs.get('shell', False))

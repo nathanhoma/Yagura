@@ -147,14 +147,14 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.workspace.llm.max_tokens, 32768)
         self.assertEqual(self.calls, [])
 
-    def test_autonomy_proposal_requires_exact_human_approval(self):
+    def test_unlisted_autonomy_proposal_requires_exact_human_approval(self):
         class ProposalModel:
             def assert_configuration(self):
                 pass
             def complete(self, messages, **kwargs):
                 if messages[0]['content'] == TOOL_SELECTION_PROMPT:
-                    return {'model': 'fake', 'data': {'toolId': 'nxc', 'reason': 'Inspect the SMB service.'}}
-                return {'model': 'fake', 'data': {'command': 'nxc smb 100.96.1.70',
+                    return {'model': 'fake', 'data': {'toolId': None, 'unlistedTool': 'otherutil', 'reason': 'Inspect the SMB service.'}}
+                return {'model': 'fake', 'data': {'command': 'otherutil 100.96.1.70',
                     'reason': 'Inspect the approved host.', 'expectedEvidence': 'SMB response.',
                     'reviewNotes': 'One approved host; no credential.'}}
         self.workspace.llm = ProposalModel()
@@ -169,7 +169,7 @@ class HttpTests(unittest.TestCase):
         self.workspace.save(stored)
         with patch('backend.autonomy.workflow', return_value={'candidates': []}), \
              patch('backend.autonomy.available_tools', return_value=[{'id': 'nxc', 'purpose': 'SMB host metadata'}]), \
-             patch('backend.autonomy.read_help', return_value={'tool': 'nxc', 'invocation': ['nxc', '--help'], 'text': 'usage', 'truncated': False}):
+             patch('backend.autonomy.shutil.which', return_value='/usr/bin/otherutil'):
             status, run = self.call('/api/autonomy/start', 'POST', {'hostId': host['id'],
                 'authorizedScope': scope, 'authorized': True})
             self.assertEqual(status, 202)
@@ -190,7 +190,7 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(self.call('/api/autonomy/approve', 'POST', {**body, 'authorized': True})[0], 202)
             self.workspace.autonomy.thread.join(3)
             self.assertEqual(len(self.calls), 1)
-            self.assertEqual(self.calls[0], ('nxc', ['smb', '100.96.1.70']))
+            self.assertEqual(self.calls[0], ('otherutil', ['100.96.1.70']))
 
     def test_group_autonomy_api_requires_selected_approved_hosts(self):
         class CompareModel:

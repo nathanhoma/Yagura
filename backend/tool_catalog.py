@@ -1,7 +1,8 @@
-"""Local, read-only tool documentation for human-reviewed AI checks."""
+"""Local, read-only documentation for AI-selected catalog tools."""
 import os
 import shutil
 import subprocess
+import tempfile
 
 from .sensitive import redact
 
@@ -30,21 +31,34 @@ def available_tools():
             if shutil.which(item['id'])]
 
 
-def read_help(tool_id):
+def read_help(tool_id, source='help'):
     item = next((item for item in TOOLS if item['id'] == tool_id), None)
     if item is None:
         raise ValueError('Tool is not in the local tool catalog.')
     executable = shutil.which(tool_id)
     if not executable:
         raise ValueError('Selected tool is not installed.')
+    if source not in ('help', 'man'):
+        raise ValueError('Choose local help or man documentation.')
+    man = shutil.which('man') if source == 'man' else None
+    if source == 'man' and not man:
+        raise ValueError('Local man command is not installed.')
+    invocation = [executable, *item['help']] if source == 'help' else [man, '-P', 'cat', tool_id]
     try:
-        result = subprocess.run([executable, *item['help']], capture_output=True, text=True,
-                                errors='replace', timeout=6, check=False, stdin=subprocess.DEVNULL,
-                                env={**os.environ, 'PAGER': 'cat', 'NO_COLOR': '1'})
+        with tempfile.TemporaryDirectory(prefix='yagura-help-') as home:
+            env = {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL') if key in os.environ}
+            env.update(HOME=home, XDG_CACHE_HOME=home, PAGER='cat', MANPAGER='cat',
+                       MANWIDTH='100', NO_COLOR='1', PYTHONDONTWRITEBYTECODE='1')
+            result = subprocess.run(invocation, capture_output=True, text=True,
+                                    errors='replace', timeout=6, check=False,
+                                    stdin=subprocess.DEVNULL, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ValueError('Local tool help could not be read.') from exc
+        raise ValueError('Local tool documentation could not be read.') from exc
+    if source == 'man' and result.returncode:
+        raise ValueError('Local man page is unavailable for this tool.')
     content = redact((result.stdout + '\n' + result.stderr).strip())[:MAX_HELP_CHARS]
     if not content:
-        raise ValueError('Selected tool returned no local help.')
-    return dict(tool=tool_id, invocation=[tool_id, *item['help']], text=content,
+        raise ValueError('Selected tool returned no local documentation.')
+    return dict(tool=tool_id, source=source,
+                invocation=[tool_id, *item['help']] if source == 'help' else ['man', tool_id], text=content,
                 truncated=len(result.stdout) + len(result.stderr) > MAX_HELP_CHARS)
