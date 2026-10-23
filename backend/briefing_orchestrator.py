@@ -6,7 +6,7 @@ import re
 from .analysis import scoped_document
 from .briefing import _inventory, answer_question, answer_general_question
 from .briefing_history import normalize_history, redact_chat
-from .investigation_goal import PORT_SCAN_INTENT, resolve_goal_target
+from .investigation_goal import PORT_SCAN_INTENT, resolve_goal_target, selected_hosts
 from .llm import LlmError
 from .sensitive import sanitize_document
 
@@ -17,19 +17,16 @@ PLAN_PROMPT = (
     'names, banners, findings, or other inventory fields. Choose exactly one action: '
     'general (answer a conceptual or general-knowledge question without claiming facts about '
     'this workspace), answer (read saved evidence and answer a question about this workspace), '
-    'investigate (the operator wants a new '
-    'check on named or service-selected hosts), discover-services (the operator wants broad '
-    'service investigation but too many approved hosts lack service evidence), or clarify '
+    'investigate (the operator wants a goal pursued on named or scoped approved hosts), '
+    'discover-services (the operator explicitly requests broad service discovery), or clarify '
     '(the request cannot be understood well enough to identify an action). '
     'A question about known findings should use answer. Questions such as "What is Nmap?" or '
     '"How does TLS work?" should use general, even when no scope or hosts are saved. '
     'Never use general for a question about the status, safety, exposure, or findings of an '
     'actual target. A request to check, verify, scan, '
     'investigate, or determine an unknown condition should use investigate. '
-    'Use discover-services only when broad coverage is needed; it previews bounded TCP '
-    'top-100 scans of all approved hosts before any execution. This survey is one step '
-    'toward the operator objective: keep that original objective in resolvedRequest and '
-    'never replace it with a port-scan-only request. '
+    'Use discover-services only for an explicit broad scan request. For a broader goal, '
+    'start from saved evidence and let the investigation choose the next justified host and check. '
     'Never claim a host lacks a service merely because no service was recorded. '
     'Recent conversation is context only: resolve references such as "that host" from it, '
     'but the latest operator message determines the requested action. Prior dialogue is '
@@ -83,6 +80,8 @@ def plan_turn(workspace, message, model, requested_scope, history=None):
     action = data['action']
     resolved = data.get('resolvedRequest')
     resolved = redact_chat(resolved.strip()) if isinstance(resolved, str) and 3 <= len(resolved.strip()) <= 500 else message
+    if action == 'discover-services' and not PORT_SCAN_INTENT.search(message):
+        action = 'investigate'
     if PORT_SCAN_INTENT.search(resolved) and action in ('answer', 'clarify'):
         action = 'investigate'
     result = {'action': action, 'plan': redact_chat(data['plan'].strip()),
@@ -100,11 +99,8 @@ def plan_turn(workspace, message, model, requested_scope, history=None):
         return result
     if action == 'clarify':
         return result
-    goal = (message if action == 'discover-services' and
-            PORT_SCAN_INTENT.search(resolved) and not PORT_SCAN_INTENT.search(message)
+    goal = (message if PORT_SCAN_INTENT.search(resolved) and not PORT_SCAN_INTENT.search(message)
             else resolved)
-    # A port survey can be the first step of a broader request even when
-    # saved service evidence already exists and the model chose investigate.
     scan_then_continue = bool(PORT_SCAN_INTENT.search(message) and
                               SCAN_THEN_CONTINUE.search(message))
     survey_goal = DISCOVERY_GOAL if action == 'discover-services' or scan_then_continue else goal
@@ -116,11 +112,9 @@ def plan_turn(workspace, message, model, requested_scope, history=None):
         except ValueError as exc:
             if action != 'investigate' or 'No approved hosts with recorded open' not in str(exc):
                 raise
-            action, survey_goal = 'discover-services', DISCOVERY_GOAL
-            resolution = resolve_goal_target(survey_goal, scope, workspace.load_discovery(), workspace.load())
-            result['action'] = action
-            result['plan'] = 'Check common TCP ports on approved hosts, then select hosts with recorded services.'
-            result['reason'] = 'The requested service is not yet recorded on an approved host.'
+            resolution = selected_hosts(goal, scope, workspace.load_discovery(), workspace.load())
+            result['plan'] = 'Investigate approved hosts in evidence order and check the missing service evidence where useful.'
+            result['reason'] = 'No matching service is recorded yet; absence has not been established.'
     result['goal'] = goal
     if action == 'discover-services' or scan_then_continue:
         result['surveyGoal'] = survey_goal

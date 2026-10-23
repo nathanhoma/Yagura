@@ -510,6 +510,7 @@ function briefingRunEvent(event,index){
   if(event.type==='plan'){kind='ai';title=event.afterChecks?'Plan updated':'Investigation plan';body=event.reason||'';extra=detail('Planned check',`<p>Tool: ${esc(event.tool||'Unspecified')}</p><p>Expected: ${esc(event.expectedEvidence||'Unspecified')}</p>`);}
   else if(event.type==='check'){kind='result';label='Tool result';title=`${host?host+' · ':''}Check ${event.outcome||'finished'}`;body=event.warning||`${event.imported?'Result and findings saved':'Result recorded'} · ${event.reviewed?'Human approved':'Catalog validated'}`;extra=source+detail('Output preview and command',`<p>${event.imported?'Findings imported':'No findings imported'}</p>${event.summary?`<pre>${esc(event.summary.replace(/\x1b\[[0-9;]*m/g,''))}</pre>`:''}${event.command?`<pre>${esc(event.command)}</pre>`:''}`);}
   else if(event.type==='observe'){kind='ai';title='Observation';body=event.reason||`Result: ${event.outcome||'recorded'}`;extra=source;}
+  else if(event.type==='replan'){title='Plan refreshed';body=`${event.reviewedHosts||0}/${event.totalHosts||0} hosts reviewed · ${event.nextHostId?'Next: '+autonomyHostLabel(event.nextHostId):'No open host questions'}`;}
   else if(event.type==='flag-review'&&event.flag){kind='lead';label='AI review · Verify this lead';title=`${host||'Check'} · Flagged for review`;body=event.flag.reason;extra=`<p class="briefing-meta">Uncertainty: ${esc(event.flag.uncertainty||'Not recorded')}</p>${briefingSources(event.flag.findingIds,event.flag.evidenceIds)}`;}
   else if(event.type==='deep-dive-selection'){kind='ai';title=`Deep dive selected · ${host}`;body=event.reason||'';extra=source;}
   else if(event.type==='approval'){title='Command approved';body='The reviewed revision was released for execution.';extra=detail('Exact command',`<pre>${esc(event.command||'')}</pre>`);}
@@ -551,7 +552,10 @@ function briefingRunConversation(run){
   const assessment=briefingRunAssessment(run),events=(run.events||[]).map(briefingRunEvent).join('');
   const checks=(run.events||[]).filter(event=>event.type==='check').length;
   const flags=(run.flags||[]).length;
-  const summary=`<article class="briefing-outcome"><span class="briefing-run-label">Investigation outcome</span><h3>${esc(assessment.status)}</h3><p><strong>Goal:</strong> ${esc(run.goal||`Investigate ${target}`)}</p><p><strong>Why:</strong> ${esc(assessment.reason)}</p><p><strong>Next:</strong> ${esc(assessment.next)}</p><span class="briefing-meta">${checks} checks · ${flags} review flags · ${esc(date(run.endedAt||run.startedAt))}</span></article>`;
+  const goalPlan=run.goalPlan;
+  const nextCandidate=goalPlan?.candidates?.find(row=>row.hostId===goalPlan.nextHostId);
+  const planSummary=goalPlan?`<p><strong>Plan:</strong> ${goalPlan.reviewedHosts}/${goalPlan.candidates.length} hosts reviewed${nextCandidate?` · Next: ${esc(nextCandidate.name)}`:''}</p><p><strong>Next step:</strong> ${esc(goalPlan.nextStep||'Assess saved evidence.')}</p><p class="briefing-meta">Success requires: ${esc(goalPlan.successCriterion)}</p><details><summary>Host questions and evidence</summary>${goalPlan.candidates.map(row=>`<p>${esc(row.name)} · ${esc(row.status)} · ${esc(row.openQuestion)} · ${row.checks} checks</p>`).join('')}</details>`:'';
+  const summary=`<article class="briefing-outcome"><span class="briefing-run-label">Investigation outcome</span><h3>${esc(assessment.status)}</h3><p><strong>Goal:</strong> ${esc(run.goal||`Investigate ${target}`)}</p>${planSummary}<p><strong>Why:</strong> ${esc(assessment.reason)}</p><p><strong>Next:</strong> ${esc(assessment.next)}</p><span class="briefing-meta">${checks} checks · ${flags} review flags · ${esc(date(run.endedAt||run.startedAt))}</span></article>`;
   const details=events?`<details class="briefing-run-details" data-briefing-section="run-${esc(run.id)}"><summary>Show execution details</summary><div class="briefing-run-events">${events}</div></details>`:'';
   return summary+details;
 }
@@ -699,7 +703,7 @@ async function launchBriefingAllPortScan(goal,scope,resolution,surveyGoal=goal,m
     const hostList=fresh.hosts.map(host=>`${host.name} (${host.ip})`).join('\n');
     const excluded=fresh.excludedUnapproved?`<p>${fresh.excludedUnapproved} unapproved saved host${fresh.excludedUnapproved===1?' is':'s are'} excluded. Approve them in Scope before starting if they should be included.</p>`:'';
     const continuing=surveyGoal!==goal;
-    const continuation=continuing?'<p>After the survey, Yagura selects one host using saved evidence and continues toward the original goal. Validated catalog checks may run automatically; unlisted tools pause for exact command approval. The original goal is not complete when the port scan ends.</p>':'';
+    const continuation=continuing?'<p>After the survey, Yagura ranks the approved hosts using saved evidence and continues toward the original goal across hosts. Validated catalog checks may run automatically; unlisted tools pause for exact command approval. The original goal is not complete when the port scan ends.</p>':'';
     if(!await confirmScopedAction(continuing?'Start scoped investigation?':'Scan all approved hosts?',`<p>Goal: ${esc(goal)}</p><p>First step: ${fresh.hostCount} approved hosts · ${esc(fresh.profile)}. Yagura runs one validated Nmap TCP connection scan per host and saves the results. A 30-minute segment can be resumed.</p>${continuation}${excluded}<details><summary>Review every target</summary><pre>${esc(hostList)}</pre></details>`,continuing?'Start investigation':'Start port scan'))return;
     const payload={goal:surveyGoal,targetSet:fresh.targetSet,authorizedScope:scope,authorized:true};
     if(continuing){payload.continuationGoal=goal;payload.model=model;}
@@ -722,7 +726,7 @@ async function launchBriefingSelectedHosts(goal,scope,model,resolution){
       ?'Yagura runs one bounded TCP top-100 port scan per host and saves the results.'
       :fresh.hostCount===1
         ?'Yagura investigates this host against the stated goal. Catalogued checks can run automatically; unlisted tools pause for review.'
-        :'Yagura surveys the selected hosts, then may deepen one investigation. Catalogued checks can run automatically; unlisted tools pause for review.';
+        :'Yagura starts from saved evidence, checks promising hosts, and re-ranks remaining hosts after each result. Catalogued checks can run automatically; unlisted tools pause for review.';
     const coverage=fresh.notMatchedApproved
       ?'<p>'+fresh.notMatchedApproved+' other approved hosts have no recorded matching service and are excluded. This does not establish that the service is absent.</p>'
       :'';

@@ -43,10 +43,11 @@ def _matches_service(service, category):
     return service.get('port') in ports and name in ('', 'unknown', 'tcpwrapped', 'ssl')
 
 
-def selected_hosts(goal, scope, discovery, document, category=None):
+def selected_hosts(goal, scope, discovery, document, category=None, domain=None):
     """Select only approved hosts backed by saved open-service observations."""
     rows = _candidates(scope, discovery, document)
-    candidates = [_record(ip, name, status, document, scope) for (ip, name), status in rows.items()]
+    candidates = [_record(ip, name, status, document, scope) for (ip, name), status in rows.items()
+                  if not domain or name == domain or name.endswith('.' + domain)]
     service_rows = {}
     for finding in document.get('findings', []):
         if finding.get('kind') == 'service' and finding.get('state') == 'open':
@@ -75,7 +76,7 @@ def selected_hosts(goal, scope, discovery, document, category=None):
     return {'mode': 'selected-hosts', 'hosts': selected, 'hostCount': len(selected),
             'excludedUnapproved': excluded, 'notMatchedApproved': len(approved_ips - seen_ips),
             'targetSet': token,
-            'selection': category[0] if category else 'all-approved',
+            'selection': category[0] if category else domain or 'all-approved',
             'operation': 'port-scan' if PORT_SCAN_INTENT.search(goal) else 'investigate',
             'goal': goal}
 
@@ -167,8 +168,16 @@ def resolve_goal_target(goal, scope, discovery, document, selected_target=None):
         return result
     if selected_target is None and not exact:
         category = _service_group(goal)
-        if category or ALL_HOSTS_INTENT.search(goal):
-            result = selected_hosts(goal, scope, discovery, document, category)
+        # A request naming the saved exercise domain addresses its approved hosts,
+        # not an arbitrary single host chosen from the inventory.
+        mentioned_domains = {'.'.join(labels[index:])
+                             for domain in scope.get('domains', []) if isinstance(domain, str)
+                             for labels in [domain.split('.')]
+                             for index in range(max(0, len(labels) - 2))
+                             if _mentioned(goal, '.'.join(labels[index:]))}
+        domain = max(mentioned_domains, key=len) if mentioned_domains else None
+        if category or ALL_HOSTS_INTENT.search(goal) or domain:
+            result = selected_hosts(goal, scope, discovery, document, category, domain)
             if not result['hostCount']:
                 label = category[0] if category else 'approved'
                 raise ValueError(f'No approved hosts with recorded open {label} services match this request. Survey the scope first or revise the goal.')

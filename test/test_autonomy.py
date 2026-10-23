@@ -54,6 +54,61 @@ class AutonomyTests(unittest.TestCase):
         self.host['approval'] = {'ip': self.host['ip'], 'name': self.host['name'], 'scope': self.scope}
         self.ws.save(doc)
 
+    def test_goal_plan_uses_saved_services_then_replans_across_hosts(self):
+        second_doc = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for quiet.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'})
+        second = next(f for f in second_doc['findings'] if f['kind'] == 'host')
+        second['approval'] = {'ip': second['ip'], 'name': second['name'], 'scope': self.scope}
+        doc = self.ws.load()
+        F.merge_parsed(doc, second_doc)
+        saved_second = next(f for f in doc['findings'] if f.get('kind') == 'host' and f['ip'] == second['ip'])
+        saved_second['approval'] = second['approval']
+        self.ws.save(doc)
+
+        class PlanModel:
+            def __init__(self):
+                self.hosts = []
+                self.calls = 0
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                payload = json.loads(messages[1]['content'])
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.hosts.append(payload['hostIp'])
+                    self.calls += 1
+                    return {'model': 'fake', 'data': {'toolId': 'nmap' if self.calls == 1 else None,
+                        'unlistedTool': None, 'reason': 'One reachability observation is enough.'}}
+                return {'model': 'fake', 'data': {'command': 'nmap -sn 100.96.1.70',
+                    'reason': 'Confirm the approved host.', 'expectedEvidence': 'Reachability',
+                    'reviewNotes': 'One approved destination.'}}
+
+        model = PlanModel()
+        self.ws.llm = model
+        self.ws.runner = lambda program, args, timeout: {'ok': True,
+            'stdout': 'Nmap scan report for web.03.crimsonia.net (100.96.1.70)\nHost is up.\n'
+                      'Nmap done: 1 IP address (1 host up) scanned', 'stderr': ''}
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Host discovery'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nmap',
+                 'invocation': ['nmap', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start_goal_plan([saved_second['id'], self.host['id']], self.scope,
+                goal='Investigate initial access on approved exercise hosts.')
+            self.ws.autonomy.thread.join(5)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(model.hosts[0], self.host['ip'])
+        self.assertIn(second['ip'], model.hosts)
+        self.assertEqual(run['goalPlan']['reviewedHosts'], 2)
+        self.assertEqual(run['goalPlan']['status'], 'unverified')
+        self.assertEqual(len(run['goalPlan']['completedSteps']), 3)
+        self.assertEqual(run['goalPlan']['nextStep'],
+                         'Assess saved evidence against the success criterion.')
+        self.assertEqual(len([e for e in run['events'] if e['type'] == 'check']), 1)
+        self.assertTrue(next(r for r in run['goalPlan']['candidates']
+                             if r['hostId'] == self.host['id'])['evidenceIds'])
+
     def test_first_catalogued_ai_check_runs_automatically(self):
         class ToolLlm(FakeLlm):
             def __init__(self):

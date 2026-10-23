@@ -791,10 +791,8 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         host_ids = [row['hostId'] for row in targets['hosts']]
                         if targets['operation'] == 'port-scan':
                             run = workspace.autonomy.start_portscan_all(host_ids, scope, body['goal'])
-                        elif len(host_ids) == 1:
-                            run = workspace.autonomy.start(host_ids[0], scope, body['model'], body['goal'])
                         else:
-                            run = workspace.autonomy.start_group(host_ids, scope, body['model'], body['goal'])
+                            run = workspace.autonomy.start_goal_plan(host_ids, scope, body['model'], body['goal'])
                     return self.send_json(202, run)
                 if self.command == 'POST' and path == '/api/autonomy/start-group':
                     body = self.body()
