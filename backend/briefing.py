@@ -2,11 +2,13 @@
 import json
 
 from .analysis import build_context, scoped_document
+from .llm import LlmError
 from .sensitive import redact, sanitize_document
 
 
 BRIEFING_MAX_OUTPUT_TOKENS = 32 * 1024
 BRIEFING_SELECTION_TOKENS = 2048
+BRIEFING_SELECTION_RETRY_TOKENS = 8192
 BRIEFING_DETAIL_HOSTS = 8
 
 
@@ -62,7 +64,12 @@ def _select_hosts(workspace, question, inventory, model):
                 {'role': 'user', 'content': json.dumps({'question': question, 'inventory': inventory}, ensure_ascii=False)}]
     allowed = {row['id'] for row in rows}
     for attempt in range(2):
-        answer = workspace.llm.complete(messages, max_tokens=BRIEFING_SELECTION_TOKENS, model=model)['data']
+        try:
+            answer = workspace.llm.complete(messages, max_tokens=BRIEFING_SELECTION_TOKENS, model=model)['data']
+        except LlmError as exc:
+            if exc.code != 'invalid-response' or 'truncated' not in str(exc).lower():
+                raise
+            answer = workspace.llm.complete(messages, max_tokens=BRIEFING_SELECTION_RETRY_TOKENS, model=model)['data']
         selected = answer.get('hostIds') if isinstance(answer, dict) else None
         if (isinstance(selected, list) and 1 <= len(selected) <= BRIEFING_DETAIL_HOSTS and
                 all(isinstance(x, str) and x in allowed for x in selected) and len(selected) == len(set(selected))):

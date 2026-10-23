@@ -11,6 +11,7 @@ from unittest.mock import patch
 from backend import findings as F
 from backend.autonomy import TOOL_SELECTION_PROMPT
 from backend.briefing_orchestrator import PLAN_PROMPT
+from backend.briefing import _select_hosts
 from backend.llm import LlmService
 from backend.llm import LlmError
 from backend.server import Workspace, create_server
@@ -209,6 +210,22 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.call('/api/briefing/plan', 'POST',
             {**payload, 'authorizedScope': {'cidrs': ['100.96.2.0/24'], 'domains': []}})[0], 400)
+
+    def test_briefing_host_selection_retries_truncated_model_output(self):
+        class Model:
+            def __init__(self):
+                self.limits = []
+            def complete(self, messages, max_tokens=0, model=''):
+                self.limits.append(max_tokens)
+                if len(self.limits) == 1:
+                    raise LlmError('invalid-response', 'The local model response was truncated.')
+                return {'model': 'fake', 'data': {'hostIds': ['host-1']}}
+        model = Model()
+        self.workspace.llm = model
+        inventory = {'hosts': [{'id': 'host-' + str(index)} for index in range(9)]}
+        self.assertEqual(_select_hosts(self.workspace, 'Which Web host is recorded?', inventory, ''),
+                         ['host-1'])
+        self.assertEqual(model.limits, [2048, 8192])
 
     def test_unlisted_autonomy_proposal_requires_exact_human_approval(self):
         class ProposalModel:
