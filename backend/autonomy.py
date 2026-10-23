@@ -27,6 +27,8 @@ from .vulnerabilities import match_versions
 MAX_SECONDS = 1200
 GROUP_MAX_SECONDS = 1800
 MAX_RESPONSE_TOKENS = 32000
+TOOL_SELECTION_TOKENS = 3200
+TOOL_SELECTION_RETRY_TOKENS = 8192
 FLAG_RESPONSE_TOKENS = 8000
 MAX_DISCOVERY_SECONDS = 600
 MAX_DNS_REVIEWS = 8
@@ -421,7 +423,8 @@ class AutonomyController:
                                   recentCommands=recent_commands,
                                   revisionInstruction=redact(feedback)), ensure_ascii=False)}]
         try:
-            tool_choice = self._model_call(run_id, 'tool selection', selection_messages, max_tokens=1200, model=model)['data']
+            tool_choice = self._model_call(run_id, 'tool selection', selection_messages,
+                                           max_tokens=TOOL_SELECTION_TOKENS, model=model)['data']
         except LlmError as exc:
             if exc.code != 'invalid-response' or 'truncated' not in str(exc).lower():
                 raise
@@ -429,9 +432,11 @@ class AutonomyController:
                 data = self._load()
                 run = next(r for r in data['runs'] if r['id'] == run_id)
                 run['events'].append(dict(type='model-retry', at=now(),
-                                          reason='Tool selection response was truncated.', maxTokens=3200))
+                                          reason='Tool selection response was truncated.',
+                                          maxTokens=TOOL_SELECTION_RETRY_TOKENS))
                 self._save(data)
-            tool_choice = self._model_call(run_id, 'tool selection retry', selection_messages, max_tokens=3200, model=model)['data']
+            tool_choice = self._model_call(run_id, 'tool selection retry', selection_messages,
+                                           max_tokens=TOOL_SELECTION_RETRY_TOKENS, model=model)['data']
         if not isinstance(tool_choice, dict) or not isinstance(tool_choice.get('reason'), str):
             raise ValueError('AI tool selection format was invalid.')
         tool_id = tool_choice.get('toolId')

@@ -91,7 +91,7 @@ class AutonomyTests(unittest.TestCase):
         class TruncatedSelection(FakeLlm):
             def complete(self, messages, max_tokens=400, model=''):
                 self.response_limits.append(max_tokens)
-                if max_tokens == 1200:
+                if max_tokens == 3200:
                     raise LlmError('invalid-response', 'The local model response was truncated.')
                 return {'model': 'fake', 'data': {'toolId': None, 'unlistedTool': None,
                         'reason': 'No further check is justified.'}}
@@ -103,7 +103,7 @@ class AutonomyTests(unittest.TestCase):
             self.ws.autonomy.thread.join(3)
         run = self.ws.autonomy.history()['runs'][0]
         self.assertEqual(run['status'], 'completed')
-        self.assertEqual(model.response_limits, [1200, 3200])
+        self.assertEqual(model.response_limits, [3200, 8192])
         self.assertEqual(run['events'][0]['type'], 'model-retry')
 
     def test_whatweb_hostname_proposal_is_constrained_and_runs_automatically(self):
