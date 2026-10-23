@@ -10,7 +10,7 @@ import time
 
 from .analysis import build_context, scoped_document
 from .attention import review_flags
-from .auto_command import validate_auto_command
+from .auto_command import prepare_auto_command, validate_auto_command
 from . import findings as F
 from .discovery import discovery_chunks, discovery_progress, dns_review, validate_resolvers
 from .findings import now, uid
@@ -416,6 +416,7 @@ class AutonomyController:
             if redact(command) != command:
                 raise ValueError('AI proposal appears to contain a secret.')
             if catalogued and not feedback:
+                command = prepare_auto_command(command, host)
                 try:
                     validate_auto_command(command, host, scope)
                 except ValueError as exc:

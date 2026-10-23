@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from backend.auto_command import WORDLIST, validate_auto_command
+from backend.auto_command import WORDLIST, prepare_auto_command, validate_auto_command
 from backend.server import run_command
 
 
@@ -72,6 +72,15 @@ class AutoCommandTests(unittest.TestCase):
             validate_auto_command('curl -q --max-time 5 http://100.96.1.70/', self.host, self.scope)
         with self.assertRaisesRegex(ValueError, "--max-time"):
             validate_auto_command("curl -q --noproxy '*' http://100.96.1.70/", self.host, self.scope)
+
+    def test_curl_is_pinned_and_bounded_before_automatic_validation(self):
+        command = prepare_auto_command('curl -sS -I https://web.03.crimsonia.net/', self.host)
+        self.check(command)
+        self.assertIn('--resolve web.03.crimsonia.net:443:100.96.1.70', command)
+        self.assertIn("--noproxy '*'", command)
+        self.assertIn('--max-time 10', command)
+        self.assertEqual(prepare_auto_command('curl -L http://100.96.1.70/', self.host).split()[0], 'curl')
+        self.reject(prepare_auto_command('curl -L http://100.96.1.70/', self.host))
 
     def test_tool_process_gets_no_model_key_or_proxy_configuration(self):
         completed = subprocess.CompletedProcess(['nmap', '--version'], 0, stdout='Nmap', stderr='')

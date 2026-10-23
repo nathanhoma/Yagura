@@ -19,6 +19,32 @@ SAFE_SCRIPTS = {'ssl-cert', 'smb-os-discovery', 'smb-protocols',
 CATALOG_IDS = {item['id'] for item in TOOLS}
 
 
+def prepare_auto_command(command, host):
+    """Add required curl containment options without changing its requested check."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return command
+    if not parts or parts[0] != 'curl':
+        return command
+    args = [part for part in parts[1:] if part != '-q']
+    args.insert(0, '-q')
+    if '--noproxy' not in args:
+        args[1:1] = ['--noproxy', '*']
+    if '--max-time' not in args:
+        args[1:1] = ['--max-time', '10']
+    urls = [part for part in args if part.startswith(('http://', 'https://'))]
+    if len(urls) == 1 and '--resolve' not in args:
+        try:
+            parsed = urlsplit(urls[0])
+            if parsed.hostname == host.get('name', '').lower():
+                port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+                args[1:1] = ['--resolve', f"{host['name']}:{port}:{host['ip']}"]
+        except ValueError:
+            pass
+    return shlex.join(['curl', *args])
+
+
 def _fail(message):
     raise ValueError('Automatic catalog check: ' + message)
 
