@@ -82,6 +82,13 @@ class AutoCommandTests(unittest.TestCase):
         self.assertEqual(prepare_auto_command('curl -L http://100.96.1.70/', self.host).split()[0], 'curl')
         self.reject(prepare_auto_command('curl -L http://100.96.1.70/', self.host))
 
+    def test_https_ip_url_uses_approved_name_for_certificate_verification(self):
+        command = prepare_auto_command('curl -sS -I https://100.96.1.70/', self.host)
+        self.check(command)
+        self.assertIn('https://web.03.crimsonia.net/', command)
+        self.assertIn('--resolve web.03.crimsonia.net:443:100.96.1.70', command)
+        self.assertNotIn('https://100.96.1.70/', command)
+
     def test_tool_process_gets_no_model_key_or_proxy_configuration(self):
         completed = subprocess.CompletedProcess(['nmap', '--version'], 0, stdout='Nmap', stderr='')
         with patch.dict(os.environ, {'LLM_API_KEY': 'secret', 'HTTPS_PROXY': 'http://proxy.example'}, clear=False), \

@@ -7,7 +7,7 @@ import ipaddress
 from pathlib import Path
 import re
 import shlex
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from .scope import ip_allowed, name_allowed
 from .tool_catalog import TOOLS
@@ -37,6 +37,12 @@ def prepare_auto_command(command, host):
     if len(urls) == 1 and '--resolve' not in args:
         try:
             parsed = urlsplit(urls[0])
+            if (parsed.scheme == 'https' and parsed.hostname == host['ip'] and
+                    not parsed.username and not parsed.password and host.get('name')):
+                port_suffix = f':{parsed.port}' if parsed.port else ''
+                named_url = urlunsplit(parsed._replace(netloc=host['name'] + port_suffix))
+                args[args.index(urls[0])] = named_url
+                parsed = urlsplit(named_url)
             if parsed.hostname == host.get('name', '').lower():
                 port = parsed.port or (443 if parsed.scheme == 'https' else 80)
                 args[1:1] = ['--resolve', f"{host['name']}:{port}:{host['ip']}"]
