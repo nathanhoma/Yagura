@@ -326,6 +326,30 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(result['goal'], original)
         self.assertEqual(result['surveyGoal'], '演習対象の全ホストに対してポートスキャンして')
         self.assertEqual(result['resolution']['mode'], 'port-scan-all')
+
+    def test_scan_then_deep_dive_keeps_the_follow_up_goal_with_saved_services(self):
+        scope = self.workspace.save_scope({'cidrs': ['100.99.3.0/24'],
+                                           'domains': ['dev.03.crimsonia.net']})
+        doc = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for web.dev.03.crimsonia.net (100.99.3.57)\nHost is up.\n'
+            '443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        self.workspace.save(doc)
+        goal = ('承認済みのdev.03.crimsonia.net全ホストをまずポートスキャンして結果を観察し、'
+                '03.crimsonia.netに対するイニシャルアクセスという元の目標に向けて再計画・深掘りして')
+        class Model:
+            def complete(self, messages, max_tokens=0, model=''):
+                return {'model': 'fake', 'data': {'action': 'investigate',
+                    'plan': 'Scan, then deepen.', 'reason': 'Services are already recorded.',
+                    'resolvedRequest': goal}}
+        self.workspace.llm = Model()
+        status, result = self.call('/api/briefing/plan', 'POST',
+            {'message': goal, 'model': '', 'authorizedScope': scope})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['goal'], goal)
+        self.assertEqual(result['surveyGoal'], '演習対象の全ホストに対してポートスキャンして')
+        self.assertEqual(result['resolution']['mode'], 'port-scan-all')
         self.assertEqual(self.calls, [])
 
     def test_briefing_host_selection_retries_truncated_model_output(self):

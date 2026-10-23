@@ -1,6 +1,7 @@
 """Plan a chat turn before reading evidence or proposing a scoped investigation."""
 
 import json
+import re
 
 from .analysis import scoped_document
 from .briefing import _inventory, answer_question, answer_general_question
@@ -41,6 +42,9 @@ PLAN_PROMPT = (
     '"resolvedRequest":"latest request with references made explicit"}.'
 )
 DISCOVERY_GOAL = '演習対象の全ホストに対してポートスキャンして'
+SCAN_THEN_CONTINUE = re.compile(
+    r'(?:その後|続け|深掘り|再計画|結果を(?:観察|踏まえ|分析)|元の目標|イニシャルアクセス|'
+    r'initial access|then|after(?:ward)?|follow[ -]?up|replan|investigat)', re.I)
 PLAN_TOKENS = 3200
 PLAN_RETRY_TOKENS = 8192
 
@@ -99,7 +103,11 @@ def plan_turn(workspace, message, model, requested_scope, history=None):
     goal = (message if action == 'discover-services' and
             PORT_SCAN_INTENT.search(resolved) and not PORT_SCAN_INTENT.search(message)
             else resolved)
-    survey_goal = DISCOVERY_GOAL if action == 'discover-services' else goal
+    # A port survey can be the first step of a broader request even when
+    # saved service evidence already exists and the model chose investigate.
+    scan_then_continue = bool(PORT_SCAN_INTENT.search(message) and
+                              SCAN_THEN_CONTINUE.search(message))
+    survey_goal = DISCOVERY_GOAL if action == 'discover-services' or scan_then_continue else goal
     with workspace.lock:
         if workspace.load_scope() != scope:
             raise ValueError('Authorized scope changed while planning. Retry the message.')
@@ -114,7 +122,7 @@ def plan_turn(workspace, message, model, requested_scope, history=None):
             result['plan'] = 'Check common TCP ports on approved hosts, then select hosts with recorded services.'
             result['reason'] = 'The requested service is not yet recorded on an approved host.'
     result['goal'] = goal
-    if action == 'discover-services':
+    if action == 'discover-services' or scan_then_continue:
         result['surveyGoal'] = survey_goal
     result['resolution'] = resolution
     return result
