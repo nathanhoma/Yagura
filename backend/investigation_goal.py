@@ -11,6 +11,61 @@ ELIGIBLE_INVENTORY = frozenset(('verified', 'no-answer', 'inventory-only'))
 MAX_CHOICES = 64
 PORT_SCAN_INTENT = re.compile(r'ポート.{0,8}(?:スキャン|調査|確認)|\bport[ -]?scan\b|\b(?:scan|check|enumerate)\s+(?:the\s+)?ports?\b', re.I)
 ALL_HOSTS_INTENT = re.compile(r'全(?:ての)?(?:対象)?ホスト|すべての(?:対象)?ホスト|全対象|\b(?:all|every)\s+(?:approved\s+|exercise\s+|in-scope\s+)?(?:hosts?|targets?)\b|\bentire\s+scope\b', re.I)
+SERVICE_GROUPS = (
+    ('web', re.compile(r'web|ウェブ|ホームページ|http', re.I), {80, 443, 8080, 8443, 8000, 8008, 8888}, ('http', 'https', 'http-proxy')),
+    ('ssh', re.compile(r'\bssh\b', re.I), {22}, ('ssh',)),
+    ('smb', re.compile(r'\bsmb\b|ファイル共有', re.I), {139, 445}, ('smb', 'microsoft-ds', 'netbios-ssn')),
+    ('rdp', re.compile(r'\brdp\b|リモートデスクトップ', re.I), {3389}, ('ms-wbt-server', 'rdp')),
+    ('dns', re.compile(r'\bdns\b', re.I), {53}, ('domain', 'dns')),
+    ('mail', re.compile(r'\b(?:mail|smtp|imap|pop3)\b|メール', re.I), {25, 110, 143, 465, 587, 993, 995}, ('smtp', 'imap', 'pop3')),
+    ('database', re.compile(r'\b(?:database|sql|mysql|postgres|mongodb|redis)\b|データベース', re.I), {1433, 1521, 3306, 5432, 6379, 27017}, ('mysql', 'postgres', 'ms-sql', 'redis', 'mongodb')),
+)
+GROUP_HOST_INTENT = re.compile(r'ホスト|サーバー|対象|\b(?:hosts|servers|targets)\b', re.I)
+
+
+def _service_group(goal):
+    if not GROUP_HOST_INTENT.search(goal):
+        return None
+    matches = [entry for entry in SERVICE_GROUPS if entry[1].search(goal)]
+    if len(matches) > 1:
+        raise ValueError('Specify one service category at a time, or name the exact hosts.')
+    return matches[0] if matches else None
+
+
+def selected_hosts(goal, scope, discovery, document, category=None):
+    """Select only approved hosts backed by saved open-service observations."""
+    rows = _candidates(scope, discovery, document)
+    candidates = [_record(ip, name, status, document, scope) for (ip, name), status in rows.items()]
+    service_rows = {}
+    for finding in document.get('findings', []):
+        if finding.get('kind') == 'service' and finding.get('state') == 'open':
+            service_rows.setdefault(finding.get('hostId'), []).append(finding)
+    selected, excluded, seen_ips = [], 0, set()
+    for row in sorted(candidates, key=lambda item: (item['ip'], item['name'])):
+        matched = []
+        if category:
+            _, _, ports, names = category
+            matched = [service for service in service_rows.get(row['hostId'], [])
+                       if service.get('port') in ports or any((service.get('name') or '').lower().startswith(name) for name in names)]
+            if not matched:
+                continue
+        if not row['approved']:
+            if not category:
+                excluded += 1
+            continue
+        if row['ip'] in seen_ips:
+            continue
+        seen_ips.add(row['ip'])
+        row['reasons'] = sorted({f"{s.get('port')}/{s.get('protocol', 'tcp')} {s.get('name') or 'open'}"
+                                 for s in matched})[:8] if category else ['Approved in saved scope']
+        selected.append(row)
+    signature = [(row['hostId'], row['ip'], row['name'], row['reasons']) for row in selected]
+    token = hashlib.sha256(json.dumps(signature, separators=(',', ':')).encode()).hexdigest()
+    return {'mode': 'selected-hosts', 'hosts': selected, 'hostCount': len(selected),
+            'excludedUnapproved': excluded, 'targetSet': token,
+            'selection': category[0] if category else 'all-approved',
+            'operation': 'port-scan' if PORT_SCAN_INTENT.search(goal) else 'investigate',
+            'goal': goal}
 
 
 def all_host_port_scan(goal):
@@ -91,13 +146,21 @@ def resolve_goal_target(goal, scope, discovery, document, selected_target=None):
         raise ValueError('No eligible inventory or approved hosts exist in the saved scope.')
     exact = [(ip, name) for ip, name in rows if
              _mentioned(goal, ip) or (name != ip and _mentioned(goal, name))]
-    if all_host_port_scan(goal):
+    if all_host_port_scan(goal) and not _service_group(goal):
         if selected_target is not None or exact:
             raise ValueError('Choose either all approved hosts or one named host for a port scan.')
         result = port_scan_targets(scope, discovery, document)
         if not result['hostCount']:
             raise ValueError('Approve hosts in the saved scope before scanning all hosts.')
         return result
+    if selected_target is None and not exact:
+        category = _service_group(goal)
+        if category or ALL_HOSTS_INTENT.search(goal):
+            result = selected_hosts(goal, scope, discovery, document, category)
+            if not result['hostCount']:
+                label = category[0] if category else 'approved'
+                raise ValueError(f'No approved hosts with recorded open {label} services match this request. Survey the scope first or revise the goal.')
+            return result
     if selected_target is not None:
         if (not isinstance(selected_target, dict) or set(selected_target) != {'ip', 'name'} or
                 not isinstance(selected_target['ip'], str) or not isinstance(selected_target['name'], str)):

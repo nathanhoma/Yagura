@@ -706,6 +706,72 @@ class HttpTests(unittest.TestCase):
         self.workspace.autonomy.thread.join(3)
         self.assertEqual({args[-1] for _, args in self.calls[-2:]}, {'100.99.3.45', '100.99.3.57'})
 
+    def test_web_host_goal_selects_saved_services_and_requires_exact_confirmation(self):
+        scope = self.workspace.save_scope({'cidrs': ['100.99.3.0/24'], 'domains': ['dev.03.crimsonia.net']})
+        names = [('web1.dev.03.crimsonia.net', '100.99.3.10'),
+                 ('web2.dev.03.crimsonia.net', '100.99.3.11'),
+                 ('ssh.dev.03.crimsonia.net', '100.99.3.12'),
+                 ('unapproved.dev.03.crimsonia.net', '100.99.3.13')]
+        content = ''.join(f'<host><fqdn>{name}</fqdn><connection-address>{ip}</connection-address></host>'
+                          for name, ip in names)
+        self.assertEqual(self.call('/api/discovery/inventory', 'POST',
+            {'content': content, 'teamNumber': '03', 'suffix': 'dev.03.crimsonia.net',
+             'resolvers': [], 'authorizedScope': scope, 'authorized': True})[0], 200)
+        self.assertEqual(self.call('/api/discovery/inventory/approve', 'POST',
+            {'hosts': [{'ip': ip, 'name': name} for name, ip in names[:3]],
+             'authorizedScope': scope, 'authorized': True})[0], 200)
+        goal = 'Webサービスがあるホストに対して調査して'
+        status, missing = self.call('/api/briefing/investigate/resolve', 'POST',
+                                   {'goal': goal, 'authorizedScope': scope})
+        self.assertEqual(status, 400)
+        self.assertIn('No approved hosts', missing['error'])
+        xml = '<nmaprun>' + ''.join(
+            f'<host><status state="up"/><address addrtype="ipv4" addr="{ip}"/>'
+            f'<hostnames><hostname name="{name}"/></hostnames><ports><port protocol="tcp" portid="{port}">'
+            f'<state state="open"/><service name="{service}"/></port></ports></host>'
+            for (name, ip), port, service in zip(names, [80, 443, 22, 8080],
+                                                 ['http', 'https', 'ssh', 'http'])) + '</nmaprun>'
+        doc = self.workspace.load()
+        F.merge_parsed(doc, F.parse_import({'tool': 'nmap', 'output': xml}))
+        self.workspace.save(doc)
+        status, preview = self.call('/api/briefing/investigate/resolve', 'POST',
+                                    {'goal': goal, 'authorizedScope': scope})
+        self.assertEqual(status, 200, preview)
+        self.assertEqual(preview['mode'], 'selected-hosts')
+        self.assertEqual(preview['operation'], 'investigate')
+        self.assertEqual({row['name'] for row in preview['hosts']}, {names[0][0], names[1][0]})
+        self.assertTrue(all(row['reasons'] for row in preview['hosts']))
+        scan_goal = 'Webサービスがある全ホストに対してポートスキャンして'
+        scan_preview = self.call('/api/briefing/investigate/resolve', 'POST',
+                                 {'goal': scan_goal, 'authorizedScope': scope})[1]
+        self.assertEqual(scan_preview['mode'], 'selected-hosts')
+        self.assertEqual(scan_preview['operation'], 'port-scan')
+        self.assertEqual({row['name'] for row in scan_preview['hosts']}, {names[0][0], names[1][0]})
+        self.assertEqual(self.call('/api/autonomy/start-selected-goal', 'POST',
+            {'goal': goal, 'targetSet': 'wrong', 'model': '', 'authorizedScope': scope,
+             'authorized': True})[0], 400)
+        changed = self.workspace.load()
+        changed_service = next(f for f in changed['findings'] if f['kind'] == 'service' and f.get('port') == 443)
+        changed_service['state'] = 'closed'
+        self.workspace.save(changed)
+        self.assertEqual(self.call('/api/autonomy/start-selected-goal', 'POST',
+            {'goal': goal, 'targetSet': preview['targetSet'], 'model': '',
+             'authorizedScope': scope, 'authorized': True})[0], 400)
+        changed_service['state'] = 'open'
+        self.workspace.save(changed)
+        class ReadyModel:
+            def assert_configuration(self):
+                pass
+        self.workspace.llm = ReadyModel()
+        body = {'goal': goal, 'targetSet': preview['targetSet'], 'model': '',
+                'authorizedScope': scope, 'authorized': True}
+        with patch.object(self.workspace.autonomy, '_group_worker'):
+            status, run = self.call('/api/autonomy/start-selected-goal', 'POST', body)
+            self.workspace.autonomy.thread.join(3)
+        self.assertEqual(status, 202, run)
+        self.assertEqual(run['goal'], goal)
+        self.assertEqual(set(run['hostIds']), {row['hostId'] for row in preview['hosts']})
+
     def test_discovery_saves_each_chunk_and_resumes_after_failure(self):
         self.call('/api/scope', 'PUT', {'cidrs': ['100.96.1.0/24'], 'domains': ['crimsonia.net']})
         attempted = []

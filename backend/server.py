@@ -754,6 +754,27 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                         run = workspace.autonomy.start_portscan_all(
                             [row['hostId'] for row in targets['hosts']], scope, body['goal'])
                     return self.send_json(202, run)
+                if self.command == 'POST' and path == '/api/autonomy/start-selected-goal':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) !=
+                            {'goal', 'targetSet', 'model', 'authorizedScope', 'authorized'} or
+                            body['authorized'] is not True or not isinstance(body['goal'], str) or
+                            not isinstance(body['targetSet'], str) or
+                            not isinstance(body['model'], str) or len(body['model']) > 200):
+                        raise ValueError('Review the selected hosts and confirm the investigation.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                        targets = resolve_goal_target(body['goal'], scope, workspace.load_discovery(), workspace.load())
+                        if targets.get('mode') != 'selected-hosts' or targets['targetSet'] != body['targetSet']:
+                            raise ValueError('Selected hosts or service evidence changed; review the list again.')
+                        host_ids = [row['hostId'] for row in targets['hosts']]
+                        if targets['operation'] == 'port-scan':
+                            run = workspace.autonomy.start_portscan_all(host_ids, scope, body['goal'])
+                        elif len(host_ids) == 1:
+                            run = workspace.autonomy.start(host_ids[0], scope, body['model'], body['goal'])
+                        else:
+                            run = workspace.autonomy.start_group(host_ids, scope, body['model'], body['goal'])
+                    return self.send_json(202, run)
                 if self.command == 'POST' and path == '/api/autonomy/start-group':
                     body = self.body()
                     if (not isinstance(body, dict) or set(body) - {'hostIds', 'model', 'authorizedScope', 'authorized'} or

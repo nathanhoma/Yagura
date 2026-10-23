@@ -188,7 +188,7 @@ class AutonomyController:
             self.thread.start()
             return run
 
-    def start_group(self, host_ids, scope, model=''):
+    def start_group(self, host_ids, scope, model='', goal=''):
         ws = self.workspace
         if (not isinstance(host_ids, list) or len(host_ids) < 2 or
                 any(not isinstance(h, str) for h in host_ids) or len(host_ids) != len(set(host_ids))):
@@ -210,7 +210,8 @@ class AutonomyController:
                        hostSnapshots={hid: {'ip': hosts[hid]['ip'], 'name': hosts[hid].get('name')} for hid in host_ids},
                        hostId=host_ids[0], hostName=f'{len(host_ids)} selected hosts', hostIp='',
                        model=model or 'server default', scope=scope, status='running', startedAt=now(),
-                       endedAt=None, maxChecks=self.group_max_checks, stopReason='', flags=[], events=[])
+                       endedAt=None, maxChecks=self.group_max_checks, stopReason='', goal=redact(goal.strip()),
+                       flags=[], events=[])
             data = self._load()
             data['runs'] = [run] + data['runs'][:19]
             self._save(data)
@@ -1079,7 +1080,7 @@ class AutonomyController:
                     saved['hostIp'] = hosts[hid]['ip']
                     self._save(data)
                 proposal = self._propose(run_id, hid, scope, model,
-                    {'summary': 'Select one justified observation for this approved survey host.'})
+                    {'summary': 'Select one justified observation for this approved survey host that advances the stated goal.'})
                 if proposal is not None:
                     if not proposal['autoApproved']:
                         return

@@ -627,6 +627,24 @@ async function launchBriefingAllPortScan(goal,scope,resolution){
     $('#briefingState').textContent='Port scan started. Results appear in this conversation.';
   }catch(error){$('#briefingState').textContent=error.message;}finally{briefingBusy=false;$('#briefingInvestigate').disabled=false;}
 }
+async function launchBriefingSelectedHosts(goal,scope,model,resolution){
+  briefingBusy=true;$('#briefingInvestigate').disabled=true;
+  try{
+    if(JSON.stringify(checkScope())!==JSON.stringify(scope))throw new Error('Saved scope changed. Review the targets again.');
+    const fresh=await post('/api/briefing/investigate/resolve',{goal,authorizedScope:scope});
+    if(fresh.mode!=='selected-hosts'||fresh.targetSet!==resolution.targetSet)throw new Error('Selected hosts or service evidence changed. Review the request again.');
+    const rows=fresh.hosts.map(host=>host.name+' ('+host.ip+') — '+host.reasons.join(', ')).join('\n');
+    const operation=fresh.operation==='port-scan'?'Port scan':'AI investigation';
+    const detail=fresh.operation==='port-scan'
+      ?'Yagura runs one bounded TCP top-100 port scan per host and saves the results.'
+      :'Yagura surveys the selected hosts, then may deepen one investigation. Catalogued checks can run automatically; unlisted tools pause for review.';
+    const description='<p>Goal: '+esc(goal)+'</p><p>Selected by: '+esc(fresh.selection)+' · '+fresh.hostCount+' approved hosts. '+detail+'</p><details open><summary>Targets and saved evidence</summary><pre>'+esc(rows)+'</pre></details>';
+    if(!await confirmScopedAction('Start '+operation.toLowerCase()+' on '+fresh.hostCount+' hosts?',description,'Start '+operation.toLowerCase()))return;
+    const run=await post('/api/autonomy/start-selected-goal',{goal,targetSet:fresh.targetSet,model,authorizedScope:scope,authorized:true});
+    $('#briefingQuestion').value='';autonomyCurrent=run.id;briefingSelectedRunId=run.id;await loadAutonomyHistory();renderBriefing();
+    $('#briefingState').textContent=operation+' started. Live steps appear above.';
+  }catch(error){$('#briefingState').textContent=error.message;}finally{briefingBusy=false;$('#briefingInvestigate').disabled=false;}
+}
 async function launchBriefingGoal(goal,scope,model,selectedTarget){
   if(briefingBusy)return;
   briefingBusy=true;$('#briefingInvestigate').disabled=true;
@@ -654,6 +672,7 @@ $('#briefingInvestigate').onclick=async()=>{
   try{
     const resolution=await post('/api/briefing/investigate/resolve',{goal,authorizedScope:scope});
     if(resolution.mode==='port-scan-all'){briefingBusy=false;await launchBriefingAllPortScan(goal,scope,resolution);}
+    else if(resolution.mode==='selected-hosts'){briefingBusy=false;await launchBriefingSelectedHosts(goal,scope,model,resolution);}
     else if(resolution.needsSelection){showBriefingTargetChoices(goal,scope,model,resolution);$('#briefingState').textContent='Choose the intended host.';}
     else {briefingBusy=false;await launchBriefingGoal(goal,scope,model,{ip:resolution.ip,name:resolution.name});}
   }catch(e){$('#briefingState').textContent=e.message;}finally{briefingBusy=false;$('#briefingInvestigate').disabled=false;}

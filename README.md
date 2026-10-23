@@ -201,3 +201,15 @@ and query parameter names without submitting forms or retaining field values. Ex
 per-check authorization apply. No new third-party dependencies are installed by the application.
 Credential guessing, memory dumping/recovery, password cracking, payload execution and signed-job
 submission have not been added as executable checks in this increment.
+
+### Natural-language host groups
+
+Investigation chat can select several hosts from saved evidence when the instruction names a
+service category (Web, SSH, SMB, RDP, DNS, mail, or database) and asks about hosts or targets.
+For example, “Webサービスがあるホストに対して調査して” selects only approved hosts with a
+recorded open Web service. The confirmation dialog lists every selected hostname, IP, and
+matching service before execution. “全ホスト” without a service condition selects all approved
+saved hosts. A matching port-scan request uses the bounded TCP top-100 profile for the selected
+set; other requests start an AI survey and carry the original goal into tool selection.
+The server recalculates the selected set at start and rejects stale previews. Missing open-service
+evidence yields no automatic selection; survey or import results first, then retry.
