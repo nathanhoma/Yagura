@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from backend import findings as F
-from backend.autonomy import FLAG_PROMPT, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS, TOOL_SELECTION_PROMPT
+from backend.autonomy import FLAG_PROMPT, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS, TOOL_SELECTION_PROMPT, auto_discovery_command
 from backend.reviewed_check import validate as validate_reviewed_check
 from backend.server import Workspace
 
@@ -88,6 +88,46 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertIn('[REDACTED]', json.dumps(self.ws.load()))
         self.assertNotIn('very-secret', self.ws.findings_file.read_text())
+
+    def test_only_exact_single_ip_nmap_discovery_is_automatic(self):
+        ip = self.host['ip']
+        for command in (f'nmap -sn {ip}', f'nmap -sn -n {ip}', f'nmap -n -sn {ip}'):
+            self.assertTrue(auto_discovery_command(command, ip))
+        for command in (f'nmap -sn {ip} 100.96.1.71', f'nmap -sn --script vuln {ip}',
+                        f'nmap -sV {ip}', f'nmap -sn 100.96.1.71', f'nmap -sn {ip}/24'):
+            self.assertFalse(auto_discovery_command(command, ip))
+
+    def test_exact_catalogued_nmap_discovery_runs_without_review(self):
+        class DiscoveryModel(FakeLlm):
+            def __init__(self):
+                super().__init__()
+                self.selected = 0
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.selected += 1
+                    return {'model': 'fake', 'data': {'toolId': 'nmap' if self.selected == 1 else None,
+                        'reason': 'Confirm the approved host responds.'}}
+                return {'model': 'fake', 'data': {'command': 'nmap -sn ' + self.host_ip,
+                    'reason': 'Confirm reachability.', 'expectedEvidence': 'Host state.',
+                    'reviewNotes': 'One approved IP.'}}
+
+        model = DiscoveryModel()
+        model.host_ip = self.host['ip']
+        self.ws.llm = model
+        self.ws.runner = lambda program, args, timeout: (self.calls.append((program, args, timeout)) or
+            {'ok': True, 'stdout': f'Nmap scan report for web.03.crimsonia.net ({self.host["ip"]})\nHost is up.\nNmap done: 1 IP address (1 host up) scanned', 'stderr': ''})
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Discovery'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nmap', 'invocation': ['nmap', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual([e['type'] for e in run['events']],
+                         ['proposal', 'auto-approval', 'check', 'flag-review', 'stop'])
+        self.assertFalse(next(e for e in run['events'] if e['type'] == 'check')['reviewed'])
+        self.assertEqual(self.calls[0][0], 'nmap')
 
     def test_invented_tool_never_runs(self):
         class InventedTool(FakeLlm):
@@ -339,6 +379,43 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(saved['surveyedHostIds'], [self.host['id'], other['id']])
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(len([e for e in saved['events'] if e['type'] == 'deep-dive-selection']), 1)
+        deep_dive.assert_called_once()
+
+    def test_group_automatically_discovers_each_approved_ip(self):
+        second = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for api.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'})
+        doc = self.ws.load()
+        F.merge_parsed(doc, second)
+        other = next(f for f in doc['findings'] if f['kind'] == 'host' and f['ip'] == '100.96.1.71')
+        other['approval'] = {'ip': other['ip'], 'name': other['name'], 'scope': self.scope}
+        self.ws.save(doc)
+
+        class DiscoveryModel(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    return {'model': 'fake', 'data': {'toolId': 'nmap', 'reason': 'Confirm the approved host.'}}
+                ip = json.loads(messages[1]['content'])['hostIp']
+                return {'model': 'fake', 'data': {'command': f'nmap -sn {ip}',
+                    'reason': 'Confirm reachability.', 'expectedEvidence': 'Host state.',
+                    'reviewNotes': 'One approved IP.'}}
+
+        self.ws.llm = DiscoveryModel()
+        def runner(program, args, timeout):
+            self.calls.append((program, args, timeout))
+            return {'ok': True, 'stdout': f'Nmap scan report for {args[-1]}\nHost is up.\nNmap done: 1 IP address (1 host up) scanned', 'stderr': ''}
+        self.ws.runner = runner
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Discovery'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nmap', 'invocation': ['nmap', '--help'], 'text': 'usage', 'truncated': False}), \
+             patch.object(self.ws.autonomy, '_worker') as deep_dive:
+            self.ws.autonomy.start_group([self.host['id'], other['id']], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['surveyedHostIds'], [self.host['id'], other['id']])
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len([e for e in run['events'] if e['type'] == 'auto-approval']), 2)
         deep_dive.assert_called_once()
 
     def test_group_rejects_unapproved_host_before_any_check(self):
