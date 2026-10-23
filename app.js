@@ -477,7 +477,7 @@ $('#autonomyGroupSelected').onclick=event=>{const button=event.target.closest('[
 $('#autonomyGroupList').onchange=event=>{const input=event.target.closest('[data-autonomy-host]');if(!input)return;if(input.checked)autonomySelectedHosts.add(input.dataset.autonomyHost);else autonomySelectedHosts.delete(input.dataset.autonomyHost);renderAutonomyGroupHosts();};
 function requireAutonomyModel(){if(autonomyModelRequired&&!$('#autonomyModel').value){$('#autonomyModelState').textContent='Choose one of the available models before starting.';$('#autonomyModel').focus();return false;}return true;}
 $('#autonomyModel').onchange=()=>{if($('#autonomyModel').value)$('#autonomyModelState').textContent='';};
-function briefingModelOptions(){const select=$('#briefingModel'),selected=select.value,known=new Set([...select.options].map(o=>o.value));for(const model of autonomyRuns.map(r=>r.model).filter(m=>typeof m==='string'&&m.length<=200&&m!=='server default')){if(!known.has(model)){select.insertAdjacentHTML('beforeend',`<option value="${esc(model)}">Previously used: ${esc(model)}</option>`);known.add(model);}}select.value=known.has(selected)?selected:'';}
+function briefingModelOptions(){const select=$('#briefingModel'),selected=select.value,known=new Set([...select.options].map(o=>o.value));for(const model of autonomyRuns.map(r=>r.model).filter(m=>typeof m==='string'&&m.length<=200&&m!=='server default'&&m!=='deterministic port scan')){if(!known.has(model)){select.insertAdjacentHTML('beforeend',`<option value="${esc(model)}">Previously used: ${esc(model)}</option>`);known.add(model);}}select.value=known.has(selected)?selected:'';}
 function briefingApprovedHosts(){return map.targets.filter(t=>t.eligible).map(t=>t.host);}
 function briefingHostIds(){return briefingApprovedHosts().map(h=>h.id);}
 function briefingTurn(role,html){return `<div class="briefing-turn ${role}"><span class="briefing-speaker">${role==='user'?'You':'Yagura'}</span><div class="briefing-bubble">${html}</div></div>`;}
@@ -533,7 +533,7 @@ function renderBriefingAction(){
     $('#briefingReject').onclick=async()=>{if(!await confirmScopedAction('Reject this command?',`Reject and stop this investigation on ${esc(proposal.hostName||proposal.hostIp)}.<pre>${esc(proposal.command)}</pre>`,'Reject and stop'))return;await briefingActionRequest('/api/autonomy/stop',{runId:active.id},'Stopping the investigation…');};
   }else{
     box.innerHTML=`<strong>${active.status==='awaiting-host-review'?'Host approval required':'Investigation paused'}</strong><p>${esc(active.stopReason||'Review the next step to continue.')}</p><div class="toolbar"><button class="btn primary" id="briefingContinue" type="button">${active.status==='awaiting-host-review'?'Review hosts':'Continue run'}</button></div>`;
-    $('#briefingContinue').onclick=()=>{if(active.status==='awaiting-host-review')location.hash='#scope';else{openAutonomyNewRun(active.mode==='group'?'group':'discover');$('#autonomyDiscoverResume').focus();}};
+    $('#briefingContinue').onclick=()=>{if(active.status==='awaiting-host-review')location.hash='#scope';else{openAutonomyNewRun(['group','port-scan'].includes(active.mode)?'group':'discover');$('#autonomyDiscoverResume').focus();}};
   }
 }
 async function briefingActionRequest(path,payload,message){const state=$('#briefingActionState');if(state)state.textContent=message;for(const button of $('#briefingAction').querySelectorAll('button'))button.disabled=true;try{await post(path,payload);await loadAutonomyHistory();}catch(error){if(state)state.textContent=error.message;for(const button of $('#briefingAction').querySelectorAll('button'))button.disabled=false;}}
@@ -613,6 +613,20 @@ $('#briefingTargetFilter').oninput=renderBriefingTargetChoices;
 $('#briefingTargetClose').onclick=()=>$('#briefingTargetDialog').close();
 $('#briefingTargetDialog').addEventListener('close',()=>{briefingTargetState=null;});
 $('#briefingTargetRetry').onclick=()=>{const corrected=$('#briefingTargetCorrection').value.trim();if(corrected.length<5){$('#briefingTargetCorrection').focus();return;}$('#briefingTargetDialog').close();$('#briefingQuestion').value=corrected;$('#briefingInvestigate').click();};
+async function launchBriefingAllPortScan(goal,scope,resolution){
+  briefingBusy=true;$('#briefingInvestigate').disabled=true;
+  try{
+    if(JSON.stringify(checkScope())!==JSON.stringify(scope))throw new Error('Saved scope changed. Review the host list again.');
+    const fresh=await post('/api/briefing/investigate/resolve',{goal,authorizedScope:scope});
+    if(fresh.mode!=='port-scan-all'||fresh.targetSet!==resolution.targetSet)throw new Error('Approved host list changed. Review the request again.');
+    const hostList=fresh.hosts.map(host=>`${host.name} (${host.ip})`).join('\n');
+    const excluded=fresh.excludedUnapproved?`<p>${fresh.excludedUnapproved} unapproved saved host${fresh.excludedUnapproved===1?' is':'s are'} excluded. Approve them in Scope before starting if they should be included.</p>`:'';
+    if(!await confirmScopedAction('Scan all approved hosts?',`<p>Goal: ${esc(goal)}</p><p>${fresh.hostCount} approved hosts · ${esc(fresh.profile)}. Yagura runs one validated Nmap TCP connection scan per host, saves results, and continues after individual host failures. A 30-minute segment can be resumed.</p>${excluded}<details><summary>Review every target</summary><pre>${esc(hostList)}</pre></details>`,'Start port scan'))return;
+    const run=await post('/api/autonomy/start-portscan-all',{goal,targetSet:fresh.targetSet,authorizedScope:scope,authorized:true});
+    $('#briefingQuestion').value='';autonomyCurrent=run.id;briefingSelectedRunId=run.id;await loadAutonomyHistory();renderBriefing();
+    $('#briefingState').textContent='Port scan started. Results appear in this conversation.';
+  }catch(error){$('#briefingState').textContent=error.message;}finally{briefingBusy=false;$('#briefingInvestigate').disabled=false;}
+}
 async function launchBriefingGoal(goal,scope,model,selectedTarget){
   if(briefingBusy)return;
   briefingBusy=true;$('#briefingInvestigate').disabled=true;
@@ -639,7 +653,8 @@ $('#briefingInvestigate').onclick=async()=>{
   briefingBusy=true;$('#briefingInvestigate').disabled=true;
   try{
     const resolution=await post('/api/briefing/investigate/resolve',{goal,authorizedScope:scope});
-    if(resolution.needsSelection){showBriefingTargetChoices(goal,scope,model,resolution);$('#briefingState').textContent='Choose the intended host.';}
+    if(resolution.mode==='port-scan-all'){briefingBusy=false;await launchBriefingAllPortScan(goal,scope,resolution);}
+    else if(resolution.needsSelection){showBriefingTargetChoices(goal,scope,model,resolution);$('#briefingState').textContent='Choose the intended host.';}
     else {briefingBusy=false;await launchBriefingGoal(goal,scope,model,{ip:resolution.ip,name:resolution.name});}
   }catch(e){$('#briefingState').textContent=e.message;}finally{briefingBusy=false;$('#briefingInvestigate').disabled=false;}
 };
@@ -704,7 +719,7 @@ function renderAutonomy(){
   now.querySelector('strong').textContent=active?active.status==='running'?'Investigation running':active.status==='awaiting-approval'?'Command approval required':'Discovery needs your review':'No active investigation';
   now.querySelector('p').textContent=active?`${active.phase==='deep-dive'?'Deep dive: '+autonomyHostLabel(active.deepDiveHostId||active.hostId):active.hostName||active.hostIp} · ${active.events.filter(e=>e.type==='check').length}/${active.maxChecks==null?'∞':active.maxChecks} checks${active.stopReason?' · '+active.stopReason:''}`:'';
   reviewAction.hidden=!active||active.status==='running';
-  if(active)reviewAction.textContent=active.status==='awaiting-approval'?'Review proposed command':active.status==='awaiting-host-review'?'Review host names in Scope':active.mode==='group'?'Continue survey':'Continue discovery';
+  if(active)reviewAction.textContent=active.status==='awaiting-approval'?'Review proposed command':active.status==='awaiting-host-review'?'Review host names in Scope':['group','port-scan'].includes(active.mode)?'Continue survey':'Continue discovery';
   $('#autonomyStop').disabled=!active;now.classList.toggle('idle',!active);
   $('#autonomyGroupStart').disabled=!!active||!autonomySelectedHosts.size;
   $('#autonomyDiscoverStart').disabled=!!active;
@@ -775,7 +790,7 @@ async function loadLlmMetrics(){
 $('#llmMetricsDetails').ontoggle=()=>{if($('#llmMetricsDetails').open)loadLlmMetrics();};
 $('#llmMetricsRefresh').onclick=loadLlmMetrics;
 $('#autonomyHistory').onchange=()=>{autonomyCurrent=$('#autonomyHistory').value;renderAutonomy();autonomySummaries();};
-$('#autonomyReviewAction').onclick=()=>{const active=autonomyRuns.find(r=>['awaiting-approval','awaiting-host-review','awaiting-discovery'].includes(r.status));if(!active)return;autonomyCurrent=active.id;renderAutonomy();if(active.status==='awaiting-approval'){$('#autonomyPendingReview').scrollIntoView({block:'start'});$('#autonomyPendingReview').focus();}else if(active.status==='awaiting-host-review')location.hash='#scope';else{openAutonomyNewRun(active.mode==='group'?'group':'discover');$('#autonomyDiscoverResume').focus();}};
+$('#autonomyReviewAction').onclick=()=>{const active=autonomyRuns.find(r=>['awaiting-approval','awaiting-host-review','awaiting-discovery'].includes(r.status));if(!active)return;autonomyCurrent=active.id;renderAutonomy();if(active.status==='awaiting-approval'){$('#autonomyPendingReview').scrollIntoView({block:'start'});$('#autonomyPendingReview').focus();}else if(active.status==='awaiting-host-review')location.hash='#scope';else{openAutonomyNewRun(['group','port-scan'].includes(active.mode)?'group':'discover');$('#autonomyDiscoverResume').focus();}};
 function autonomyHostLabel(id){const host=map.targets.find(t=>t.host.id===id)?.host;return host?recordLabel(host):id;}
 $('#autonomyGroupStart').onclick=async()=>{
   const hostIds=[...autonomySelectedHosts],scope=checkScope(),model=$('#autonomyModel').value;
@@ -797,7 +812,7 @@ $('#autonomyGroupStart').onclick=async()=>{
 };
 $('#autonomyInventoryStart').onclick=async()=>{const scope=checkScope(),model=$('#autonomyModel').value;if(!scope){$('#autonomyState').textContent='Save the target scope first.';return;}if(!requireAutonomyModel())return;if(!await confirmScopedAction('Survey approved inventory?',`Yagura will survey every approved inventory host in batches of four, then select a deep-dive host. The time limit can pause the survey for continuation. Validated catalog commands run automatically; unlisted tools need review. Model: ${esc(model||'Server default')}.`,'Start survey'))return;const button=$('#autonomyInventoryStart');button.disabled=true;$('#autonomyState').textContent='Starting inventory survey…';try{const run=await post('/api/autonomy/survey-inventory',{model,authorizedScope:scope,authorized:true});autonomyCurrent=run.id;briefingSelectedRunId=run.id;$('#autonomyNewRun').close();await loadAutonomyHistory();location.hash='#briefing';showView();}catch(e){$('#autonomyState').textContent=e.message;button.disabled=false;}};
 $('#autonomyDiscoverStart').onclick=async()=>{const scope=checkScope(),model=$('#autonomyModel').value;if(!scope){$('#autonomyState').textContent='Save an authorized target scope first.';return;}if(!requireAutonomyModel())return;const resolvers=$('#autonomyResolvers').value.split(/[\s,]+/).filter(Boolean);if(!await confirmScopedAction('Discover scope?',`CIDRs: ${esc(scope.cidrs.join(', '))} · Resolvers: ${esc(resolvers.join(', ')||'None')} · Model: ${esc(model||'Server default')}. New names require approval before checks.`,'Start discovery',false))return;const button=$('#autonomyDiscoverStart');button.disabled=true;$('#autonomyState').textContent='Starting scoped discovery…';try{const run=await post('/api/autonomy/discover-group',{resolvers,model,authorizedScope:scope,authorized:true});autonomyCurrent=run.id;briefingSelectedRunId=run.id;$('#autonomyNewRun').close();await loadAutonomyHistory();location.hash='#briefing';showView();}catch(e){$('#autonomyState').textContent=e.message;button.disabled=false;}};
-$('#autonomyDiscoverResume').onclick=async()=>{const run=autonomyRuns.find(r=>['awaiting-host-review','awaiting-discovery'].includes(r.status)),scope=checkScope();if(!run||!scope){$('#autonomyState').textContent='A saved run and target scope are required.';return;}const survey=run.mode==='group',label=survey?'Continue survey':'Continue discovery';if(!await confirmScopedAction(label+'?',`Run: ${esc(run.id)} · Status: ${esc(run.status)}. ${survey?'Continue the remaining approved hosts. Completed hosts stay saved.':'Continue discovery or select approved hosts within the saved scope.'}`,label))return;const button=$('#autonomyDiscoverResume');button.disabled=true;try{await post('/api/autonomy/resume-discovery',{runId:run.id,authorizedScope:scope,authorized:true});autonomyCurrent=run.id;$('#autonomyNewRun').close();await loadAutonomyHistory();}catch(e){$('#autonomyState').textContent=e.message;button.disabled=false;}};
+$('#autonomyDiscoverResume').onclick=async()=>{const run=autonomyRuns.find(r=>['awaiting-host-review','awaiting-discovery'].includes(r.status)),scope=checkScope();if(!run||!scope){$('#autonomyState').textContent='A saved run and target scope are required.';return;}const survey=['group','port-scan'].includes(run.mode),label=survey?'Continue survey':'Continue discovery';if(!await confirmScopedAction(label+'?',`Run: ${esc(run.id)} · Status: ${esc(run.status)}. ${survey?'Continue the remaining approved hosts. Completed hosts stay saved.':'Continue discovery or select approved hosts within the saved scope.'}`,label))return;const button=$('#autonomyDiscoverResume');button.disabled=true;try{await post('/api/autonomy/resume-discovery',{runId:run.id,authorizedScope:scope,authorized:true});autonomyCurrent=run.id;$('#autonomyNewRun').close();await loadAutonomyHistory();}catch(e){$('#autonomyState').textContent=e.message;button.disabled=false;}};
 $('#autonomyStop').onclick=async()=>{const active=autonomyRuns.find(r=>['running','awaiting-approval','awaiting-host-review','awaiting-discovery'].includes(r.status));if(!active)return;$('#autonomyStop').disabled=true;try{await post('/api/autonomy/stop',{runId:active.id});$('#autonomyState').textContent=active.status==='running'?'Stop requested; waiting for the current check.':'Pending review declined.';await loadAutonomyHistory();}catch(e){$('#autonomyState').textContent=e.message;}};
 let activityData={active:[],recent:[]},activityError='',activityLoading=false,activityFocus=null,inboxError='';
 let inboxRead=new Set(),inboxReady=false,inboxShowChecks=false;
@@ -860,7 +875,7 @@ function openInboxRun(runId,review=false){
   const run=autonomyRuns.find(r=>r.id===runId);if(!run)return;
   if(!review)inboxRead.add(inboxKey(run));saveInboxRead();closeActivity();
   autonomyCurrent=runId;briefingSelectedRunId=runId;location.hash=review&&run.status==='awaiting-host-review'?'#scope':'#briefing';showView();renderAutonomy();renderBriefing();renderActivity();
-  if(review&&run.status==='awaiting-discovery'){openAutonomyNewRun(run.mode==='group'?'group':'discover');$('#autonomyDiscoverResume').focus();}
+  if(review&&run.status==='awaiting-discovery'){openAutonomyNewRun(['group','port-scan'].includes(run.mode)?'group':'discover');$('#autonomyDiscoverResume').focus();}
   else if(review&&run.status==='awaiting-approval')requestAnimationFrame(()=>{$('#briefingAction').scrollIntoView({block:'nearest'});$('#briefingApprove')?.focus();});
   else if(!review){$('#briefingRunHistory').focus();}
 }

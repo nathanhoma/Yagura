@@ -633,6 +633,7 @@ class HttpTests(unittest.TestCase):
                                  'authorizedScope': scope, 'authorized': True})
         self.assertEqual(status, 202)
         self.workspace.autonomy.thread.join(3)
+
         self.assertEqual(model.goal, goal)
         saved = self.call('/api/autonomy')[1]['runs'][0]
         self.assertEqual(saved['status'], 'completed')
@@ -647,6 +648,63 @@ class HttpTests(unittest.TestCase):
                                'selectedTarget': selected, 'authorizedScope': scope, 'authorized': True})
         self.assertEqual(status, 202)
         self.workspace.autonomy.thread.join(3)
+
+    def test_all_host_port_scan_uses_only_approved_hosts_and_exact_preview(self):
+        scope = self.workspace.save_scope({'cidrs': ['100.99.3.0/24'], 'domains': ['dev.03.crimsonia.net']})
+        approved_name = 'web.dev.03.crimsonia.net'
+        other_name = 'mail.dev.03.crimsonia.net'
+        content = (f'<host><fqdn>{approved_name}</fqdn><connection-address>100.99.3.57</connection-address></host>'
+                   f'<host><fqdn>{other_name}</fqdn><connection-address>100.99.3.45</connection-address></host>')
+        self.assertEqual(self.call('/api/discovery/inventory', 'POST',
+            {'content': content, 'teamNumber': '03', 'suffix': 'dev.03.crimsonia.net',
+             'resolvers': [], 'authorizedScope': scope, 'authorized': True})[0], 200)
+        self.assertEqual(self.call('/api/discovery/inventory/approve', 'POST',
+            {'hosts': [{'ip': '100.99.3.57', 'name': approved_name}],
+             'authorizedScope': scope, 'authorized': True})[0], 200)
+        goal = '演習対象の全ホストに対してポートスキャンして'
+        status, preview = self.call('/api/briefing/investigate/resolve', 'POST',
+            {'goal': goal, 'authorizedScope': scope})
+        self.assertEqual(status, 200)
+        self.assertEqual(preview['mode'], 'port-scan-all')
+        self.assertEqual([row['name'] for row in preview['hosts']], [approved_name])
+        self.assertEqual(preview['excludedUnapproved'], 1)
+        single = self.call('/api/briefing/investigate/resolve', 'POST',
+            {'goal': f'{approved_name}の全てのポートをスキャンして', 'authorizedScope': scope})[1]
+        self.assertEqual(single['name'], approved_name)
+        self.assertNotIn('mode', single)
+        body = {'goal': goal, 'targetSet': preview['targetSet'], 'authorizedScope': scope,
+                'authorized': True}
+        self.assertEqual(self.call('/api/autonomy/start-portscan-all', 'POST',
+            {**body, 'targetSet': 'changed'})[0], 400)
+        def runner(program, args, timeout):
+            self.calls.append((program, args))
+            ip = args[-1]
+            name = approved_name if ip == '100.99.3.57' else other_name
+            return {'ok': True, 'stdout':
+                f'Nmap scan report for {name} ({ip})\nHost is up.\n'
+                '80/tcp open http\nNmap done: 1 IP address (1 host up) scanned', 'stderr': ''}
+        self.workspace.runner = runner
+        status, run = self.call('/api/autonomy/start-portscan-all', 'POST', body)
+        self.assertEqual(status, 202, run)
+        self.workspace.autonomy.thread.join(3)
+        saved = self.call('/api/autonomy')[1]['runs'][0]
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(saved['mode'], 'port-scan')
+        self.assertEqual(saved['surveyedHostIds'], [preview['hosts'][0]['hostId']])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][0], 'nmap')
+        self.assertEqual(self.calls[0][1][-1], '100.99.3.57')
+        self.assertEqual(self.call('/api/discovery/inventory/approve', 'POST',
+            {'hosts': [{'ip': '100.99.3.45', 'name': other_name}],
+             'authorizedScope': scope, 'authorized': True})[0], 200)
+        self.assertEqual(self.call('/api/autonomy/start-portscan-all', 'POST', body)[0], 400)
+        updated = self.call('/api/briefing/investigate/resolve', 'POST',
+            {'goal': goal, 'authorizedScope': scope})[1]
+        self.assertEqual(updated['hostCount'], 2)
+        self.assertEqual(self.call('/api/autonomy/start-portscan-all', 'POST',
+            {**body, 'targetSet': updated['targetSet']})[0], 202)
+        self.workspace.autonomy.thread.join(3)
+        self.assertEqual({args[-1] for _, args in self.calls[-2:]}, {'100.99.3.45', '100.99.3.57'})
 
     def test_discovery_saves_each_chunk_and_resumes_after_failure(self):
         self.call('/api/scope', 'PUT', {'cidrs': ['100.96.1.0/24'], 'domains': ['crimsonia.net']})

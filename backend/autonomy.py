@@ -223,6 +223,44 @@ class AutonomyController:
             self.thread.start()
             return run
 
+    def start_portscan_all(self, host_ids, scope, goal):
+        """Scan the top 100 TCP ports on every explicitly approved host."""
+        ws = self.workspace
+        if not isinstance(host_ids, list) or not host_ids or len(host_ids) != len(set(host_ids)):
+            raise ValueError('No distinct approved hosts were selected for the port scan.')
+        if not isinstance(goal, str) or not 5 <= len(goal.strip()) <= 500:
+            raise ValueError('Describe the all-host port scan in 5–500 characters.')
+        with ws.lock:
+            if self.thread and self.thread.is_alive() or any(r.get('status') in
+                    ('awaiting-approval', 'awaiting-host-review', 'awaiting-discovery') for r in self._load()['runs']):
+                raise ValueError('Review or stop the current AI run first.')
+            if not ws.scope_file.exists() or ws.load_scope() != scope:
+                raise ValueError('Saved target scope changed; review the host list again.')
+            hosts = {h['id']: h for h in ws.load()['findings'] if h['kind'] == 'host' and h['id'] in host_ids}
+            if len(hosts) != len(host_ids):
+                raise ValueError('An approved host changed; review the host list again.')
+            for host in hosts.values():
+                require_target(host, scope)
+            run = dict(id=uid('ai-run'), mode='port-scan', phase='survey', source='approved-hosts',
+                       hostIds=host_ids, surveyedHostIds=[], hostSnapshots={hid:
+                       {'ip': hosts[hid]['ip'], 'name': hosts[hid].get('name')} for hid in host_ids},
+                       hostId=host_ids[0], hostName=f'{len(host_ids)} approved hosts', hostIp='',
+                       model='deterministic port scan', scope=scope, status='running',
+                       startedAt=now(), endedAt=None, maxChecks=None, stopReason='',
+                       goal=redact(goal.strip()), flags=[], events=[dict(type='plan', at=now(),
+                       reason='Scan each confirmed host separately, save the result, and continue after a host failure.',
+                       tool='nmap', expectedEvidence='Open TCP ports among the top 100 common ports.')])
+            data = self._load()
+            data['runs'] = [run] + data['runs'][:19]
+            self._save(data)
+            self.activity_ids[run['id']] = ws.activity.begin('ai-run', 'Port scan approved hosts',
+                target=f'{len(host_ids)} hosts', detail='Scanning top 100 TCP ports on approved hosts.')
+            self.stop_event = threading.Event()
+            self.thread = threading.Thread(target=self._portscan_worker,
+                args=(run['id'], scope, self.stop_event), daemon=True, name='yagura-ai-portscan')
+            self.thread.start()
+            return run
+
     def start_discover_group(self, scope, resolvers, model=''):
         ws = self.workspace
         with ws.lock:
@@ -304,9 +342,9 @@ class AutonomyController:
         ws = self.workspace
         with ws.lock:
             run = next((r for r in self._load()['runs'] if r['id'] == run_id), None)
-            if not run or run.get('mode') not in ('group', 'discover-group') or run['status'] not in ('awaiting-host-review', 'awaiting-discovery'):
+            if not run or run.get('mode') not in ('group', 'discover-group', 'port-scan') or run['status'] not in ('awaiting-host-review', 'awaiting-discovery'):
                 raise ValueError('No matching survey or discovery run is waiting to continue.')
-            if run.get('mode') == 'group' and run['status'] != 'awaiting-discovery':
+            if run.get('mode') in ('group', 'port-scan') and run['status'] != 'awaiting-discovery':
                 raise ValueError('No matching group survey is waiting to continue.')
             if ws.load_scope() != scope or run['scope'] != scope:
                 raise ValueError('Authorized scope changed.')
@@ -315,11 +353,11 @@ class AutonomyController:
             self._update(run_id, status='running')
             self.stop_event = threading.Event()
             model = run['model'] if run['model'] != 'server default' else ''
-            self.activity_ids[run_id] = ws.activity.begin('ai-run', 'Continue host survey' if run.get('mode') == 'group' else 'Continue scoped discovery',
-                target=f"{len(run['hostIds'])} selected hosts" if run.get('mode') == 'group' else ', '.join(scope['cidrs']),
-                detail='Continuing saved host survey.' if run.get('mode') == 'group' else 'Checking saved discovery and approved hosts.')
-            worker = self._group_worker if run.get('hostIds') and run.get('phase') == 'survey' else self._discover_group_worker
-            args = (run_id, scope, model, self.stop_event) if worker == self._group_worker else (run_id, scope, model, self.stop_event, True)
+            self.activity_ids[run_id] = ws.activity.begin('ai-run', 'Continue host survey' if run.get('mode') in ('group', 'port-scan') else 'Continue scoped discovery',
+                target=f"{len(run['hostIds'])} selected hosts" if run.get('mode') in ('group', 'port-scan') else ', '.join(scope['cidrs']),
+                detail='Continuing saved host survey.' if run.get('mode') in ('group', 'port-scan') else 'Checking saved discovery and approved hosts.')
+            worker = self._portscan_worker if run.get('mode') == 'port-scan' else self._group_worker if run.get('hostIds') and run.get('phase') == 'survey' else self._discover_group_worker
+            args = (run_id, scope, self.stop_event) if worker == self._portscan_worker else (run_id, scope, model, self.stop_event) if worker == self._group_worker else (run_id, scope, model, self.stop_event, True)
             self.thread = threading.Thread(target=worker,
                 args=args, daemon=True,
                 name='yagura-ai-discover-group')
@@ -1052,6 +1090,42 @@ class AutonomyController:
                     self._review_check_result(run_id, hid, scope, model, result)
                     continue
                 self._mark_survey(run_id, hid, checked=False)
+        except (ValueError, LlmError, RuntimeError) as exc:
+            self._finish(run_id, 'stopped', f'Run stopped safely: {exc}')
+        except Exception:
+            self._finish(run_id, 'stopped', 'Unexpected error; review server logs before retrying.')
+
+    def _portscan_worker(self, run_id, scope, stop_event):
+        """Run one bounded, validated Nmap process per saved approved host."""
+        ws = self.workspace
+        started = time.monotonic()
+        try:
+            while True:
+                if stop_event.is_set():
+                    return self._finish(run_id, 'stopped', 'Stopped after the current host scan.')
+                run, _, hosts = self._group_state(run_id, scope)
+                remaining = [hid for hid in run['hostIds'] if hid not in run['surveyedHostIds']]
+                if not remaining:
+                    failures = sum(e.get('type') == 'check' and e.get('outcome') != 'completed'
+                                   for e in run['events'])
+                    return self._finish(run_id, 'completed',
+                        f'Port scan attempted on {len(run["hostIds"])} approved hosts; {failures} failed checks need review.')
+                if time.monotonic() - started >= GROUP_MAX_SECONDS:
+                    return self._pause_discovery(run_id, 'awaiting-discovery',
+                        'Port-scan time limit reached; completed hosts are saved. Continue to scan the rest.')
+                host_id = remaining[0]
+                host = hosts[host_id]
+                with ws.lock:
+                    data = self._load()
+                    saved = next(r for r in data['runs'] if r['id'] == run_id)
+                    saved['hostId'], saved['hostIp'] = host_id, host['ip']
+                    self._save(data)
+                command = (f'nmap -n -Pn -sT -F --max-retries 1 --host-timeout 2m '
+                           f'-oX - {host["ip"]}')
+                result = self._run_reviewed(run_id, host_id, scope, command, 135, reviewed=False)
+                self._mark_survey(run_id, host_id, checked=True)
+                ws.activity.update(self.activity_ids[run_id],
+                    detail=f'{len(run["surveyedHostIds"])+1}/{len(run["hostIds"])} hosts attempted.')
         except (ValueError, LlmError, RuntimeError) as exc:
             self._finish(run_id, 'stopped', f'Run stopped safely: {exc}')
         except Exception:

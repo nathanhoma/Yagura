@@ -1,5 +1,7 @@
 """Resolve an investigation instruction against saved, scoped host records."""
 
+import hashlib
+import json
 import re
 
 from .scope import host_allowed
@@ -7,6 +9,29 @@ from .scope import host_allowed
 
 ELIGIBLE_INVENTORY = frozenset(('verified', 'no-answer', 'inventory-only'))
 MAX_CHOICES = 64
+PORT_SCAN_INTENT = re.compile(r'ポート.{0,8}(?:スキャン|調査|確認)|\bport[ -]?scan\b|\b(?:scan|check|enumerate)\s+(?:the\s+)?ports?\b', re.I)
+ALL_HOSTS_INTENT = re.compile(r'全(?:ての)?(?:対象)?ホスト|すべての(?:対象)?ホスト|全対象|\b(?:all|every)\s+(?:approved\s+|exercise\s+|in-scope\s+)?(?:hosts?|targets?)\b|\bentire\s+scope\b', re.I)
+
+
+def all_host_port_scan(goal):
+    return bool(PORT_SCAN_INTENT.search(goal) and ALL_HOSTS_INTENT.search(goal))
+
+
+def port_scan_targets(scope, discovery, document):
+    """Snapshot exact approved IP/name pairs for a whole-scope port scan."""
+    rows = _candidates(scope, discovery, document)
+    targets = [_record(ip, name, status, document, scope) for (ip, name), status in rows.items()]
+    pairs = sorted((row for row in targets if row['approved']), key=lambda row: (row['ip'], row['name']))
+    approved, seen_ips = [], set()
+    for row in pairs:
+        if row['ip'] not in seen_ips:
+            approved.append(row)
+            seen_ips.add(row['ip'])
+    signature = [(row['hostId'], row['ip'], row['name']) for row in approved]
+    token = hashlib.sha256(json.dumps(signature, separators=(',', ':')).encode()).hexdigest()
+    return {'mode': 'port-scan-all', 'hosts': approved, 'hostCount': len(approved),
+            'excludedUnapproved': len(targets) - len(approved), 'targetSet': token,
+            'profile': 'TCP top 100 ports per host; no service or OS detection'}
 
 
 def _record(ip, name, status, document, scope):
@@ -66,6 +91,13 @@ def resolve_goal_target(goal, scope, discovery, document, selected_target=None):
         raise ValueError('No eligible inventory or approved hosts exist in the saved scope.')
     exact = [(ip, name) for ip, name in rows if
              _mentioned(goal, ip) or (name != ip and _mentioned(goal, name))]
+    if all_host_port_scan(goal):
+        if selected_target is not None or exact:
+            raise ValueError('Choose either all approved hosts or one named host for a port scan.')
+        result = port_scan_targets(scope, discovery, document)
+        if not result['hostCount']:
+            raise ValueError('Approve hosts in the saved scope before scanning all hosts.')
+        return result
     if selected_target is not None:
         if (not isinstance(selected_target, dict) or set(selected_target) != {'ip', 'name'} or
                 not isinstance(selected_target['ip'], str) or not isinstance(selected_target['name'], str)):

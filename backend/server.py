@@ -739,6 +739,21 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             raise ValueError('Goal target must be an approved, exact inventory IP/name pair.')
                     return self.send_json(202, workspace.autonomy.start(body['hostId'], scope,
                                                                          body['model'], body['goal']))
+                if self.command == 'POST' and path == '/api/autonomy/start-portscan-all':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) !=
+                            {'goal', 'targetSet', 'authorizedScope', 'authorized'} or
+                            body['authorized'] is not True or not isinstance(body['goal'], str) or
+                            not isinstance(body['targetSet'], str)):
+                        raise ValueError('Review the complete approved host set and confirm the port scan.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                        targets = resolve_goal_target(body['goal'], scope, workspace.load_discovery(), workspace.load())
+                        if targets.get('mode') != 'port-scan-all' or targets['targetSet'] != body['targetSet']:
+                            raise ValueError('Approved target set changed; review the host list again.')
+                        run = workspace.autonomy.start_portscan_all(
+                            [row['hostId'] for row in targets['hosts']], scope, body['goal'])
+                    return self.send_json(202, run)
                 if self.command == 'POST' and path == '/api/autonomy/start-group':
                     body = self.body()
                     if (not isinstance(body, dict) or set(body) - {'hostIds', 'model', 'authorizedScope', 'authorized'} or
