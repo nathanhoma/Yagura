@@ -114,6 +114,18 @@ body[data-view="briefing"] #briefingTranscript{flex:1;min-height:0;height:auto;m
 .briefing-chat>.briefing-turn:first-child{max-width:100%;width:100%}
 .briefing-chat>.briefing-turn:first-child .briefing-bubble{width:100%}
 .briefing-overview{display:grid;gap:7px}
+.briefing-saved-summary{padding:0 0 14px;border-bottom:1px solid var(--line)}
+.briefing-run-label{display:block;margin-bottom:5px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.07em;text-transform:uppercase}
+.briefing-run-record{align-self:stretch;border-left:2px solid #52656a;padding:7px 12px;background:#ffffff05;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.briefing-run-record.result{border-color:var(--cyan);background:#122024}
+.briefing-run-record.lead{border-color:var(--amber);background:#292117}
+.briefing-run-record.lead .briefing-run-label{color:var(--amber)}
+.briefing-run-record strong{display:block;font-size:13px}
+.briefing-run-record p{margin:4px 0 0}
+.briefing-run-record .briefing-meta{display:block;margin-top:5px}
+.briefing-run-record details{margin-top:8px}
+.briefing-run-record summary{cursor:pointer;color:var(--cyan)}
+.briefing-run-record pre{max-height:180px;overflow:auto}
 .briefing-overview details{border:1px solid var(--line);border-radius:7px;background:#101a1d}
 .briefing-overview summary{cursor:pointer;padding:9px 11px;font-weight:650}
 .briefing-section-body{padding:0 11px 10px}

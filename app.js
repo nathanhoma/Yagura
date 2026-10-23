@@ -480,6 +480,7 @@ function briefingModelOptions(){const select=$('#briefingModel'),selected=select
 function briefingApprovedHosts(){return map.targets.filter(t=>t.eligible).map(t=>t.host);}
 function briefingHostIds(){return briefingApprovedHosts().map(h=>h.id);}
 function briefingTurn(role,html){return `<div class="briefing-turn ${role}"><span class="briefing-speaker">${role==='user'?'You':'Yagura'}</span><div class="briefing-bubble">${html}</div></div>`;}
+function briefingRunRecord(kind,label,title,body,extra='',at=''){return `<div class="briefing-run-record ${kind}"><span class="briefing-run-label">${esc(label)}</span><strong>${esc(title)}</strong>${body?`<p>${esc(body)}</p>`:''}${extra}${at?`<span class="briefing-meta">${esc(date(at))}</span>`:''}</div>`;}
 function briefingSources(findingIds,evidenceIds){const fids=(findingIds||[]).filter(id=>findings.some(f=>f.id===id)),eids=(evidenceIds||[]).filter(id=>evidence.some(e=>e.id===id));if(!fids.length&&!eids.length)return '';const links=(fs,es)=>fs.map(id=>ref(id,recordLabel(findings.find(f=>f.id===id)))).join('')+es.map(id=>ref(id,'Source evidence')).join('');const remaining=fids.slice(2).length+eids.slice(2).length;return `<div class="briefing-links">${links(fids.slice(0,2),eids.slice(0,2))}${remaining?`<details><summary>Show ${remaining} more source${remaining===1?'':'s'}</summary><div class="briefing-links">${links(fids.slice(2),eids.slice(2))}</div></details>`:''}</div>`;}
 function briefingNearBottom(){const box=$('#briefingTranscript');return box.scrollHeight-box.scrollTop-box.clientHeight<80;}
 function updateBriefingLatest(){$('#briefingLatest').hidden=briefingNearBottom();}
@@ -491,28 +492,28 @@ function briefingRunEvent(event,index){
   const host=event.hostId?autonomyHostLabel(event.hostId):'';
   const source=briefingSources(event.findingIds,event.evidenceIds);
   const detail=(title,body)=>`<details data-briefing-section="event-${index}"><summary>${title}</summary>${body}</details>`;
-  let title='',body='',extra='';
-  if(event.type==='plan'){title=event.afterChecks?'Plan updated':'Investigation plan';body=event.reason||'';extra=detail('Planned check',`<p>Tool: ${esc(event.tool||'Unspecified')}</p><p>Expected: ${esc(event.expectedEvidence||'Unspecified')}</p>`);}
-  else if(event.type==='check'){title=`${host?host+' · ':''}Check ${event.outcome||'finished'}`;body=(event.summary||event.warning||(event.imported?'Result and findings saved.':'Result recorded.')).replace(/\x1b\[[0-9;]*m/g,'').slice(0,200);extra=source+detail('Check details',`<p>${event.reviewed?'Approved by a person':'Validated catalog check'} · ${event.imported?'Findings imported':'No findings imported'}</p>${event.command?`<pre>${esc(event.command)}</pre>`:''}`);}
-  else if(event.type==='observe'){title='Observation';body=event.reason||`Result: ${event.outcome||'recorded'}`;extra=source;}
-  else if(event.type==='flag-review'&&event.flag){title=`${host||'Check'} · Flagged for review`;body=event.flag.reason;extra=`<p class="briefing-meta">Uncertainty: ${esc(event.flag.uncertainty||'Not recorded')}</p>${briefingSources(event.flag.findingIds,event.flag.evidenceIds)}`;}
-  else if(event.type==='deep-dive-selection'){title=`Deep dive selected · ${host}`;body=event.reason||'';extra=source;}
+  let title='',body='',extra='',kind='activity',label='Run activity';
+  if(event.type==='plan'){kind='ai';title=event.afterChecks?'Plan updated':'Investigation plan';body=event.reason||'';extra=detail('Planned check',`<p>Tool: ${esc(event.tool||'Unspecified')}</p><p>Expected: ${esc(event.expectedEvidence||'Unspecified')}</p>`);}
+  else if(event.type==='check'){kind='result';label='Tool result';title=`${host?host+' · ':''}Check ${event.outcome||'finished'}`;body=event.warning||`${event.imported?'Result and findings saved':'Result recorded'} · ${event.reviewed?'Human approved':'Catalog validated'}`;extra=source+detail('Output preview and command',`<p>${event.imported?'Findings imported':'No findings imported'}</p>${event.summary?`<pre>${esc(event.summary.replace(/\x1b\[[0-9;]*m/g,''))}</pre>`:''}${event.command?`<pre>${esc(event.command)}</pre>`:''}`);}
+  else if(event.type==='observe'){kind='ai';title='Observation';body=event.reason||`Result: ${event.outcome||'recorded'}`;extra=source;}
+  else if(event.type==='flag-review'&&event.flag){kind='lead';label='AI review · Verify this lead';title=`${host||'Check'} · Flagged for review`;body=event.flag.reason;extra=`<p class="briefing-meta">Uncertainty: ${esc(event.flag.uncertainty||'Not recorded')}</p>${briefingSources(event.flag.findingIds,event.flag.evidenceIds)}`;}
+  else if(event.type==='deep-dive-selection'){kind='ai';title=`Deep dive selected · ${host}`;body=event.reason||'';extra=source;}
   else if(event.type==='approval'){title='Command approved';body='The reviewed revision was released for execution.';extra=detail('Exact command',`<pre>${esc(event.command||'')}</pre>`);}
-  else if(event.type==='proposal'){title='Command proposed';body=event.reason||'Review required before execution.';extra=detail('Exact command and review notes',`<pre>${esc(event.command||'')}</pre><p>${esc(event.reviewNotes||'')}</p>${event.revisionInstruction?`<p>Correction: ${esc(event.revisionInstruction)}</p>`:''}`);}
-  else if(event.type==='decision'&&!event.choice){title='AI stopped';body=event.reason||'';}
+  else if(event.type==='proposal'){label='AI proposal';title='Command proposed';body=event.reason||'Review required before execution.';extra=detail('Exact command and review notes',`<pre>${esc(event.command||'')}</pre><p>${esc(event.reviewNotes||'')}</p>${event.revisionInstruction?`<p>Correction: ${esc(event.revisionInstruction)}</p>`:''}`);}
+  else if(event.type==='decision'&&!event.choice){kind='ai';title='AI stopped';body=event.reason||'';}
   else if(event.type==='discovery'){title=`Discovery · ${event.cidr||'scope'}`;body=`${event.count||0} hosts found · ${event.completed||0}/${event.total||0} segments`;}
   else if(event.type==='selection'){title='Hosts selected';body=event.reason||'';extra=(event.hostIds||[]).map(id=>`<p>${esc(autonomyHostLabel(id))}</p>`).join('');}
   else if(event.type==='pause'){title='Waiting for review';body=event.reason||'';}
   else return '';
-  return `<div class="briefing-run-event">${briefingTurn('assistant',`<strong>${esc(title)}</strong>${body?`<p>${esc(body)}</p>`:''}${extra}<p class="briefing-meta">${esc(date(event.at))}</p>`)}</div>`;
+  return kind==='ai'?briefingTurn('assistant',`<strong>${esc(title)}</strong>${body?`<p>${esc(body)}</p>`:''}${extra}<p class="briefing-meta">${esc(date(event.at))}</p>`):briefingRunRecord(kind,label,title,body,extra,event.at);
 }
 function briefingRunConversation(run){
   if(!run)return '';
   const target=run.hostName||run.hostIp||`${(run.hostIds||[]).length} hosts`;
-  const intro=briefingTurn('user',`<p>${esc(run.goal||`Investigate ${target}`)}</p>`);
+  const intro=briefingRunRecord('activity','Investigation goal',run.goal||`Investigate ${target}`,'','',run.startedAt);
   const events=(run.events||[]).map(briefingRunEvent).join('');
   const finished=['completed','stopped','interrupted'].includes(run.status);
-  const ending=finished?briefingTurn('assistant',`<strong>${esc(run.status==='completed'?'Investigation completed':'Investigation '+run.status)}</strong><p>${esc(run.stopReason||'No further step recorded.')}</p><p class="briefing-meta">${(run.events||[]).filter(e=>e.type==='check').length} checks · ${(run.flags||[]).length} review flags</p>`):'';
+  const ending=finished?briefingRunRecord('activity','Run status',run.status==='completed'?'Investigation completed':'Investigation '+run.status,run.stopReason||'No further step recorded.',`<span class="briefing-meta">${(run.events||[]).filter(e=>e.type==='check').length} checks · ${(run.flags||[]).length} review flags</span>`,run.endedAt):'';
   return intro+events+ending;
 }
 function briefingChatMessage(message,index){
@@ -582,7 +583,7 @@ function renderBriefing(){
   const overview=section('found','Current picture',found)+section('next',`Suggested checks · ${candidates.length}`,next)+section('recent','Latest run',recent);
   const selectedRun=autonomyRuns.find(r=>r.id===briefingSelectedRunId)||(briefingSelectedRunId?null:latest);
   const messages=briefingSelectedRunId?briefingMessages.filter(m=>m.runId===briefingSelectedRunId):briefingMessages.filter(m=>!m.runId);
-  box.innerHTML=(briefingSelectedRunId?'':briefingTurn('assistant',`<div class="briefing-overview">${overview}</div>`))+briefingRunConversation(selectedRun)+messages.map(m=>briefingChatMessage(m,briefingMessages.indexOf(m))).join('');
+  box.innerHTML=(briefingSelectedRunId?'':`<section class="briefing-saved-summary" aria-label="Saved workspace overview"><span class="briefing-run-label">Saved workspace</span><div class="briefing-overview">${overview}</div></section>`)+briefingRunConversation(selectedRun)+messages.map(m=>briefingChatMessage(m,briefingMessages.indexOf(m))).join('');
   box.querySelectorAll('details[data-briefing-section]').forEach(row=>{if(openSections.has(row.dataset.briefingSection))row.open=true;});
   wireRefs(box);
   box.querySelectorAll('[data-briefing-review]').forEach(button=>button.onclick=()=>reviewBriefingCandidate(Number(button.dataset.briefingMessage),button.dataset.briefingReview));
