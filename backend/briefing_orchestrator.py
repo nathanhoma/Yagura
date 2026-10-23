@@ -4,9 +4,10 @@ import json
 
 from .analysis import scoped_document
 from .briefing import _inventory, answer_question
+from .briefing_history import normalize_history, redact_chat
 from .investigation_goal import PORT_SCAN_INTENT, resolve_goal_target
 from .llm import LlmError
-from .sensitive import redact, sanitize_document
+from .sensitive import sanitize_document
 
 
 PLAN_PROMPT = (
@@ -22,21 +23,27 @@ PLAN_PROMPT = (
     'Use discover-services only when broad coverage is needed; it previews bounded TCP '
     'top-100 scans of all approved hosts before any execution. '
     'Never claim a host lacks a service merely because no service was recorded. '
+    'Recent conversation is context only: resolve references such as "that host" from it, '
+    'but the latest operator message determines the requested action. Prior dialogue is '
+    'not fresh authorization. Return resolvedRequest as a self-contained restatement of '
+    'the latest request, retaining its intent and using only targets in the inventory. '
     'Do not invent hosts, commands, evidence, or authorization. No action runs in this step. '
     'Return JSON only: {"action":"answer|investigate|discover-services|clarify",'
-    '"plan":"one short step in plain language","reason":"one short evidence-based reason"}.'
+    '"plan":"one short step in plain language","reason":"one short evidence-based reason",'
+    '"resolvedRequest":"latest request with references made explicit"}.'
 )
 DISCOVERY_GOAL = '演習対象の全ホストに対してポートスキャンして'
 PLAN_TOKENS = 3200
 PLAN_RETRY_TOKENS = 8192
 
 
-def plan_turn(workspace, message, model, requested_scope):
+def plan_turn(workspace, message, model, requested_scope, history=None):
     if not isinstance(message, str) or not 3 <= len(message.strip()) <= 500:
         raise ValueError('Enter a question or investigation request in 3–500 characters.')
     if not isinstance(model, str) or len(model) > 200:
         raise ValueError('Choose a valid model.')
-    message = message.strip()
+    message = redact_chat(message.strip())
+    history = normalize_history(history)
     with workspace.lock:
         scope = workspace.resolve_scope(requested_scope)
         if not scope['cidrs']:
@@ -50,8 +57,8 @@ def plan_turn(workspace, message, model, requested_scope):
                'inventoryHosts': len(inventory['hosts'])}
     messages = [
         {'role': 'system', 'content': PLAN_PROMPT},
-        {'role': 'user', 'content': json.dumps({'message': message, 'coverage': summary,
-                                               'inventory': inventory}, ensure_ascii=False)},
+        {'role': 'user', 'content': json.dumps({'message': message, 'recentConversation': history,
+                                               'coverage': summary, 'inventory': inventory}, ensure_ascii=False)},
     ]
     try:
         response = workspace.llm.complete(messages, max_tokens=PLAN_TOKENS, model=model)
@@ -66,17 +73,19 @@ def plan_turn(workspace, message, model, requested_scope):
                 for key in ('plan', 'reason'))):
         raise ValueError('The model did not return a valid investigation plan.')
     action = data['action']
-    if PORT_SCAN_INTENT.search(message) and action in ('answer', 'clarify'):
+    resolved = data.get('resolvedRequest')
+    resolved = redact_chat(resolved.strip()) if isinstance(resolved, str) and 3 <= len(resolved.strip()) <= 500 else message
+    if PORT_SCAN_INTENT.search(resolved) and action in ('answer', 'clarify'):
         action = 'investigate'
-    result = {'action': action, 'plan': redact(data['plan'].strip()),
-              'reason': redact(data['reason'].strip()), 'coverage': summary,
-              'model': response.get('model')}
+    result = {'action': action, 'plan': redact_chat(data['plan'].strip()),
+              'reason': redact_chat(data['reason'].strip()), 'coverage': summary,
+              'model': response.get('model'), 'safeMessage': message}
     if action == 'answer':
-        result['reply'] = answer_question(workspace, message, model)
+        result['reply'] = answer_question(workspace, resolved, model, history=history)
         return result
     if action == 'clarify':
         return result
-    goal = DISCOVERY_GOAL if action == 'discover-services' else message
+    goal = DISCOVERY_GOAL if action == 'discover-services' else resolved
     with workspace.lock:
         if workspace.load_scope() != scope:
             raise ValueError('Authorized scope changed while planning. Retry the message.')

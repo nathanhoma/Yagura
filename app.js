@@ -693,6 +693,19 @@ async function reviewBriefingPlan(index){
   if(resolution.needsSelection){showBriefingTargetChoices(goal,scope,model,resolution);$('#briefingState').textContent='Choose the intended host.';return;}
   return launchBriefingGoal(goal,scope,model,{ip:resolution.ip,name:resolution.name});
 }
+function briefingRecentHistory(){
+  const recent=briefingMessages.slice(-4).flatMap(message=>{
+    const assistant=[message.reply?.answer,message.plan,message.reason].filter(Boolean).join(' ').slice(0,600);
+    return [{role:'user',content:String(message.question||'').slice(0,600)},
+      ...(assistant?[{role:'assistant',content:assistant}]:[])];
+  }).filter(row=>row.content.trim());
+  const selected=[];let length=0;
+  for(const row of recent.reverse()){
+    if(length+row.content.length>3200)break;
+    selected.push(row);length+=row.content.length;
+  }
+  return selected.reverse();
+}
 $('#briefingSend').onclick=async()=>{
   const question=$('#briefingQuestion').value.trim(),scope=checkScope(),model=$('#briefingModel').value;
   if(!scope||question.length<3||!briefingHostIds().length){$('#briefingState').textContent='Save scope, approve hosts, and enter a message.';return;}
@@ -701,10 +714,11 @@ $('#briefingSend').onclick=async()=>{
   $('#briefingState').textContent='Planning the next step from saved inventory…';
   try{
     const contextKey=briefingContextKey;
-    const decision=await post('/api/briefing/plan',{message:question,model,authorizedScope:scope});
+    const decision=await post('/api/briefing/plan',{message:question,model,authorizedScope:scope,
+      history:briefingRecentHistory()});
     if(contextKey!==briefingContextKey||JSON.stringify(checkScope())!==JSON.stringify(scope))throw new Error('Scope or conversation changed while planning. Send the request again.');
     briefingSelectedRunId='';
-    const item={question,plan:decision.plan,reason:decision.reason,reply:decision.reply||{},
+    const item={question:decision.safeMessage||question,plan:decision.plan,reason:decision.reason,reply:decision.reply||{},
       resolution:decision.resolution,goal:decision.goal,scope,model,results:{},runId:''};
     briefingMessages.push(item);
     $('#briefingQuestion').value='';

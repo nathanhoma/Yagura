@@ -39,6 +39,23 @@ class BriefingTests(unittest.TestCase):
         self.assertEqual(self.ws.llm.max_tokens, 32768)
         self.assertEqual(result['findingIds'], [self.host['id']])
 
+    def test_answer_receives_redacted_recent_conversation(self):
+        class Model:
+            def complete(self, messages, max_tokens=0, model=''):
+                self.payload = json.loads(messages[1]['content'])
+                finding = self.payload['context']['findings'][0]
+                return {'model': 'fake', 'data': {'supported': True,
+                    'answer': 'Saved evidence exists.', 'uncertainty': '',
+                    'findingIds': [finding['id']], 'evidenceIds': finding['evidenceIds'],
+                    'candidateIds': []}}
+        self.ws.llm = Model()
+        result = answer_question(self.ws, 'What about that host?', history=[
+            {'role': 'user', 'content': 'web.lab.test password is abc123'},
+            {'role': 'assistant', 'content': 'It has an HTTPS service.'}])
+        self.assertTrue(result['supported'])
+        self.assertNotIn('abc123', str(self.ws.llm.payload))
+        self.assertEqual(len(self.ws.llm.payload['recentConversation']), 2)
+
     def test_invented_evidence_is_rejected(self):
         class Model:
             def complete(self, messages, max_tokens=0, model=''):

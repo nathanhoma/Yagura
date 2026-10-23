@@ -660,17 +660,21 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 if self.command == 'GET' and path == '/api/autonomy':
                     return self.send_json(200, {**workspace.autonomy.history(), 'limits': workspace.autonomy.limits()})
                 if self.command == 'POST' and path == '/api/briefing/ask':
-                    body = self.body(4000)
-                    if not isinstance(body, dict) or set(body) != {'question', 'model'}:
+                    body = self.body(8000)
+                    if (not isinstance(body, dict) or set(body) - {'question', 'model', 'history'} or
+                            not {'question', 'model'} <= set(body)):
                         raise ValueError('Supply a question and optional model.')
-                    return self.send_json(200, answer_question(workspace, body['question'], body['model']))
+                    return self.send_json(200, answer_question(workspace, body['question'], body['model'],
+                                                               history=body.get('history')))
                 if self.command == 'POST' and path == '/api/briefing/plan':
-                    body = self.body(4000)
-                    if (not isinstance(body, dict) or set(body) !=
-                            {'message', 'model', 'authorizedScope'}):
+                    body = self.body(8000)
+                    if (not isinstance(body, dict) or
+                            set(body) - {'message', 'model', 'authorizedScope', 'history'} or
+                            not {'message', 'model', 'authorizedScope'} <= set(body)):
                         raise ValueError('Supply one message, model, and the saved scope.')
                     return self.send_json(200, plan_turn(
-                        workspace, body['message'], body['model'], body['authorizedScope']))
+                        workspace, body['message'], body['model'], body['authorizedScope'],
+                        history=body.get('history')))
                 if self.command == 'POST' and path == '/api/briefing/investigate/resolve':
                     body = self.body(4000)
                     if not isinstance(body, dict) or set(body) - {'goal', 'authorizedScope', 'selectedTarget'} or not {'goal', 'authorizedScope'} <= set(body):
