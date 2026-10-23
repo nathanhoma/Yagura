@@ -740,6 +740,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(preview['mode'], 'selected-hosts')
         self.assertEqual(preview['operation'], 'investigate')
         self.assertEqual({row['name'] for row in preview['hosts']}, {names[0][0], names[1][0]})
+        self.assertEqual(preview['notMatchedApproved'], 1)
         self.assertTrue(all(row['reasons'] for row in preview['hosts']))
         scan_goal = 'Webサービスがある全ホストに対してポートスキャンして'
         scan_preview = self.call('/api/briefing/investigate/resolve', 'POST',

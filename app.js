@@ -635,11 +635,17 @@ async function launchBriefingSelectedHosts(goal,scope,model,resolution){
     if(fresh.mode!=='selected-hosts'||fresh.targetSet!==resolution.targetSet)throw new Error('Selected hosts or service evidence changed. Review the request again.');
     const rows=fresh.hosts.map(host=>host.name+' ('+host.ip+') — '+host.reasons.join(', ')).join('\n');
     const operation=fresh.operation==='port-scan'?'Port scan':'AI investigation';
+    const hostLabel=fresh.hostCount===1?'host':'hosts';
     const detail=fresh.operation==='port-scan'
       ?'Yagura runs one bounded TCP top-100 port scan per host and saves the results.'
-      :'Yagura surveys the selected hosts, then may deepen one investigation. Catalogued checks can run automatically; unlisted tools pause for review.';
-    const description='<p>Goal: '+esc(goal)+'</p><p>Selected by: '+esc(fresh.selection)+' · '+fresh.hostCount+' approved hosts. '+detail+'</p><details open><summary>Targets and saved evidence</summary><pre>'+esc(rows)+'</pre></details>';
-    if(!await confirmScopedAction('Start '+operation.toLowerCase()+' on '+fresh.hostCount+' hosts?',description,'Start '+operation.toLowerCase()))return;
+      :fresh.hostCount===1
+        ?'Yagura investigates this host against the stated goal. Catalogued checks can run automatically; unlisted tools pause for review.'
+        :'Yagura surveys the selected hosts, then may deepen one investigation. Catalogued checks can run automatically; unlisted tools pause for review.';
+    const coverage=fresh.notMatchedApproved
+      ?'<p>'+fresh.notMatchedApproved+' other approved hosts have no recorded matching service and are excluded. This does not establish that the service is absent.</p>'
+      :'';
+    const description='<p>Goal: '+esc(goal)+'</p><p>Selected by: '+esc(fresh.selection)+' · '+fresh.hostCount+' approved '+hostLabel+'. '+detail+'</p>'+coverage+'<details open><summary>Targets and saved evidence</summary><pre>'+esc(rows)+'</pre></details>';
+    if(!await confirmScopedAction('Start '+operation+' on '+fresh.hostCount+' '+hostLabel+'?',description,'Start '+operation))return;
     const run=await post('/api/autonomy/start-selected-goal',{goal,targetSet:fresh.targetSet,model,authorizedScope:scope,authorized:true});
     $('#briefingQuestion').value='';autonomyCurrent=run.id;briefingSelectedRunId=run.id;await loadAutonomyHistory();renderBriefing();
     $('#briefingState').textContent=operation+' started. Live steps appear above.';

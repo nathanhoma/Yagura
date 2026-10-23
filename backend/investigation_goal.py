@@ -41,6 +41,7 @@ def selected_hosts(goal, scope, discovery, document, category=None):
         if finding.get('kind') == 'service' and finding.get('state') == 'open':
             service_rows.setdefault(finding.get('hostId'), []).append(finding)
     selected, excluded, seen_ips = [], 0, set()
+    approved_ips = {row['ip'] for row in candidates if row['approved']}
     for row in sorted(candidates, key=lambda item: (item['ip'], item['name'])):
         matched = []
         if category:
@@ -62,7 +63,8 @@ def selected_hosts(goal, scope, discovery, document, category=None):
     signature = [(row['hostId'], row['ip'], row['name'], row['reasons']) for row in selected]
     token = hashlib.sha256(json.dumps(signature, separators=(',', ':')).encode()).hexdigest()
     return {'mode': 'selected-hosts', 'hosts': selected, 'hostCount': len(selected),
-            'excludedUnapproved': excluded, 'targetSet': token,
+            'excludedUnapproved': excluded, 'notMatchedApproved': len(approved_ips - seen_ips),
+            'targetSet': token,
             'selection': category[0] if category else 'all-approved',
             'operation': 'port-scan' if PORT_SCAN_INTENT.search(goal) else 'investigate',
             'goal': goal}
