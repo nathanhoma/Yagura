@@ -12,6 +12,7 @@ from backend import findings as F
 from backend.autonomy import TOOL_SELECTION_PROMPT
 from backend.briefing_orchestrator import PLAN_PROMPT
 from backend.llm import LlmService
+from backend.llm import LlmError
 from backend.server import Workspace, create_server
 
 
@@ -159,9 +160,15 @@ class HttpTests(unittest.TestCase):
         class PlannerModel:
             def complete(self, messages, max_tokens=0, model=''):
                 if messages[0]['content'] == PLAN_PROMPT:
+                    self.planning_calls = getattr(self, 'planning_calls', 0) + 1
+                    if self.planning_calls == 1:
+                        self.first_limit = max_tokens
+                        raise LlmError('invalid-response', 'The local model response was truncated.')
+                    if self.planning_calls == 2:
+                        self.retry_limit = max_tokens
                     message = json.loads(messages[1]['content'])['message']
                     action = ('discover-services' if 'all hosts' in message.lower() else
-                              'investigate' if 'check' in message.lower() else 'answer')
+                              'investigate' if 'check' in message.lower() or '調査して' in message else 'answer')
                     return {'model': 'fake', 'data': {'action': action,
                         'plan': 'Read evidence.' if action == 'answer' else 'Review selected targets.',
                         'reason': 'The saved inventory determines the next step.'}}
@@ -177,6 +184,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(answer['action'], 'answer')
         self.assertTrue(answer['reply']['supported'])
+        self.assertEqual((self.workspace.llm.first_limit, self.workspace.llm.retry_limit), (3200, 8192))
         status, investigation = self.call('/api/briefing/plan', 'POST',
             {**payload, 'message': 'Check web.lab.test for web issues'})
         self.assertEqual(status, 200)
@@ -193,6 +201,11 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200, gap)
         self.assertEqual(gap['action'], 'discover-services')
         self.assertEqual(gap['resolution']['mode'], 'port-scan-all')
+        status, explicit_scan = self.call('/api/briefing/plan', 'POST',
+            {**payload, 'message': '演習対象の全ホストに対してポートスキャンして'})
+        self.assertEqual(status, 200)
+        self.assertEqual(explicit_scan['action'], 'investigate')
+        self.assertEqual(explicit_scan['resolution']['mode'], 'port-scan-all')
         self.assertEqual(self.calls, [])
         self.assertEqual(self.call('/api/briefing/plan', 'POST',
             {**payload, 'authorizedScope': {'cidrs': ['100.96.2.0/24'], 'domains': []}})[0], 400)

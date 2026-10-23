@@ -1,11 +1,11 @@
 """Plan a chat turn before reading evidence or proposing a scoped investigation."""
 
 import json
-import re
 
 from .analysis import scoped_document
 from .briefing import _inventory, answer_question
 from .investigation_goal import PORT_SCAN_INTENT, resolve_goal_target
+from .llm import LlmError
 from .sensitive import redact, sanitize_document
 
 
@@ -27,11 +27,8 @@ PLAN_PROMPT = (
     '"plan":"one short step in plain language","reason":"one short evidence-based reason"}.'
 )
 DISCOVERY_GOAL = '演習対象の全ホストに対してポートスキャンして'
-PLAN_TOKENS = 700
-ACTION_INTENT = re.compile(
-    r'調査して|調べて|確認して|スキャンして|テストして|検証して|'
-    r'(?<![A-Za-z])(?:check|test|investigate|verify|scan|enumerate)(?![A-Za-z])',
-    re.I)
+PLAN_TOKENS = 3200
+PLAN_RETRY_TOKENS = 8192
 
 
 def plan_turn(workspace, message, model, requested_scope):
@@ -51,11 +48,17 @@ def plan_turn(workspace, message, model, requested_scope):
     summary = {'approvedHosts': inventory['approvedHosts'],
                'hostsWithOpenServices': sum(bool(host['openServices']) for host in inventory['hosts']),
                'inventoryHosts': len(inventory['hosts'])}
-    response = workspace.llm.complete(
-        [{'role': 'system', 'content': PLAN_PROMPT},
-         {'role': 'user', 'content': json.dumps({'message': message, 'coverage': summary,
-                                                'inventory': inventory}, ensure_ascii=False)}],
-        max_tokens=PLAN_TOKENS, model=model)
+    messages = [
+        {'role': 'system', 'content': PLAN_PROMPT},
+        {'role': 'user', 'content': json.dumps({'message': message, 'coverage': summary,
+                                               'inventory': inventory}, ensure_ascii=False)},
+    ]
+    try:
+        response = workspace.llm.complete(messages, max_tokens=PLAN_TOKENS, model=model)
+    except LlmError as exc:
+        if exc.code != 'invalid-response' or 'truncated' not in str(exc).lower():
+            raise
+        response = workspace.llm.complete(messages, max_tokens=PLAN_RETRY_TOKENS, model=model)
     data = response.get('data')
     if (not isinstance(data, dict) or data.get('action') not in
             ('answer', 'investigate', 'discover-services', 'clarify') or
@@ -63,7 +66,7 @@ def plan_turn(workspace, message, model, requested_scope):
                 for key in ('plan', 'reason'))):
         raise ValueError('The model did not return a valid investigation plan.')
     action = data['action']
-    if (PORT_SCAN_INTENT.search(message) or ACTION_INTENT.search(message)) and action in ('answer', 'clarify'):
+    if PORT_SCAN_INTENT.search(message) and action in ('answer', 'clarify'):
         action = 'investigate'
     result = {'action': action, 'plan': redact(data['plan'].strip()),
               'reason': redact(data['reason'].strip()), 'coverage': summary,
