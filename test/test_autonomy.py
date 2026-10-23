@@ -129,6 +129,39 @@ class AutonomyTests(unittest.TestCase):
         self.assertFalse(next(e for e in run['events'] if e['type'] == 'check')['reviewed'])
         self.assertEqual(self.calls[0][0], 'nmap')
 
+    def test_repeated_auto_discovery_completes_without_a_second_target_check(self):
+        class RepeatingModel(FakeLlm):
+            def __init__(self, host_ip):
+                super().__init__()
+                self.host_ip = host_ip
+                self.recent = []
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                user = json.loads(messages[1]['content'])
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.recent.append(user['recentCommands'])
+                    return {'model': 'fake', 'data': {'toolId': 'nmap', 'reason': 'Inspect the host.'}}
+                return {'model': 'fake', 'data': {'command': 'nmap -sn ' + self.host_ip,
+                    'reason': 'Confirm reachability.', 'expectedEvidence': 'Host state.',
+                    'reviewNotes': 'One approved IP.'}}
+
+        model = RepeatingModel(self.host['ip'])
+        self.ws.llm = model
+        def runner(program, args, timeout):
+            self.calls.append((program, args, timeout))
+            return {'ok': True, 'stdout': f'Nmap scan report for web.03.crimsonia.net ({self.host["ip"]})\nHost is up.\nNmap done: 1 IP address (1 host up) scanned', 'stderr': ''}
+        self.ws.runner = runner
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Discovery'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nmap', 'invocation': ['nmap', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(model.recent, [[], ['nmap -sn ' + self.host['ip']]])
+        self.assertEqual(len([e for e in run['events'] if e['type'] == 'duplicate-skipped']), 1)
+
     def test_invented_tool_never_runs(self):
         class InventedTool(FakeLlm):
             def complete(self, messages, max_tokens=400, model=''):
