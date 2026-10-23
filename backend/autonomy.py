@@ -10,7 +10,7 @@ import time
 
 from .analysis import build_context, scoped_document
 from .attention import review_flags
-from .auto_command import prepare_auto_command, validate_auto_command
+from .auto_command import auto_requirements, prepare_auto_command, validate_auto_command
 from . import findings as F
 from .discovery import discovery_chunks, discovery_progress, dns_review, validate_resolvers
 from .findings import now, uid
@@ -52,6 +52,7 @@ PROPOSAL_PROMPT = ("Use the selected installed tool and any supplied local help 
                    "what the result would establish. Catalogued commands run automatically only when the "
                    "server validates their exact target and bounded options; unlisted tools require human review. "
                    "If validationIssue is present, use the supplied local documentation to correct previousCommand. "
+                   "Follow autoRequirements when supplied; they describe the server's automatic execution boundary. "
                    "If revisionInstruction is present, revise previousCommand accordingly. "
                    "The command runs as one process without an "
                    "implicit shell. Return only JSON: "
@@ -395,6 +396,7 @@ class AutonomyController:
                                             lastResult=last, selectedTool=tool_id, toolHelp=documentation,
                                             recentCommands=recent_commands, validationIssue=validation_issue,
                                             previousCommand=previous_command, unlistedTool=not catalogued,
+                                            autoRequirements=auto_requirements(tool_id, host) if catalogued else '',
                                             revisionInstruction=redact(feedback)), ensure_ascii=False)}],
                                        max_tokens=MAX_RESPONSE_TOKENS, model=model)
             answer = response['data']

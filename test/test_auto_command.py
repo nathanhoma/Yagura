@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from backend.auto_command import WORDLIST, prepare_auto_command, validate_auto_command
+from backend.auto_command import WORDLIST, auto_requirements, prepare_auto_command, validate_auto_command
 from backend.server import run_command
 
 
@@ -94,6 +94,22 @@ class AutoCommandTests(unittest.TestCase):
         self.check(command)
         self.assertEqual(command.count('--noproxy'), 1)
         self.assertIn("--noproxy '*'", command)
+
+    def test_whatweb_http_name_and_redirect_are_constrained(self):
+        command = prepare_auto_command(
+            'whatweb --follow-redirect=always --aggression=1 http://web.03.crimsonia.net/', self.host)
+        self.check(command)
+        self.assertEqual(command, 'whatweb --follow-redirect=never --aggression=1 http://100.96.1.70/')
+        self.assertIn('approved IP', auto_requirements('whatweb', self.host))
+
+    def test_whatweb_rejects_proxy_with_specific_feedback(self):
+        command = prepare_auto_command('whatweb --proxy proxy.example http://100.96.1.70/', self.host)
+        with self.assertRaisesRegex(ValueError, 'unsupported WhatWeb option --proxy'):
+            validate_auto_command(command, self.host, self.scope)
+        with self.assertRaisesRegex(ValueError, 'hostname URL cannot be pinned'):
+            validate_auto_command(
+                prepare_auto_command('whatweb https://web.03.crimsonia.net/', self.host),
+                self.host, self.scope)
 
     def test_tool_process_gets_no_model_key_or_proxy_configuration(self):
         completed = subprocess.CompletedProcess(['nmap', '--version'], 0, stdout='Nmap', stderr='')

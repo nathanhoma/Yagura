@@ -19,13 +19,38 @@ SAFE_SCRIPTS = {'ssl-cert', 'smb-os-discovery', 'smb-protocols',
 CATALOG_IDS = {item['id'] for item in TOOLS}
 
 
+def auto_requirements(tool_id, host):
+    if tool_id == 'whatweb':
+        return (f"Use one HTTP URL on the approved IP {host['ip']}; include "
+                "--follow-redirect=never. Do not use proxy, authentication, plugin paths, "
+                "file output, or a hostname URL. HTTPS to a literal IP can fail certificate verification; "
+                "choose another tool if only HTTPS is useful.")
+    return ''
+
+
 def prepare_auto_command(command, host):
-    """Add required curl containment options without changing its requested check."""
+    """Add containment options for supported web checks before validation."""
     try:
         parts = shlex.split(command)
     except ValueError:
         return command
-    if not parts or parts[0] != 'curl':
+    if not parts:
+        return command
+    if parts[0] == 'whatweb':
+        args = [item for item in parts[1:] if not item.startswith('--follow-redirect=')]
+        args.insert(0, '--follow-redirect=never')
+        urls = [item for item in args if item.startswith(('http://', 'https://'))]
+        if len(urls) == 1:
+            try:
+                parsed = urlsplit(urls[0])
+                if (parsed.scheme == 'http' and parsed.hostname == host.get('name', '').lower() and
+                        not parsed.username and not parsed.password):
+                    port_suffix = f':{parsed.port}' if parsed.port else ''
+                    args[args.index(urls[0])] = urlunsplit(parsed._replace(netloc=host['ip'] + port_suffix))
+            except ValueError:
+                pass
+        return shlex.join(['whatweb', *args])
+    if parts[0] != 'curl':
         return command
     args = []
     i = 1
@@ -195,11 +220,20 @@ def _curl(args, host):
 
 
 def _whatweb(args, host):
-    allowed = {'--follow-redirect=never', '--aggression=1', '--no-errors'}
+    allowed = {'--follow-redirect=never', '--aggression=1', '--no-errors',
+               '--no-cookies', '--max-redirects=0', '--color=never', '--colour=never'}
     urls = [item for item in args if item.startswith(('http://', 'https://'))]
-    if len(urls) != 1 or '--follow-redirect=never' not in args or any(item not in allowed and item != urls[0] for item in args):
-        _fail('use one approved-IP URL with --follow-redirect=never and no proxy or output flags.')
-    _url(urls[0], host, literal=True)
+    if len(urls) != 1:
+        _fail('WhatWeb needs exactly one HTTP or HTTPS URL for the approved IP.')
+    if '--follow-redirect=never' not in args:
+        _fail('WhatWeb must use --follow-redirect=never because redirects may leave the approved scope.')
+    unsupported = next((item for item in args if item not in allowed and item != urls[0]), None)
+    if unsupported:
+        _fail('remove unsupported WhatWeb option ' + unsupported[:40] + '.' if unsupported.startswith('-')
+              else 'remove an unexpected WhatWeb argument.')
+    parsed, _ = _url(urls[0], host)
+    if parsed.hostname != host['ip']:
+        _fail('WhatWeb URL must use the approved IP; a hostname URL cannot be pinned to it.')
 
 
 def _sslscan(args, host):

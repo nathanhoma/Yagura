@@ -102,6 +102,39 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(model.response_limits, [1200, 3200])
         self.assertEqual(run['events'][0]['type'], 'model-retry')
 
+    def test_whatweb_hostname_proposal_is_constrained_and_runs_automatically(self):
+        class WhatWebModel(FakeLlm):
+            def __init__(self):
+                super().__init__()
+                self.selections = 0
+
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                user = json.loads(messages[1]['content'])
+                self.prompts.append(user)
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.selections += 1
+                    return {'model': 'fake', 'data': {'toolId': 'whatweb' if self.selections == 1 else None,
+                            'reason': 'Check the web technology on the approved host.'}}
+                return {'model': 'fake', 'data': {
+                    'command': 'whatweb --follow-redirect=always http://web.03.crimsonia.net/',
+                    'reason': 'Observe web technologies.', 'expectedEvidence': 'Web fingerprint.',
+                    'reviewNotes': 'One approved web host.'}}
+
+        model = WhatWebModel()
+        self.ws.llm = model
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'whatweb', 'purpose': 'Web fingerprint'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'whatweb',
+                 'invocation': ['whatweb', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(self.calls[0][0], 'whatweb')
+        self.assertEqual(self.calls[0][1], ['--follow-redirect=never', 'http://100.96.1.70/'])
+        self.assertIn('approved IP', model.prompts[1]['autoRequirements'])
+
     def test_exact_catalogued_nmap_discovery_runs_without_review(self):
         class DiscoveryModel(FakeLlm):
             def __init__(self):
