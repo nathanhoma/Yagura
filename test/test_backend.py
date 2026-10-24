@@ -4,8 +4,8 @@ import unittest
 
 from backend import findings as F
 from backend.analysis import analyze, build_context, validate_result
-from backend.autonomy import SAFE_KINDS
 from backend.llm import LlmService, LlmError, private_url
+from backend.llm_metrics import LlmMetrics
 from backend.server import Workspace, valid_cidr
 from backend.workflow import workflow
 
@@ -28,6 +28,44 @@ class FakeLlm:
 
 
 class BackendTests(unittest.TestCase):
+    def test_imported_ptr_does_not_replace_approved_hostname(self):
+        scope = {'cidrs': ['10.3.20.0/23'], 'domains': ['03.crimsonia.net'], 'matchMode': 'and'}
+        doc = F.empty()
+        F.merge_parsed(doc, F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for files.caf.03.crimsonia.net (10.3.20.4)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'}))
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        F.merge_parsed(doc, F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for fs.caf.03.crimsonia.net (10.3.20.4)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'}))
+        self.assertEqual(host['name'], 'files.caf.03.crimsonia.net')
+        from backend.scope import approved_host
+        self.assertTrue(approved_host(host, scope))
+
+    def test_llm_metrics_keep_per_run_totals_beyond_recent_call_log(self):
+        with tempfile.TemporaryDirectory() as folder:
+            metrics = LlmMetrics(Path(folder) / 'llm-metrics.json')
+            metrics.path.write_text('[]')  # Existing installations stored a list.
+            with metrics.for_run('run-1', 'tool selection'):
+                for _ in range(101):
+                    metrics.record({'inputChars': 120, 'promptTokens': 40,
+                                    'completionTokens': 10})
+            with metrics.for_run('run-1', 'result review'):
+                metrics.record({'inputChars': 200, 'promptTokens': None,
+                                'completionTokens': None})
+            metrics.record({'inputChars': 9, 'promptTokens': 2,
+                            'completionTokens': 1})
+            summary = metrics.run_summary('run-1')
+            self.assertEqual(summary['callCount'], 102)
+            self.assertEqual(summary['inputTokens'], 4040)
+            self.assertEqual(summary['outputTokens'], 1010)
+            self.assertEqual(summary['inputTokenCalls'], 101)
+            self.assertEqual(summary['maxInputChars'], 200)
+            self.assertEqual(summary['stages'], {'tool selection': 101, 'result review': 1})
+            self.assertEqual(len(metrics.history()), 100)
+            self.assertNotIn('runId', metrics.history()[0])
+
     def test_llm_metrics_capture_usage_and_truncation_without_content(self):
         llm = LlmService(model='test-model')
         rows = []
@@ -82,7 +120,6 @@ class BackendTests(unittest.TestCase):
         candidates = workflow(doc, '192.168.56.10/32')['candidates']
         self.assertTrue(any(c['catalogId'] == 'http-headers' for c in candidates))
         self.assertIn('sudo -n nmap -n -Pn -O --top-ports 100 --max-retries 1 -oX - 192.168.56.10', [c['command'] for c in candidates])
-        self.assertIn('nmap-os', SAFE_KINDS)
         self.assertTrue(all('{' not in c['command'] for c in candidates))
         self.assertEqual(workflow(doc, '192.168.56.11/32')['candidates'], [])
         result = analyze(doc, {}, FakeLlm())

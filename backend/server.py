@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs, unquote
@@ -20,18 +21,23 @@ from .llm import LlmService, private_url
 from .llm_metrics import LlmMetrics
 from .workflow import COMMAND_CATALOG, is_local_ip, is_tls_service, workflow
 from .web_contacts import website_url
-from .scope import DOMAIN_LABEL, normalize_scope, valid_cidr
+from .scope import DOMAIN_LABEL, host_allowed, normalize_scope, valid_cidr
 from .discovery import contained_range, discovery_chunks, discovery_progress, dns_review, name_discovery, approval_name
 from .inventory import parse_inventory, verify_inventory_host
+from .investigation_goal import resolve_goal_target
 from .sensitive import redact, sanitize_document
+from .credential_leads import credential_leads, reveal_credential
 from .outbound import require_target, require_web_origin
 from .autonomy import AutonomyController
 from .briefing import answer_question
+from .briefing_orchestrator import plan_turn
 from .check_proposals import CheckProposals
 from .activity import ActivityTracker
 from .attention import review_flags
 from .vulnerabilities import match_versions
 from .tool_imports import TOOLS as EXPORT_TOOLS, parse_export, parse_burp_live
+from .tool_catalog import available_tools
+from .mssql_auth import cache_path as mssql_cache_path
 from .burp_mcp import run_get as burp_mcp_get
 from .web_fingerprint import KNOWN_TECHNOLOGIES
 
@@ -58,7 +64,18 @@ def read_env(path):
 
 def run_command(program, args, timeout=15):
     try:
-        result = subprocess.run([program, *args], capture_output=True, text=True, timeout=timeout, check=False)
+        with tempfile.TemporaryDirectory(prefix='yagura-tool-') as home:
+            env = {key: os.environ[key] for key in
+                   ('PATH', 'LANG', 'LC_ALL', 'SSL_CERT_FILE', 'SSL_CERT_DIR') if key in os.environ}
+            env.update(HOME=home, XDG_CACHE_HOME=home, NO_COLOR='1',
+                       PYTHONDONTWRITEBYTECODE='1')
+            if program == 'nxc' and args[:1] == ['mssql'] and '--use-kcache' in args:
+                cache = mssql_cache_path()
+                if not cache:
+                    return dict(ok=False, stdout='', stderr='MSSQL Kerberos cache is unavailable.')
+                env['KRB5CCNAME'] = 'FILE:' + cache
+            result = subprocess.run([program, *args], capture_output=True, text=True,
+                                    timeout=timeout, check=False, stdin=subprocess.DEVNULL, env=env)
         return dict(ok=result.returncode == 0, stdout=result.stdout[:1000000], stderr=result.stderr[:3000])
     except (OSError, subprocess.TimeoutExpired) as exc:
         return dict(ok=False, stdout='', stderr=str(exc)[:3000])
@@ -431,7 +448,6 @@ class Workspace:
             raise RuntimeError(f'Cannot read findings: {exc}')
 
     def save(self, doc):
-        doc = sanitize_document(doc)
         if len(doc['findings']) > 10000 or len(doc['evidence']) > 2000:
             raise ValueError('Workspace capacity reached. Export findings before creating a new workspace.')
         self.findings_file.parent.mkdir(parents=True, exist_ok=True)
@@ -644,16 +660,57 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 if self.command == 'GET' and path == '/api/llm/health':
                     return self.send_json(200, workspace.llm.health())
                 if self.command == 'GET' and path == '/api/llm/metrics':
-                    return self.send_json(200, {'calls': workspace.llm_metrics.history()[:30]})
+                    run_id = parse_qs(url.query).get('runId', [''])[0]
+                    calls = workspace.llm_metrics.history()
+                    if run_id:
+                        calls = [row for row in calls if row.get('runId') == run_id]
+                    return self.send_json(200, {'calls': calls[:30],
+                        'summary': workspace.llm_metrics.run_summary(run_id) if run_id else None})
                 if self.command == 'GET' and path == '/api/activity':
                     return self.send_json(200, workspace.activity.snapshot())
                 if self.command == 'GET' and path == '/api/autonomy':
                     return self.send_json(200, {**workspace.autonomy.history(), 'limits': workspace.autonomy.limits()})
+                if self.command == 'GET' and path == '/api/credentials':
+                    with workspace.lock:
+                        scope = workspace.load_scope()
+                        leads = credential_leads(workspace.load(), scope, limit=500)
+                    return self.send_json(200, {'candidates': leads, 'limit': 500})
+                if self.command == 'POST' and path == '/api/credentials/reveal':
+                    body = self.body(2000)
+                    if (not isinstance(body, dict) or set(body) != {'id', 'authorizedScope'} or
+                            not isinstance(body['id'], str)):
+                        raise ValueError('Choose one credential candidate in the current scope.')
+                    with workspace.lock:
+                        if body['authorizedScope'] != workspace.load_scope():
+                            raise ValueError('Saved target scope changed. Refresh the credential list.')
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                        value = reveal_credential(workspace.load(), scope, body['id'])
+                    return self.send_json(200, value)
                 if self.command == 'POST' and path == '/api/briefing/ask':
-                    body = self.body(4000)
-                    if not isinstance(body, dict) or set(body) != {'question', 'model'}:
+                    body = self.body(8000)
+                    if (not isinstance(body, dict) or set(body) - {'question', 'model', 'history'} or
+                            not {'question', 'model'} <= set(body)):
                         raise ValueError('Supply a question and optional model.')
-                    return self.send_json(200, answer_question(workspace, body['question'], body['model']))
+                    return self.send_json(200, answer_question(workspace, body['question'], body['model'],
+                                                               history=body.get('history')))
+                if self.command == 'POST' and path == '/api/briefing/plan':
+                    body = self.body(8000)
+                    if (not isinstance(body, dict) or
+                            set(body) - {'message', 'model', 'authorizedScope', 'history'} or
+                            not {'message', 'model', 'authorizedScope'} <= set(body)):
+                        raise ValueError('Supply one message, model, and the saved scope.')
+                    return self.send_json(200, plan_turn(
+                        workspace, body['message'], body['model'], body['authorizedScope'],
+                        history=body.get('history')))
+                if self.command == 'POST' and path == '/api/briefing/investigate/resolve':
+                    body = self.body(4000)
+                    if not isinstance(body, dict) or set(body) - {'goal', 'authorizedScope', 'selectedTarget'} or not {'goal', 'authorizedScope'} <= set(body):
+                        raise ValueError('Supply one investigation goal and the current saved scope.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                        target = resolve_goal_target(body['goal'], scope, workspace.load_discovery(),
+                                                     workspace.load(), body.get('selectedTarget'))
+                    return self.send_json(200, target)
                 if self.command == 'GET' and path == '/api/check-proposals':
                     return self.send_json(200, workspace.check_proposals.list())
                 if self.command == 'POST' and path == '/api/check-proposals':
@@ -705,6 +762,60 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     with workspace.lock:
                         scope = workspace.resolve_scope(body.get('authorizedScope'))
                     return self.send_json(202, workspace.autonomy.start(body['hostId'], scope, body.get('model', '')))
+                if self.command == 'POST' and path == '/api/autonomy/start-goal':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) -
+                            {'hostId', 'goal', 'model', 'authorizedScope', 'authorized', 'selectedTarget'} or
+                            not {'hostId', 'goal', 'model', 'authorizedScope', 'authorized'} <= set(body) or
+                            body['authorized'] is not True or not isinstance(body['hostId'], str) or
+                            not isinstance(body['model'], str) or len(body['model']) > 200):
+                        raise ValueError('Confirm one approved target and investigation goal.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                        target = resolve_goal_target(body['goal'], scope, workspace.load_discovery(),
+                                                     workspace.load(), body.get('selectedTarget'))
+                        if target.get('needsSelection') or not target['approved'] or target['hostId'] != body['hostId']:
+                            raise ValueError('Goal target must be an approved, exact inventory IP/name pair.')
+                    return self.send_json(202, workspace.autonomy.start(body['hostId'], scope,
+                                                                         body['model'], body['goal']))
+                if self.command == 'POST' and path == '/api/autonomy/start-portscan-all':
+                    body = self.body(4000)
+                    required = {'goal', 'targetSet', 'authorizedScope', 'authorized'}
+                    if (not isinstance(body, dict) or not required <= set(body) or
+                            set(body) - required - {'continuationGoal', 'model'} or
+                            body['authorized'] is not True or not isinstance(body['goal'], str) or
+                            not isinstance(body['targetSet'], str) or
+                            not isinstance(body.get('continuationGoal', ''), str) or
+                            not isinstance(body.get('model', ''), str)):
+                        raise ValueError('Review the complete approved host set and confirm the port scan.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                        targets = resolve_goal_target(body['goal'], scope, workspace.load_discovery(), workspace.load())
+                        if targets.get('mode') != 'port-scan-all' or targets['targetSet'] != body['targetSet']:
+                            raise ValueError('Approved target set changed; review the host list again.')
+                        run = workspace.autonomy.start_portscan_all(
+                            [row['hostId'] for row in targets['hosts']], scope, body['goal'],
+                            body.get('model', ''), body.get('continuationGoal', ''))
+                    return self.send_json(202, run)
+                if self.command == 'POST' and path == '/api/autonomy/start-selected-goal':
+                    body = self.body(4000)
+                    if (not isinstance(body, dict) or set(body) !=
+                            {'goal', 'targetSet', 'model', 'authorizedScope', 'authorized'} or
+                            body['authorized'] is not True or not isinstance(body['goal'], str) or
+                            not isinstance(body['targetSet'], str) or
+                            not isinstance(body['model'], str) or len(body['model']) > 200):
+                        raise ValueError('Review the selected hosts and confirm the investigation.')
+                    with workspace.lock:
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                        targets = resolve_goal_target(body['goal'], scope, workspace.load_discovery(), workspace.load())
+                        if targets.get('mode') != 'selected-hosts' or targets['targetSet'] != body['targetSet']:
+                            raise ValueError('Selected hosts or service evidence changed; review the list again.')
+                        host_ids = [row['hostId'] for row in targets['hosts']]
+                        if targets['operation'] == 'port-scan':
+                            run = workspace.autonomy.start_portscan_all(host_ids, scope, body['goal'])
+                        else:
+                            run = workspace.autonomy.start_goal_plan(host_ids, scope, body['model'], body['goal'])
+                    return self.send_json(202, run)
                 if self.command == 'POST' and path == '/api/autonomy/start-group':
                     body = self.body()
                     if (not isinstance(body, dict) or set(body) - {'hostIds', 'model', 'authorizedScope', 'authorized'} or
@@ -823,7 +934,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                 if self.command == 'GET' and path in ('/api/findings', '/api/workflow', '/api/commands', '/api/attention', '/api/vulnerabilities'):
                     with workspace.lock:
                         scope = workspace.resolve_scope(parse_qs(url.query).get('cidr', [None])[0]) if path == '/api/workflow' else None
-                        data = {'/api/findings': lambda: sanitize_document(workspace.load()), '/api/workflow': lambda: workflow(sanitize_document(workspace.load()), scope), '/api/commands': lambda: {'commands': COMMAND_CATALOG + workspace.check_proposals.catalog_entries()}, '/api/attention': lambda: {'flags': review_flags(sanitize_document(workspace.load()), workspace.load_scope())}, '/api/vulnerabilities': lambda: match_versions(sanitize_document(workspace.load()), workspace.load_scope())}[path]()
+                        data = {'/api/findings': lambda: sanitize_document(workspace.load()), '/api/workflow': lambda: workflow(sanitize_document(workspace.load()), scope), '/api/commands': lambda: {'tools': available_tools(), 'commands': COMMAND_CATALOG + workspace.check_proposals.catalog_entries()}, '/api/attention': lambda: {'flags': review_flags(sanitize_document(workspace.load()), workspace.load_scope())}, '/api/vulnerabilities': lambda: match_versions(sanitize_document(workspace.load()), workspace.load_scope())}[path]()
                     return self.send_json(200, data)
                 if self.command == 'GET' and path == '/api/export':
                     with workspace.lock:
@@ -941,7 +1052,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     if (not isinstance(body, dict) or set(body) !=
                             {'content', 'teamNumber', 'suffix', 'resolvers', 'authorizedScope', 'authorized'} or
                             body['authorized'] is not True):
-                        raise ValueError('Supply the inventory, team number, hostname suffix, and internal resolvers.')
+                        raise ValueError('Supply the inventory, team number, hostname suffix, and optional resolver list.')
                     with workspace.lock:
                         scope = workspace.load_scope()
                         if normalize_scope(body['authorizedScope']) != scope:
@@ -966,7 +1077,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                                 if current and current.get('approved') and current.get('approvedName') != item['name']:
                                     item['status'] = 'host-conflict'
                                 if (current and current.get('approved') and current.get('approvedName') == item['name']
-                                        and item['status'] != 'verified'):
+                                        and item['status'] in ('dns-mismatch', 'dns-review-needed', 'host-conflict')):
                                     current['approved'] = False
                                     current['dns'] = item['dns']
                                     host = next((h for h in doc['findings'] if h['kind'] == 'host' and
@@ -980,7 +1091,7 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             data['inventoryIssues'] = parsed['issues']
                             data['inventoryIssuesScope'] = scope
                             for item in checked:
-                                if item['status'] not in ('verified', 'dns-review-needed'):
+                                if item['status'] not in ('verified', 'dns-review-needed', 'no-answer', 'inventory-only'):
                                     continue
                                 row = next((h for h in data['hosts'] if h['ip'] == item['ip'] and
                                     normalize_scope(h.get('scope')) == scope), None)
@@ -1021,31 +1132,39 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                             seen.add((item['ip'], item['name']))
                             inv = next((h for h in data.get('inventory', []) if h.get('ip') == item['ip'] and
                                 h.get('name') == item['name'] and h.get('scope') == scope and
-                                h.get('status') == 'verified'), None)
+                                h.get('status') in ('verified', 'no-answer', 'inventory-only')), None)
                             row = next((h for h in data['hosts'] if h.get('ip') == item['ip'] and
                                 h.get('inventoryName') == item['name'] and h.get('scope') == scope), None)
                             if not inv or not row or row.get('approved'):
-                                raise ValueError('Inventory host is unverified, changed, or already approved.')
-                            approval_name(row, item['name'], scope)
+                                raise ValueError('Inventory pair is ineligible, changed, or already approved.')
+                            if any(other.get('approved') and other.get('approvedName') == item['name'] and
+                                   other.get('ip') != item['ip'] and other.get('scope') == scope
+                                   for other in data['hosts']):
+                                raise ValueError('Hostname is already approved for another inventory IP.')
+                            if inv['status'] == 'verified':
+                                approval_name(row, item['name'], scope)
+                            elif not host_allowed({'ip': item['ip'], 'name': item['name']}, scope):
+                                raise ValueError('Inventory IP/name pair is outside the saved scope.')
                             selected.append((row, inv))
                         doc = workspace.load()
                         approved = []
                         for row, inv in selected:
                             when = F.now()
-                            ev = dict(id=F.uid('evidence'), tool='dns-review', command='Inventory host approval',
+                            ev = dict(id=F.uid('evidence'), tool='dns-review' if inv['status'] == 'verified' else 'inventory-approval', command='Inventory host approval',
                                 output=json.dumps({'ip': row['ip'], 'name': inv['name'],
-                                    'seedQueries': row['seedQueries'], 'review': row['dns']}),
+                                    'inventoryStatus': inv['status'], 'seedQueries': row['seedQueries'], 'review': row['dns']}),
                                 observedAt=when, importedAt=when, format='json')
                             host = next((h for h in doc['findings'] if h['kind'] == 'host' and h['ip'] == row['ip']), None)
                             if host is None:
                                 host = F.record('host', dict(ip=row['ip'], aliases=[], name=inv['name'],
                                     state=row['status'], local=False, title=row['ip'],
-                                    detail='Approved after inventory and DNS review.'), ev['id'], when)
+                                    detail='Approved exact inventory IP/name pair' + (' after DNS review.' if inv['status'] == 'verified' else ' without DNS verification.')), ev['id'], when)
                                 doc['findings'].append(host)
                             else:
                                 host['name'] = inv['name']
                                 host['evidenceIds'] = list(dict.fromkeys(host['evidenceIds'] + [ev['id']]))
-                            host['approval'] = dict(ip=row['ip'], name=inv['name'], scope=scope, approvedAt=when)
+                            host['approval'] = dict(ip=row['ip'], name=inv['name'], scope=scope, approvedAt=when,
+                                                    source='dns-verified-inventory' if inv['status'] == 'verified' else 'inventory-only')
                             doc['evidence'].append(ev)
                             row.update(approved=True, approvedName=inv['name'], approvedAt=when)
                             approved.append({'ip': row['ip'], 'name': inv['name'], 'hostId': host['id']})

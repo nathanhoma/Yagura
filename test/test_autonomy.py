@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -6,7 +7,12 @@ import unittest
 from unittest.mock import patch
 
 from backend import findings as F
-from backend.autonomy import FLAG_PROMPT, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS
+from backend.autonomy import FLAG_PROMPT, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS, TOOL_SELECTION_PROMPT
+from backend.goal_evaluation import PROMPT as GOAL_EVALUATION_PROMPT
+from backend.goal_evaluation import validate as validate_goal_evaluation
+from backend.llm import LlmError
+from backend.investigation_plan import create as create_goal_plan
+from backend.output_review import CHUNK_CHARS, chunks as output_chunks
 from backend.reviewed_check import validate as validate_reviewed_check
 from backend.server import Workspace
 
@@ -53,28 +59,400 @@ class AutonomyTests(unittest.TestCase):
         self.host['approval'] = {'ip': self.host['ip'], 'name': self.host['name'], 'scope': self.scope}
         self.ws.save(doc)
 
-    def test_each_result_reaches_next_ai_decision_and_history_hides_cookie(self):
-        run = self.ws.autonomy.start(self.host['id'], self.scope)
-        self.ws.autonomy.thread.join(3)
-        saved = self.ws.autonomy.history()['runs'][0]
-        self.assertEqual(saved['id'], run['id'])
-        self.assertEqual(saved['status'], 'completed')
-        self.assertEqual([e['type'] for e in saved['events']], ['decision', 'check', 'flag-review', 'decision', 'stop'])
-        self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.llm.response_limits, [MAX_RESPONSE_TOKENS, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOKENS])
-        self.assertEqual(self.llm.prompts[1]['lastResult']['outcome'], 'completed')
-        self.assertIn('[REDACTED]', json.dumps(self.llm.prompts[1]))
-        self.assertNotIn('very-secret', json.dumps(self.llm.prompts[1]))
-        self.assertNotIn('very-secret', self.ws.findings_file.read_text())
-        self.assertTrue(self.ws.autonomy.file.exists())
+    def test_credential_goal_prioritizes_content_source_without_calling_it_proof(self):
+        doc = self.ws.load()
+        quiet = {**self.host, 'id': 'quiet-host', 'ip': '100.96.1.71',
+                 'name': 'adcs.03.crimsonia.net'}
+        paste = {**self.host, 'id': 'paste-host', 'ip': '100.96.1.72',
+                 'name': 'pastebin.03.crimsonia.net'}
+        plan = create_goal_plan('Find credential candidates on approved hosts.', [quiet, paste], doc)
+        self.assertEqual(plan['nextHostId'], paste['id'])
+        self.assertIn('unverified', next(row for row in plan['candidates']
+                                        if row['hostId'] == paste['id'])['signals'][0])
 
-    def test_invented_candidate_never_runs(self):
-        self.ws.llm = FakeLlm(invalid=True)
-        self.ws.autonomy.start(self.host['id'], self.scope)
-        self.ws.autonomy.thread.join(3)
+    def test_goal_plan_uses_saved_services_then_replans_across_hosts(self):
+        second_doc = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for quiet.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'})
+        second = next(f for f in second_doc['findings'] if f['kind'] == 'host')
+        second['approval'] = {'ip': second['ip'], 'name': second['name'], 'scope': self.scope}
+        doc = self.ws.load()
+        F.merge_parsed(doc, second_doc)
+        saved_second = next(f for f in doc['findings'] if f.get('kind') == 'host' and f['ip'] == second['ip'])
+        saved_second['approval'] = second['approval']
+        self.ws.save(doc)
+
+        class PlanModel:
+            def __init__(self):
+                self.hosts = []
+                self.calls = 0
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                payload = json.loads(messages[1]['content'])
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                if messages[0]['content'] == GOAL_EVALUATION_PROMPT:
+                    return {'model': 'fake', 'data': {'decision': 'switch-host',
+                        'hostId': saved_second['id'], 'progress': 'uncertain',
+                        'reason': 'Saved reachability alone does not verify the goal.',
+                        'openQuestion': 'Check whether this approved host has useful services.',
+                        'findingIds': [], 'evidenceIds': []}}
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.hosts.append(payload['hostIp'])
+                    self.calls += 1
+                    return {'model': 'fake', 'data': {'toolId': 'nmap' if self.calls == 1 else None,
+                        'unlistedTool': None, 'reason': 'One reachability observation is enough.'}}
+                return {'model': 'fake', 'data': {'command': 'nmap -sn 100.96.1.70',
+                    'reason': 'Confirm the approved host.', 'expectedEvidence': 'Reachability',
+                    'reviewNotes': 'One approved destination.'}}
+
+        model = PlanModel()
+        self.ws.llm = model
+        self.ws.runner = lambda program, args, timeout: {'ok': True,
+            'stdout': 'Nmap scan report for web.03.crimsonia.net (100.96.1.70)\nHost is up.\n'
+                      'Nmap done: 1 IP address (1 host up) scanned', 'stderr': ''}
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Host discovery'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nmap',
+                 'invocation': ['nmap', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start_goal_plan([saved_second['id'], self.host['id']], self.scope,
+                goal='Investigate initial access on approved exercise hosts.')
+            self.ws.autonomy.thread.join(5)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(model.hosts[0], self.host['ip'])
+        self.assertEqual(model.hosts[1], second['ip'])
+        self.assertEqual(run['goalPlan']['reviewedHosts'], 2)
+        self.assertEqual(run['goalPlan']['status'], 'unverified')
+        self.assertEqual(len(run['goalPlan']['completedSteps']), 3)
+        self.assertEqual(run['goalPlan']['nextStep'],
+                         'Assess saved evidence against the success criterion.')
+        self.assertEqual(len([e for e in run['events'] if e['type'] == 'check']), 1)
+        self.assertTrue(next(r for r in run['goalPlan']['candidates']
+                             if r['hostId'] == self.host['id'])['evidenceIds'])
+        self.assertEqual(run['goalPlan']['latestAssessment']['hostId'], saved_second['id'])
+
+    def test_goal_evaluation_rejects_unapproved_host_and_unlinked_evidence(self):
+        context = {'currentHostId': 'host-a', 'hosts': [
+            {'hostId': 'host-a', 'status': 'pending'},
+            {'hostId': 'host-b', 'status': 'pending'}]}
+        answer = {'decision': 'switch-host', 'hostId': 'outside-scope', 'progress': 'uncertain',
+                  'reason': 'Check another host.', 'openQuestion': 'What services are present?',
+                  'findingIds': [], 'evidenceIds': []}
+        with self.assertRaisesRegex(ValueError, 'unavailable host'):
+            validate_goal_evaluation(answer, context, {'finding-1': {'evidence-1'}})
+        answer.update(hostId='host-b', progress='lead', findingIds=['finding-1'],
+                      evidenceIds=['unlinked-evidence'])
+        with self.assertRaisesRegex(ValueError, 'unlinked evidence'):
+            validate_goal_evaluation(answer, context, {'finding-1': {'evidence-1'}})
+        answer.update(hostId=['host-b'], progress='uncertain', findingIds=[], evidenceIds=[])
+        with self.assertRaisesRegex(ValueError, 'invalid host'):
+            validate_goal_evaluation(answer, context, {'finding-1': {'evidence-1'}})
+
+    def test_goal_plan_moves_to_next_host_after_one_model_failure(self):
+        other = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for quiet.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'})
+        doc = self.ws.load()
+        F.merge_parsed(doc, other)
+        second = next(f for f in doc['findings'] if f.get('kind') == 'host' and f['ip'] == '100.96.1.71')
+        second['approval'] = {'ip': second['ip'], 'name': second['name'], 'scope': self.scope}
+        self.ws.save(doc)
+
+        class FlakyModel:
+            def __init__(self):
+                self.hosts = []
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                host_id = json.loads(messages[1]['content'])['hostIp']
+                self.hosts.append(host_id)
+                if host_id == '100.96.1.70':
+                    raise LlmError('invalid-response', 'The local model response was truncated.')
+                return {'model': 'fake', 'data': {'toolId': None, 'unlistedTool': None,
+                    'reason': 'No justified check on this host.'}}
+
+        model = FlakyModel()
+        self.ws.llm = model
+        with patch('backend.autonomy.available_tools', return_value=[]):
+            self.ws.autonomy.start_goal_plan([self.host['id'], second['id']], self.scope,
+                goal='Investigate approved exercise hosts for initial access.')
+            self.ws.autonomy.thread.join(5)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(run['goalPlan']['modelFailures'], 1)
+        self.assertEqual(run['goalPlan']['reviewedHosts'], 2)
+        self.assertIn(second['ip'], model.hosts)
+
+    def test_goal_plan_continues_after_unimportable_check_output(self):
+        other = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for quiet.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'})
+        doc = self.ws.load()
+        F.merge_parsed(doc, other)
+        second = next(f for f in doc['findings'] if f.get('kind') == 'host' and f['ip'] == '100.96.1.71')
+        second['approval'] = {'ip': second['ip'], 'name': second['name'], 'scope': self.scope}
+        self.ws.save(doc)
+
+        class FailedCheckModel:
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    host_ip = json.loads(messages[1]['content'])['hostIp']
+                    return {'model': 'fake', 'data': {'toolId': 'nmap' if host_ip == '100.96.1.70' else None,
+                                                    'unlistedTool': None, 'reason': 'Check reachability.'}}
+                return {'model': 'fake', 'data': {'command': 'nmap -sn 100.96.1.70',
+                                                'reason': 'Check reachability.',
+                                                'expectedEvidence': 'Host status.',
+                                                'reviewNotes': 'One approved IP.'}}
+
+        self.ws.llm = FailedCheckModel()
+        self.ws.runner = lambda program, args, timeout: {'ok': True,
+            'stdout': 'Starting Nmap\nNote: Host seems down\nNmap done: 1 IP address (0 hosts up) scanned',
+            'stderr': ''}
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Reachability'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nmap',
+                 'invocation': ['nmap', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start_goal_plan([self.host['id'], second['id']], self.scope,
+                goal='Investigate initial access on approved exercise hosts.')
+            self.ws.autonomy.thread.join(5)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(run['goalPlan']['reviewedHosts'], 2)
+        self.assertEqual(next(row for row in run['goalPlan']['candidates']
+                              if row['hostId'] == self.host['id'])['status'], 'blocked')
+        self.assertTrue(any(e['type'] == 'replan' and 'Check failed' in e['reason'] for e in run['events']))
+
+    def test_paused_goal_plan_resumes_with_same_candidates(self):
+        class ReadyModel:
+            def assert_configuration(self):
+                pass
+        self.ws.llm = ReadyModel()
+        with patch.object(self.ws.autonomy, '_goal_worker'):
+            started = self.ws.autonomy.start_goal_plan([self.host['id']], self.scope,
+                goal='Investigate saved evidence on this approved host.')
+            self.ws.autonomy.thread.join(2)
+            self.ws.autonomy._update(started['id'], status='awaiting-discovery')
+            resumed = self.ws.autonomy.resume_discover_group(started['id'], self.scope)
+            self.ws.autonomy.thread.join(2)
+        self.assertEqual(resumed['status'], 'running')
+        self.assertEqual(resumed['goalPlan']['candidates'][0]['hostId'], self.host['id'])
+
+    def test_first_catalogued_ai_check_runs_automatically(self):
+        class ToolLlm(FakeLlm):
+            def __init__(self):
+                super().__init__()
+                self.selected = 0
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                self.prompts.append(json.loads(messages[1]['content']))
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.selected += 1
+                    return {'model': 'fake', 'data': {'toolId': 'curl' if self.selected == 1 else None,
+                        'reason': 'Inspect the approved web host.'}}
+                return {'model': 'fake', 'data': {'command': "curl -q -sS -I --noproxy '*' --max-time 5 http://100.96.1.70/",
+                    'reason': 'Inspect HTTP headers.', 'expectedEvidence': 'HTTP status and headers',
+                    'reviewNotes': 'One approved destination.'}}
+
+        self.ws.llm = ToolLlm()
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'curl', 'purpose': 'HTTP'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'curl', 'invocation': ['curl', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start(self.host['id'], self.scope,
+                                   goal='Inspect HTTP headers and report supported observations.')
+            self.ws.autonomy.thread.join(3)
+        saved = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual([e['type'] for e in saved['events']],
+                         ['goal', 'proposal', 'plan', 'auto-approval', 'check', 'flag-review', 'observe', 'stop'])
+        self.assertEqual(self.ws.llm.prompts[0]['goal'], saved['goal'])
+        self.assertTrue(any(p.get('lastResult', {}).get('evidenceIds') for p in self.ws.llm.prompts[2:]))
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn('very-secret', self.ws.findings_file.read_text())
+
+    def test_saved_web_href_reaches_next_tool_selection(self):
+        doc = self.ws.load()
+        evidence = {'id': 'evidence-web-link', 'tool': 'evidence',
+                    'command': 'curl -q http://100.96.1.70/',
+                    'output': 'x' * 500 + '<a href="/paste.php?id=1">My Password</a>' + 'x' * 500,
+                    'observedAt': F.now()}
+        doc['evidence'].append(evidence)
+        next(row for row in doc['findings'] if row['id'] == self.host['id'])['evidenceIds'].append(evidence['id'])
+        self.ws.save(doc)
+
+        class CaptureModel:
+            def __init__(self):
+                self.links = []
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                self.links = json.loads(messages[1]['content'])['context']['observedLinks']
+                return {'model': 'fake', 'data': {'toolId': None, 'unlistedTool': None,
+                                                'reason': 'No additional check.'}}
+
+        model = CaptureModel()
+        self.ws.llm = model
+        with patch('backend.autonomy.available_tools', return_value=[]):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        self.assertEqual(model.links[0]['url'], 'http://100.96.1.70/paste.php?id=1')
+
+    def test_invalid_default_model_response_uses_configured_fallback(self):
+        class FallbackModel:
+            model = 'primary'
+            def __init__(self):
+                self.models = []
+            def assert_configuration(self):
+                pass
+            def select_model(self, requested=''):
+                self.models.append(requested)
+                return requested
+            def complete(self, messages, max_tokens=400, model=''):
+                if model != 'backup':
+                    raise LlmError('invalid-response', 'The local model returned no JSON content.')
+                return {'model': 'backup', 'data': {'toolId': None, 'unlistedTool': None,
+                                                  'reason': 'No justified check.'}}
+
+        model = FallbackModel()
+        self.ws.llm = model
+        with patch.dict(os.environ, {'LLM_FALLBACK_MODEL': 'backup'}), \
+             patch('backend.autonomy.available_tools', return_value=[]):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(model.models, ['backup'])
+        self.assertTrue(any(e['type'] == 'model-fallback' for e in run['events']))
+
+    def test_truncated_tool_selection_retries_once_with_larger_output_cap(self):
+        class TruncatedSelection(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                self.response_limits.append(max_tokens)
+                if max_tokens == 3200:
+                    raise LlmError('invalid-response', 'The local model response was truncated.')
+                return {'model': 'fake', 'data': {'toolId': None, 'unlistedTool': None,
+                        'reason': 'No further check is justified.'}}
+
+        model = TruncatedSelection()
+        self.ws.llm = model
+        with patch('backend.autonomy.available_tools', return_value=[]):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(model.response_limits, [3200, 8192])
+        self.assertEqual(run['events'][0]['type'], 'model-retry')
+
+    def test_whatweb_hostname_proposal_is_constrained_and_runs_automatically(self):
+        class WhatWebModel(FakeLlm):
+            def __init__(self):
+                super().__init__()
+                self.selections = 0
+
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                user = json.loads(messages[1]['content'])
+                self.prompts.append(user)
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.selections += 1
+                    return {'model': 'fake', 'data': {'toolId': 'whatweb' if self.selections == 1 else None,
+                            'reason': 'Check the web technology on the approved host.'}}
+                return {'model': 'fake', 'data': {
+                    'command': 'whatweb --follow-redirect=always http://web.03.crimsonia.net/',
+                    'reason': 'Observe web technologies.', 'expectedEvidence': 'Web fingerprint.',
+                    'reviewNotes': 'One approved web host.'}}
+
+        model = WhatWebModel()
+        self.ws.llm = model
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'whatweb', 'purpose': 'Web fingerprint'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'whatweb',
+                 'invocation': ['whatweb', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(self.calls[0][0], 'whatweb')
+        self.assertEqual(self.calls[0][1], ['--follow-redirect=never', 'http://100.96.1.70/'])
+        self.assertIn('approved IP', model.prompts[1]['autoRequirements'])
+
+    def test_exact_catalogued_nmap_discovery_runs_without_review(self):
+        class DiscoveryModel(FakeLlm):
+            def __init__(self):
+                super().__init__()
+                self.selected = 0
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.selected += 1
+                    return {'model': 'fake', 'data': {'toolId': 'nmap' if self.selected == 1 else None,
+                        'reason': 'Confirm the approved host responds.'}}
+                return {'model': 'fake', 'data': {'command': 'nmap -sn ' + self.host_ip,
+                    'reason': 'Confirm reachability.', 'expectedEvidence': 'Host state.',
+                    'reviewNotes': 'One approved IP.'}}
+
+        model = DiscoveryModel()
+        model.host_ip = self.host['ip']
+        self.ws.llm = model
+        self.ws.runner = lambda program, args, timeout: (self.calls.append((program, args, timeout)) or
+            {'ok': True, 'stdout': f'Nmap scan report for web.03.crimsonia.net ({self.host["ip"]})\nHost is up.\nNmap done: 1 IP address (1 host up) scanned', 'stderr': ''})
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Discovery'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nmap', 'invocation': ['nmap', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual([e['type'] for e in run['events']],
+                         ['proposal', 'auto-approval', 'check', 'flag-review', 'stop'])
+        self.assertFalse(next(e for e in run['events'] if e['type'] == 'check')['reviewed'])
+        self.assertEqual(self.calls[0][0], 'nmap')
+
+    def test_repeated_auto_discovery_completes_without_a_second_target_check(self):
+        class RepeatingModel(FakeLlm):
+            def __init__(self, host_ip):
+                super().__init__()
+                self.host_ip = host_ip
+                self.recent = []
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                user = json.loads(messages[1]['content'])
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.recent.append(user['recentCommands'])
+                    return {'model': 'fake', 'data': {'toolId': 'nmap', 'reason': 'Inspect the host.'}}
+                return {'model': 'fake', 'data': {'command': 'nmap -sn ' + self.host_ip,
+                    'reason': 'Confirm reachability.', 'expectedEvidence': 'Host state.',
+                    'reviewNotes': 'One approved IP.'}}
+
+        model = RepeatingModel(self.host['ip'])
+        self.ws.llm = model
+        def runner(program, args, timeout):
+            self.calls.append((program, args, timeout))
+            return {'ok': True, 'stdout': f'Nmap scan report for web.03.crimsonia.net ({self.host["ip"]})\nHost is up.\nNmap done: 1 IP address (1 host up) scanned', 'stderr': ''}
+        self.ws.runner = runner
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Discovery'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nmap', 'invocation': ['nmap', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(model.recent, [[], ['nmap -sn ' + self.host['ip']]])
+        self.assertEqual(len([e for e in run['events'] if e['type'] == 'duplicate-skipped']), 1)
+
+    def test_invented_tool_never_runs(self):
+        class InventedTool(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                return {'model': 'fake', 'data': {'toolId': 'invented-tool', 'reason': 'Try it.'}}
+        self.ws.llm = InventedTool()
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'curl', 'purpose': 'HTTP'}]):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
         saved = self.ws.autonomy.history()['runs'][0]
         self.assertEqual(saved['status'], 'stopped')
-        self.assertIn('outside', saved['stopReason'])
+        self.assertIn('outside the installed catalog', saved['stopReason'])
         self.assertEqual(self.calls, [])
 
     def test_restarted_running_history_is_interrupted_not_resumed(self):
@@ -83,7 +461,7 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(restarted.autonomy.history()['runs'][0]['status'], 'interrupted')
         self.assertEqual(self.calls, [])
 
-    def test_ai_mode_runs_more_than_three_checks_without_count_limit(self):
+    def test_ai_mode_has_no_check_count_limit_and_no_fixed_check_runs(self):
         class RepeatedHeaders(FakeLlm):
             def complete(self, messages, max_tokens=400, model=''):
                 if messages[0]['content'] == FLAG_PROMPT:
@@ -112,8 +490,8 @@ class AutonomyTests(unittest.TestCase):
         run = ws.autonomy.history()['runs'][0]
         self.assertEqual(run['status'], 'completed')
         self.assertIsNone(run['maxChecks'])
-        self.assertEqual(len([e for e in run['events'] if e['type'] == 'check']), 4)
-        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(len([e for e in run['events'] if e['type'] == 'check']), 0)
+        self.assertEqual(len(self.calls), 0)
 
     def test_group_mode_records_no_count_limit(self):
         doc = self.ws.load()
@@ -163,57 +541,112 @@ class AutonomyTests(unittest.TestCase):
     def test_selected_group_survey_pauses_at_time_limit(self):
         run = {'id': 'timed-survey', 'mode': 'group', 'phase': 'survey',
                'hostIds': ['one', 'two'], 'surveyedHostIds': ['one'], 'events': []}
-        with patch.object(self.ws.autonomy, '_group_state', return_value=(run, {}, {}, [])), \
+        with patch.object(self.ws.autonomy, '_group_state', return_value=(run, {}, {})), \
                 patch.object(self.ws.autonomy, '_pause_discovery') as pause, \
                 patch('backend.autonomy.time.monotonic', side_effect=[0, 1801]):
             self.ws.autonomy._group_worker(run['id'], self.scope, '', threading.Event())
         pause.assert_called_once()
         self.assertEqual(pause.call_args.args[:2], (run['id'], 'awaiting-discovery'))
 
-    def test_exhausted_catalog_waits_for_review_and_revision_before_execution(self):
+    def test_invalid_catalog_command_uses_man_and_rebuilds_before_auto_execution(self):
         class ProposalLlm(FakeLlm):
+            def __init__(self):
+                super().__init__()
+                self.proposals = 0
+                self.selections = 0
             def complete(self, messages, max_tokens=400, model=''):
                 if messages[0]['content'] == FLAG_PROMPT:
                     return {'model': 'fake', 'data': {'flag': None}}
                 self.prompts.append(json.loads(messages[1]['content']))
-                if len(self.prompts) == 1:
-                    command = 'nxc smb 100.96.1.70'
-                elif len(self.prompts) == 2:
-                    command = 'smbclient -L //100.96.1.70 -N'
-                else:
-                    command = None
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.selections += 1
+                    return {'model': 'fake', 'data': {'toolId': 'nxc' if self.selections == 1 else None,
+                            'reason': 'Inspect the selected SMB service.'}}
+                self.proposals += 1
+                command = ('nxc smb 100.96.1.70 --exec-method smbexec' if self.proposals == 1
+                           else 'nxc smb 100.96.1.70')
                 return {'model': 'fake', 'data': {'command': command,
                         'reason': 'Inspect the selected host.',
                         'expectedEvidence': 'Service and share information.',
                         'reviewNotes': 'One approved host; no credential supplied.'}}
 
-        self.ws.llm = ProposalLlm()
+        model = ProposalLlm()
+        self.ws.llm = model
         self.ws.runner = lambda program, args, timeout: self.calls.append((program, args, timeout)) or {
             'ok': True, 'stdout': 'Sharename Type Comment\npublic Disk Example share', 'stderr': ''}
-        with patch('backend.autonomy.workflow', return_value={'candidates': []}):
-            run = self.ws.autonomy.start(self.host['id'], self.scope)
+        with patch('backend.autonomy.workflow', return_value={'candidates': []}), \
+             patch('backend.autonomy.available_tools', return_value=[{'id': 'nxc', 'purpose': 'SMB'}]), \
+             patch('backend.autonomy.read_help', side_effect=lambda tool, source='help': {'tool': tool, 'source': source, 'invocation': [tool, '--help'] if source == 'help' else ['man', tool], 'text': 'usage', 'truncated': False}) as docs:
+            self.ws.autonomy.start(self.host['id'], self.scope)
             self.ws.autonomy.thread.join(3)
-            pending = self.ws.autonomy.history()['runs'][0]
-            self.assertEqual(pending['status'], 'awaiting-approval')
-            self.assertEqual(self.calls, [])
-            old = pending['pendingProposal']
-            revised = self.ws.autonomy.revise(run['id'], old['id'], old['revision'],
-                                               'Use smbclient share listing instead.', self.scope)
-            new = revised['pendingProposal']
-            self.assertEqual(new['revision'], old['revision'] + 1)
-            self.assertIn('smbclient', new['command'])
-            with self.assertRaisesRegex(ValueError, 'changed'):
-                self.ws.autonomy.approve(run['id'], old['id'], old['revision'], old['command'], self.scope)
-            self.assertEqual(self.calls, [])
-            self.ws.autonomy.approve(run['id'], new['id'], new['revision'], new['command'], self.scope)
+        saved = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(saved['status'], 'completed')
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][0], 'nxc')
+        self.assertEqual(self.calls[0][1], ['smb', '100.96.1.70'])
+        self.assertEqual([e['type'] for e in saved['events']],
+                         ['proposal', 'auto-approval', 'check', 'flag-review', 'stop'])
+        self.assertEqual([call.args for call in docs.call_args_list], [('nxc',), ('nxc', 'man')])
+        self.assertIn('Automatic catalog check', model.prompts[2]['validationIssue'])
+
+    def test_repeated_unsafe_catalog_command_stops_without_execution(self):
+        class UnsafeModel(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    return {'model': 'fake', 'data': {'toolId': 'nmap', 'reason': 'Inspect the host.'}}
+                return {'model': 'fake', 'data': {'command': 'nmap --script vuln 100.96.1.70',
+                    'reason': 'Inspect the host.', 'expectedEvidence': 'Service output.',
+                    'reviewNotes': 'One target.'}}
+
+        self.ws.llm = UnsafeModel()
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Ports'}]), \
+             patch('backend.autonomy.read_help', side_effect=lambda tool, source='help':
+                   {'tool': tool, 'invocation': [tool, '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start(self.host['id'], self.scope)
             self.ws.autonomy.thread.join(3)
-            saved = self.ws.autonomy.history()['runs'][0]
-            self.assertEqual(saved['status'], 'completed')
-            self.assertEqual(len(self.calls), 1)
-            self.assertEqual(self.calls[0][0], 'smbclient')
-            self.assertEqual(self.calls[0][1], ['-L', '//100.96.1.70', '-N'])
-            self.assertEqual([e['type'] for e in saved['events']],
-                     ['proposal', 'proposal', 'approval', 'check', 'flag-review', 'stop'])
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'stopped')
+        self.assertIn('could not form a bounded catalog command', run['stopReason'])
+        self.assertEqual(self.calls, [])
+
+    def test_malformed_catalog_command_is_rebuilt_from_local_documentation(self):
+        class RepairModel(FakeLlm):
+            def __init__(self):
+                super().__init__()
+                self.selections = 0
+                self.proposals = 0
+
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                user = json.loads(messages[1]['content'])
+                self.prompts.append(user)
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    self.selections += 1
+                    return {'model': 'fake', 'data': {'toolId': 'nmap' if self.selections == 1 else None,
+                            'reason': 'Inspect the approved host.'}}
+                self.proposals += 1
+                command = ('nmap -sn 100.96.1.70\nwhoami' if self.proposals == 1
+                           else 'nmap -sn 100.96.1.70')
+                return {'model': 'fake', 'data': {'command': command,
+                        'reason': 'Check host response.', 'expectedEvidence': 'Host state.',
+                        'reviewNotes': 'One approved IP.'}}
+
+        model = RepairModel()
+        self.ws.llm = model
+        self.ws.runner = lambda program, args, timeout: self.calls.append((program, args, timeout)) or {
+            'ok': True, 'stdout': 'Nmap scan report for web.03.crimsonia.net (100.96.1.70)\nHost is up.\nNmap done: 1 IP address (1 host up) scanned',
+            'stderr': ''}
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Discovery'}]), \
+             patch('backend.autonomy.read_help', side_effect=lambda tool, source='help': {
+                 'tool': tool, 'invocation': ['nmap', '--help'] if source == 'help' else ['man', 'nmap'],
+                 'text': 'usage', 'truncated': False}) as docs:
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        self.assertEqual(self.ws.autonomy.history()['runs'][0]['status'], 'completed')
+        self.assertEqual([call.args for call in docs.call_args_list], [('nmap',), ('nmap', 'man')])
+        self.assertEqual(len(self.calls), 1)
+        self.assertTrue(model.prompts[2]['validationIssue'])
 
     def test_reviewed_command_parser_accepts_any_program_without_implicit_shell(self):
         good, program, args = validate_reviewed_check('nxc smb 100.96.1.70 --shares', '100.96.1.70')
@@ -225,43 +658,121 @@ class AutonomyTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(ValueError):
                 validate_reviewed_check(command, '100.96.1.70')
 
-    def test_group_surveys_each_host_then_selects_approved_deep_dive(self):
+    def test_ai_command_must_use_documented_tool_and_never_runs_before_review(self):
+        class MismatchLlm(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    return {'model': 'fake', 'data': {'toolId': 'nmap', 'reason': 'Inspect the host.'}}
+                return {'model': 'fake', 'data': {'command': 'curl http://100.96.1.70/',
+                    'reason': 'Inspect the host.', 'expectedEvidence': 'HTTP response.',
+                    'reviewNotes': 'One destination.'}}
+
+        self.ws.llm = MismatchLlm()
+        with patch('backend.autonomy.workflow', return_value={'candidates': []}), \
+             patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Ports'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nmap', 'invocation': ['nmap', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'stopped')
+        self.assertIn('different executable', run['stopReason'])
+        self.assertEqual(self.calls, [])
+
+    def test_unlisted_installed_tool_requires_human_review_without_running_help(self):
+        class UnlistedLlm(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    return {'model': 'fake', 'data': {'toolId': None, 'unlistedTool': 'otherutil',
+                        'reason': 'Review its output.'}}
+                return {'model': 'fake', 'data': {'command': 'otherutil 100.96.1.70',
+                    'reason': 'Inspect the host.', 'expectedEvidence': 'Service output.',
+                    'reviewNotes': 'Human must verify tool behavior.'}}
+
+        self.ws.llm = UnlistedLlm()
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Ports'}]), \
+             patch('backend.autonomy.shutil.which', return_value='/usr/bin/otherutil'), \
+             patch('backend.autonomy.read_help') as read_help:
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        pending = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(pending['status'], 'awaiting-approval')
+        self.assertFalse(pending['pendingProposal']['catalogued'])
+        self.assertIsNone(pending['pendingProposal']['helpInvocation'])
+        self.assertEqual(self.calls, [])
+        read_help.assert_not_called()
+
+    def test_group_surveys_each_host_with_reviewed_tool_then_selects_deep_dive(self):
         second = F.parse_import({'tool': 'nmap', 'output':
             'Nmap scan report for api.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
             '443/tcp open https\nNmap done: 1 IP address (1 host up) scanned'})
-        other = next(f for f in second['findings'] if f['kind'] == 'host')
-        other['approval'] = {'ip': other['ip'], 'name': other['name'], 'scope': self.scope}
         doc = self.ws.load()
         F.merge_parsed(doc, second)
-        other = next(f for f in doc['findings'] if f['kind'] == 'host' and f['ip'] == other['ip'])
+        other = next(f for f in doc['findings'] if f['kind'] == 'host' and f['ip'] == '100.96.1.71')
         other['approval'] = {'ip': other['ip'], 'name': other['name'], 'scope': self.scope}
         self.ws.save(doc)
-        def candidate(cid, hid, kind):
-            host = next(f for f in doc['findings'] if f['id'] == hid)
-            return dict(id=cid, hostId=hid, catalogId=kind, title=cid, reason='Recorded service',
-                        findingIds=[hid], evidenceIds=host['evidenceIds'], command=f'ping -c 1 {host["ip"]}')
-        rows = [candidate('baseline-1', self.host['id'], 'nmap-service'),
-                candidate('baseline-2', other['id'], 'nmap-service'),
-                candidate('deepen-1', self.host['id'], 'http-headers')]
-        self_host = self.host['id']
-        checks = []
-        def execute(cid, scope, **kwargs):
-            checks.append(cid)
-            return dict(outcome='completed', imported=True, warning='', evidenceIds=[], output='ok', stderr='')
-        with patch('backend.autonomy.workflow', return_value={'candidates': rows}), patch.object(self.ws, 'execute_candidate', side_effect=execute), patch.object(self.ws.autonomy, '_worker') as deep_dive:
-            run = self.ws.autonomy.start_group([self_host, other['id']], self.scope)
+
+        class GroupModel(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                user = json.loads(messages[1]['content'])
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    return {'model': 'fake', 'data': {'toolId': 'curl' if len(self.prompts) < 2 else None,
+                        'reason': 'Check this surveyed host.'}}
+                self.prompts.append(user)
+                return {'model': 'fake', 'data': {'command': "curl -q -sS -I --noproxy '*' --max-time 5 http://" + user['hostIp'] + '/',
+                    'reason': 'Read the recorded service.', 'expectedEvidence': 'HTTP response.',
+                    'reviewNotes': 'One approved destination.'}}
+
+        self.ws.llm = GroupModel()
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'curl', 'purpose': 'HTTP'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'curl', 'invocation': ['curl', '--help'], 'text': 'usage', 'truncated': False}), \
+             patch.object(self.ws.autonomy, '_worker') as deep_dive:
+            self.ws.autonomy.start_group([self.host['id'], other['id']], self.scope)
             self.ws.autonomy.thread.join(3)
         saved = self.ws.autonomy.history()['runs'][0]
-        self.assertEqual(saved['id'], run['id'])
         self.assertEqual(saved['phase'], 'deep-dive')
-        self.assertEqual(saved['deepDiveHostId'], self_host)
-        self.assertIn('imported evidence', saved['deepDiveReason'])
-        self.assertEqual(deep_dive.call_args.args[1], self_host)
-        self.assertEqual(checks, ['baseline-1', 'baseline-2'])
-        self.assertEqual(saved['surveyedHostIds'], [self_host, other['id']])
-        self.assertEqual(saved['flags'], [])
+        self.assertEqual(saved['surveyedHostIds'], [self.host['id'], other['id']])
+        self.assertEqual(len(self.calls), 2)
         self.assertEqual(len([e for e in saved['events'] if e['type'] == 'deep-dive-selection']), 1)
-        self.assertFalse(any(e['type'] == 'comparison' for e in saved['events']))
+        deep_dive.assert_called_once()
+
+    def test_group_automatically_discovers_each_approved_ip(self):
+        second = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for api.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'})
+        doc = self.ws.load()
+        F.merge_parsed(doc, second)
+        other = next(f for f in doc['findings'] if f['kind'] == 'host' and f['ip'] == '100.96.1.71')
+        other['approval'] = {'ip': other['ip'], 'name': other['name'], 'scope': self.scope}
+        self.ws.save(doc)
+
+        class DiscoveryModel(FakeLlm):
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == FLAG_PROMPT:
+                    return {'model': 'fake', 'data': {'flag': None}}
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    return {'model': 'fake', 'data': {'toolId': 'nmap', 'reason': 'Confirm the approved host.'}}
+                ip = json.loads(messages[1]['content'])['hostIp']
+                return {'model': 'fake', 'data': {'command': f'nmap -sn {ip}',
+                    'reason': 'Confirm reachability.', 'expectedEvidence': 'Host state.',
+                    'reviewNotes': 'One approved IP.'}}
+
+        self.ws.llm = DiscoveryModel()
+        def runner(program, args, timeout):
+            self.calls.append((program, args, timeout))
+            return {'ok': True, 'stdout': f'Nmap scan report for {args[-1]}\nHost is up.\nNmap done: 1 IP address (1 host up) scanned', 'stderr': ''}
+        self.ws.runner = runner
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Discovery'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nmap', 'invocation': ['nmap', '--help'], 'text': 'usage', 'truncated': False}), \
+             patch.object(self.ws.autonomy, '_worker') as deep_dive:
+            self.ws.autonomy.start_group([self.host['id'], other['id']], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['surveyedHostIds'], [self.host['id'], other['id']])
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len([e for e in run['events'] if e['type'] == 'auto-approval']), 2)
+        deep_dive.assert_called_once()
 
     def test_group_rejects_unapproved_host_before_any_check(self):
         other = F.parse_import({'tool': 'nmap', 'output':
@@ -332,6 +843,92 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(saved['events'][0]['type'], 'flag-review')
         self.assertEqual(saved['flags'][0]['hostId'], self.host['id'])
         self.assertEqual(saved['flags'][0]['evidenceIds'], [self.host['evidenceIds'][0]])
+
+    def test_long_output_is_reviewed_in_full_once_and_summaries_reach_next_plan(self):
+        marker = 'LDAP password=middle-secret-value\n'
+        output = 'begin\n' + 'A' * (CHUNK_CHARS + 600) + marker + 'B' * CHUNK_CHARS + '\nend'
+        parsed = F.parse_import({'tool': 'evidence', 'ip': self.host['ip'],
+                                 'title': 'Fetched page', 'output': output, 'sensitive': True})
+        doc = self.ws.load()
+        F.merge_parsed(doc, parsed)
+        self.ws.save(doc)
+        evidence_id = parsed['evidence'][0]['id']
+        class ReadAll:
+            def __init__(self):
+                self.chunks = []
+                self.selection = None
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                user = json.loads(messages[1]['content'])
+                if messages[0]['content'] == FLAG_PROMPT:
+                    self.chunks.append(user)
+                    has_lead = marker in user['evidence'][0]['output']
+                    finding = next(f for f in user['findings'] if evidence_id in f['evidenceIds'])
+                    return {'model': 'fake', 'data': {
+                        'summary': 'Possible LDAP credential lead.' if has_lead else 'Other page text.',
+                        'flag': {'reason': 'Possible LDAP credential lead; value kept in source evidence.',
+                                 'uncertainty': 'Credential has not been verified.',
+                                 'findingIds': [finding['id']], 'evidenceIds': [evidence_id]}
+                        if has_lead else None}}
+                self.selection = user
+                return {'model': 'fake', 'data': {'toolId': None, 'unlistedTool': None,
+                                                'reason': 'No further check.'}}
+        model = ReadAll()
+        self.ws.llm = model
+        self.ws.autonomy._save({'runs': [dict(id='review-run', status='running', events=[], flags=[], goal='Find a lead')]})
+        result = dict(outcome='completed', imported=True, evidenceIds=[evidence_id])
+        self.assertTrue(self.ws.autonomy._review_check_result(
+            'review-run', self.host['id'], self.scope, '', result))
+        self.assertEqual(len(model.chunks), len(list(output_chunks(output))))
+        self.assertTrue(any(marker in row['evidence'][0]['output']
+                            for row in model.chunks))
+        reviewed = [''] * len(output)
+        for row in model.chunks:
+            start, end = row['chunk']['start'], row['chunk']['end']
+            reviewed[start:end] = row['evidence'][0]['output']
+        self.assertEqual(''.join(reviewed), output)
+        saved = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(len(saved['flags']), 1)
+        self.assertEqual(saved['flags'][0]['evidenceIds'], [evidence_id])
+        self.ws.autonomy._propose('review-run', self.host['id'], self.scope, '',
+                                  {'evidenceIds': [evidence_id]})
+        self.assertIn('Possible LDAP credential lead.',
+                      [row['summary'] for row in model.selection['resultReviews']])
+
+    def test_review_failure_marks_coverage_incomplete(self):
+        output = 'A' * (CHUNK_CHARS + 100)
+        parsed = F.parse_import({'tool': 'evidence', 'ip': self.host['ip'], 'output': output})
+        doc = self.ws.load()
+        F.merge_parsed(doc, parsed)
+        self.ws.save(doc)
+        class FailingReview:
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, **kwargs):
+                part = json.loads(messages[1]['content'])
+                if part['chunk']['number'] == 2:
+                    raise LlmError('timeout', 'Model timed out.')
+                return {'model': 'fake', 'data': {'summary': 'Reviewed text.', 'flag': None}}
+        self.ws.llm = FailingReview()
+        self.ws.autonomy._save({'runs': [dict(id='review-run', status='running', events=[], flags=[])]})
+        result = dict(outcome='completed', imported=True, evidenceIds=[parsed['evidence'][0]['id']])
+        self.assertFalse(self.ws.autonomy._review_check_result(
+            'review-run', self.host['id'], self.scope, '', result))
+        events = self.ws.autonomy.history()['runs'][0]['events']
+        self.assertIn('flag-review-error', [event['type'] for event in events])
+        self.assertFalse(result['reviewComplete'])
+
+    def test_truncated_capture_is_not_misreported_as_fully_reviewed(self):
+        self.ws.autonomy._save({'runs': [dict(id='review-run', status='running', events=[], flags=[])]})
+        self.ws.runner = lambda *_args: {'ok': True, 'stdout': 'X' * 100001, 'stderr': ''}
+        result = self.ws.autonomy._run_reviewed('review-run', self.host['id'], self.scope,
+            'curl http://100.96.1.70/', 5)
+        self.assertTrue(result['outputTruncated'])
+        self.assertFalse(self.ws.autonomy._review_check_result(
+            'review-run', self.host['id'], self.scope, '', result))
+        self.assertFalse(result['reviewComplete'])
+        self.assertIn('capture limit', self.ws.autonomy.history()['runs'][0]['events'][-1]['reason'])
 
     def test_rule_lead_delta_reaches_check_review_only_for_new_evidence(self):
         class CaptureReview(FakeLlm):

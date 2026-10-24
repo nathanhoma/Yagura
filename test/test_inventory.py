@@ -33,6 +33,17 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(result['status'], 'dns-mismatch')
         self.assertEqual(result['addresses'], ['100.99.3.99'])
 
+    def test_missing_dns_and_unavailable_resolver_have_distinct_statuses(self):
+        host = {'name': 'future.dev.03.crimsonia.net', 'ip': '100.99.3.88'}
+        self.assertEqual(verify_inventory_host(host, [], SCOPE, lambda *args: None)['status'],
+                         'inventory-only')
+        empty = lambda *args: {'ok': True, 'stdout': '', 'stderr': ''}
+        self.assertEqual(verify_inventory_host(host, ['100.95.95.2'], SCOPE, empty)['status'],
+                         'no-answer')
+        failed = lambda *args: {'ok': False, 'stdout': '', 'stderr': 'timed out'}
+        self.assertEqual(verify_inventory_host(host, ['100.95.95.2'], SCOPE, failed)['status'],
+                         'dns-unavailable')
+
     def test_team_and_suffix_are_required(self):
         html = '<host><fqdn>www.dev.[ team_nr_str ].crimsonia.net</fqdn><connection-address>100.99.[ team_nr ].57</connection-address></host>'
         for team, suffix in [('3', 'dev.03.crimsonia.net'), ('03', 'other.example')]:

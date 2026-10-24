@@ -9,6 +9,7 @@ import re
 
 MASK = '[REDACTED]'
 PATTERNS = (
+    re.compile(r'(?i)(\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}:)[^\s<>"\']{4,}'),
     re.compile(r'(?i)(["\'](?:set-cookie|cookie)["\']\s*:\s*["\'])[^"\']*'),
     re.compile(r'(?im)^(\s*(?:set-cookie|cookie)\s*:\s*)[^\r\n]*'),
     re.compile(r'(?i)(["\']?(?:password|passwd|pwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)["\']?\s*[:=]\s*["\']?)[^\s,;"\']+'),

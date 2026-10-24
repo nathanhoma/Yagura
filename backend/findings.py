@@ -76,7 +76,7 @@ def parse_import(data):
     if not isinstance(data, dict):
         raise ValueError('Invalid import request.')
     tool, output = data.get('tool'), data.get('output')
-    if tool not in ('nmap', 'ip addr', 'ip neigh', 'ping', 'httpx', 'nuclei', 'evidence'):
+    if tool not in ('nmap', 'ip addr', 'ip neigh', 'ping', 'httpx', 'nuclei', 'nxc-mssql', 'evidence'):
         raise ValueError('Choose a supported parser.')
     if not isinstance(output, str) or not output.strip():
         raise ValueError('Command output is required.')
@@ -112,6 +112,35 @@ def parse_import(data):
         s = record('service', {**dict(hostId=h['id'], name='', product='', version='', tunnel='', state='unknown', title=f"{port}/{fields['protocol']}", detail=''), **fields}, ev['id'], time)
         findings.append(s)
         return s
+
+    if tool == 'nxc-mssql':
+        ip = data.get('ip')
+        if not is_ip(ip):
+            raise ValueError('NetExec MSSQL output needs the selected numeric IP.')
+        metadata = []
+        linked = []
+        for line in output.splitlines():
+            line = line.strip()
+            match = re.match(r'^MSSQL\s+(\S+)\s+(\d{1,5})\s+.*?\[\*\]\s+(.+)$', line)
+            if match and match.group(1) == ip and match.group(2) == '1433':
+                metadata.append(match.group(3)[:300])
+            if re.match(r'^ENUM_LINKS\s+' + re.escape(ip) + r'\s+1433\b', line):
+                name = re.search(r'\[\*\]\s+-\s+([^\r\n]+)$', line)
+                if name:
+                    value = name.group(1).strip()
+                    if 1 <= len(value) <= 100:
+                        linked.append(value)
+        if not metadata:
+            raise ValueError('No MSSQL service metadata matched the selected host.')
+        linked = list(dict.fromkeys(linked))[:16]
+        ev['output'] = '\n'.join(metadata[:2] + [f'Linked server candidate: {name}' for name in linked])
+        h = host(ip, state='up')
+        s = service(h, port=1433, protocol='tcp', state='open', name='ms-sql-s')
+        observe(h, 'NetExec MSSQL service metadata', metadata[0], s)
+        for name in linked:
+            observe(h, 'Linked MSSQL server candidate',
+                    f'{name} is named by the source SQL Server; its address and authorization are unverified.', s)
+        return dict(schemaVersion=SCHEMA_VERSION, findings=findings, evidence=[ev], warnings=warnings)
 
     if tool == 'evidence':
         ip = data.get('ip') or ''
@@ -332,6 +361,10 @@ def merge_parsed(doc, parsed):
                     f['local'] = existing.get('local') or f.get('local')
                 if existing['reviewStatus'] != 'reviewed' and latest:
                     for key, value in f.items():
+                        # An imported PTR/Nmap name is an observation, not a new
+                        # authorization for an already approved IP/name pair.
+                        if kind == 'host' and key == 'name' and existing.get('approval'):
+                            continue
                         if key not in ('id', 'evidenceIds', 'firstSeen', 'lastSeen', 'createdAt', 'updatedAt', 'reviewStatus', 'aliases') and value not in ('', 'unknown'):
                             existing[key] = value
                 if kind == 'host':
