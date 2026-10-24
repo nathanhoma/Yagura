@@ -36,6 +36,7 @@ from .attention import review_flags
 from .vulnerabilities import match_versions
 from .tool_imports import TOOLS as EXPORT_TOOLS, parse_export, parse_burp_live
 from .tool_catalog import available_tools
+from .mssql_auth import cache_path as mssql_cache_path
 from .burp_mcp import run_get as burp_mcp_get
 from .web_fingerprint import KNOWN_TECHNOLOGIES
 
@@ -67,6 +68,11 @@ def run_command(program, args, timeout=15):
                    ('PATH', 'LANG', 'LC_ALL', 'SSL_CERT_FILE', 'SSL_CERT_DIR') if key in os.environ}
             env.update(HOME=home, XDG_CACHE_HOME=home, NO_COLOR='1',
                        PYTHONDONTWRITEBYTECODE='1')
+            if program == 'nxc' and args[:1] == ['mssql'] and '--use-kcache' in args:
+                cache = mssql_cache_path()
+                if not cache:
+                    return dict(ok=False, stdout='', stderr='MSSQL Kerberos cache is unavailable.')
+                env['KRB5CCNAME'] = 'FILE:' + cache
             result = subprocess.run([program, *args], capture_output=True, text=True,
                                     timeout=timeout, check=False, stdin=subprocess.DEVNULL, env=env)
         return dict(ok=result.returncode == 0, stdout=result.stdout[:1000000], stderr=result.stderr[:3000])

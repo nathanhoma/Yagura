@@ -463,6 +463,8 @@ class AutonomyController:
             selected = scoped_document(doc, host_id, scope)
             context = build_context(selected, scope)
             context['candidates'] = []
+            mssql_recorded = any(f.get('kind') == 'service' and f.get('state') == 'open' and
+                                 f.get('port') == 1433 for f in selected['findings'])
             saved_commands = [e.get('command') for e in selected.get('evidence', [])
                               if e.get('tool') != 'dns-review' and e.get('command') and
                               e.get('command') != e.get('tool')]
@@ -511,7 +513,8 @@ class AutonomyController:
         if catalogued:
             if tool_id not in {item['id'] for item in tools}:
                 raise ValueError('AI selected a tool outside the installed catalog.')
-            documentation = read_help(tool_id)
+            documentation = (read_help('nxc', topic='mssql') if tool_id == 'nxc' and mssql_recorded
+                             else read_help(tool_id))
         else:
             tool_id = unlisted
             if not isinstance(tool_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}', tool_id):
@@ -710,10 +713,14 @@ class AutonomyController:
         imported, evidence_ids, warning = False, [], ''
         if output.strip():
             try:
-                tool = 'nmap' if os.path.basename(program) == 'nmap' else 'ping' if os.path.basename(program) == 'ping' else 'evidence'
+                tool = ('nxc-mssql' if os.path.basename(program) == 'nxc' and args[:1] == ['mssql'] else
+                        'nmap' if os.path.basename(program) == 'nmap' else
+                        'ping' if os.path.basename(program) == 'ping' else 'evidence')
                 imported_data = dict(tool=tool, command=command, output=output, observedAt=now())
                 if tool == 'evidence':
                     imported_data.update(ip=host['ip'], title='Human-approved command output')
+                elif tool == 'nxc-mssql':
+                    imported_data['ip'] = host['ip']
                 parsed = F.parse_import(imported_data)
                 if tool != 'evidence':
                     parsed_hosts = [f for f in parsed['findings'] if f.get('kind') == 'host']

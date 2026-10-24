@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .scope import ip_allowed, name_allowed
 from .tool_catalog import TOOLS
+from .mssql_auth import cache_path
 
 
 WORDLIST = Path(__file__).with_name('recon_paths.txt').resolve()
@@ -20,6 +21,13 @@ CATALOG_IDS = {item['id'] for item in TOOLS}
 
 
 def auto_requirements(tool_id, host):
+    if tool_id == 'nxc':
+        authenticated = (f"A private Kerberos cache is available: use nxc mssql {host['ip']} "
+                         "--use-kcache -M enum_links to read linked-server names."
+                         if cache_path() else "No private Kerberos cache is configured.")
+        return (f"For MSSQL service metadata use nxc mssql {host['ip']} without credentials or modules. "
+                f"{authenticated} Never put passwords or hashes in the command; no other MSSQL "
+                "modules or SQL queries run automatically.")
     if tool_id == 'whatweb':
         return (f"Use one HTTP URL on the approved IP {host['ip']}; include "
                 "--follow-redirect=never. Do not use proxy, authentication, plugin paths, "
@@ -303,8 +311,14 @@ def _smbclient(args, host):
 
 
 def _nxc(args, host):
+    if args == ['mssql', host['ip']]:
+        return
+    if args == ['mssql', host['ip'], '--use-kcache', '-M', 'enum_links']:
+        if not cache_path():
+            _fail('configure an owner-only MSSQL_KRB5CCNAME ticket before linked-server enumeration.')
+        return
     if args[:2] != ['smb', host['ip']] or any(item not in ('--shares', '--disks') for item in args[2:]):
-        _fail('use nxc smb approved-IP with only optional --shares or --disks.')
+        _fail('use nxc mssql approved-IP for service metadata, or nxc smb approved-IP with only optional --shares or --disks.')
 
 
 def _snmpwalk(args, host):

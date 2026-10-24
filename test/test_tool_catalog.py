@@ -27,6 +27,16 @@ class ToolCatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'not installed'):
                 read_help('nmap')
 
+    def test_nxc_mssql_help_is_read_without_running_a_target_command(self):
+        completed = subprocess.CompletedProcess(['nxc', 'mssql', '--help'], 0, stdout='MSSQL options', stderr='')
+        with patch('backend.tool_catalog.shutil.which', return_value='/usr/bin/nxc'), \
+             patch('backend.tool_catalog.subprocess.run', return_value=completed) as run:
+            result = read_help('nxc', topic='mssql')
+        self.assertEqual(result['invocation'], ['nxc', 'mssql', '--help'])
+        self.assertEqual(run.call_args.args[0], ['/usr/bin/nxc', 'mssql', '--help'])
+        with self.assertRaisesRegex(ValueError, 'topic'):
+            read_help('nmap', topic='mssql')
+
     def test_reads_local_man_page_without_pager_or_shell(self):
         completed = subprocess.CompletedProcess(['man', '-P', 'cat', 'nmap'], 0,
                                                 stdout='NMAP(1)\n', stderr='')

@@ -6,7 +6,7 @@ import re
 WEB = re.compile(r'web|ウェブ|http|site|サイト', re.I)
 ACCESS = re.compile(r'initial access|イニシャルアクセス|侵入|foothold', re.I)
 WEB_PORTS = {80, 443, 8000, 8080, 8443, 8888}
-ACCESS_PORTS = {21, 22, 80, 443, 445, 3389, 8000, 8080, 8443}
+ACCESS_PORTS = {21, 22, 80, 443, 445, 1433, 3389, 8000, 8080, 8443}
 
 
 def success_criteria(goal):

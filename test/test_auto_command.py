@@ -31,6 +31,7 @@ class AutoCommandTests(unittest.TestCase):
             shlex.join(['gobuster', 'dir', '-u', 'http://100.96.1.70/', '-w', str(WORDLIST), '-t', '1', '--timeout', '2s']),
             'smbclient -L 100.96.1.70 -N',
             'nxc smb 100.96.1.70 --shares',
+            'nxc mssql 100.96.1.70',
             'snmpwalk -v2c -c public 100.96.1.70 1.3.6.1.2.1',
             'dig @100.96.2.53 web.03.crimsonia.net A',
             'openssl s_client -connect 100.96.1.70:443 -servername web.03.crimsonia.net -brief',
@@ -56,6 +57,10 @@ class AutoCommandTests(unittest.TestCase):
             'gobuster dir -u http://100.96.1.70/ -w backend/recon_paths.txt --follow-redirect',
             'smbclient //100.96.1.70/share -N -c get secret',
             'nxc smb 100.96.1.70 -u admin -p password',
+            'nxc mssql 100.96.1.71',
+            'nxc mssql 100.96.1.70 -u admin -p password',
+            'nxc mssql 100.96.1.70 -M enum_links',
+            'nxc mssql 100.96.1.70 -x whoami',
             'snmpwalk -v2c -c private 100.96.1.70',
             'dig @8.8.8.8 web.03.crimsonia.net A',
             'openssl s_client -connect 100.96.1.71:443 -servername web.03.crimsonia.net',
@@ -110,6 +115,11 @@ class AutoCommandTests(unittest.TestCase):
             validate_auto_command(
                 prepare_auto_command('whatweb https://web.03.crimsonia.net/', self.host),
                 self.host, self.scope)
+
+    def test_nxc_mssql_requirements_limit_automatic_steps(self):
+        requirement = auto_requirements('nxc', self.host)
+        self.assertIn('nxc mssql 100.96.1.70', requirement)
+        self.assertIn('no other MSSQL modules or SQL queries run automatically', requirement)
 
     def test_tool_process_gets_no_model_key_or_proxy_configuration(self):
         completed = subprocess.CompletedProcess(['nmap', '--version'], 0, stdout='Nmap', stderr='')

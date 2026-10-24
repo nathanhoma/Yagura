@@ -17,7 +17,7 @@ TOOLS = (
     dict(id='dnsrecon', purpose='DNS record enumeration', help=['--help']),
     dict(id='gobuster', purpose='Bounded web path discovery', help=['--help']),
     dict(id='smbclient', purpose='SMB service and share observations', help=['--help']),
-    dict(id='nxc', purpose='SMB host metadata', help=['--help']),
+    dict(id='nxc', purpose='SMB host and MSSQL service metadata', help=['--help']),
     dict(id='snmpwalk', purpose='SNMP metadata queries', help=['--help']),
     dict(id='dig', purpose='DNS record queries', help=['-h']),
     dict(id='openssl', purpose='TLS certificate inspection', help=['help']),
@@ -31,19 +31,22 @@ def available_tools():
             if shutil.which(item['id'])]
 
 
-def read_help(tool_id, source='help'):
+def read_help(tool_id, source='help', topic=None):
     item = next((item for item in TOOLS if item['id'] == tool_id), None)
     if item is None:
         raise ValueError('Tool is not in the local tool catalog.')
+    if source not in ('help', 'man'):
+        raise ValueError('Choose local help or man documentation.')
+    if topic not in (None, 'mssql') or topic and (tool_id != 'nxc' or source != 'help'):
+        raise ValueError('Choose a supported local tool help topic.')
     executable = shutil.which(tool_id)
     if not executable:
         raise ValueError('Selected tool is not installed.')
-    if source not in ('help', 'man'):
-        raise ValueError('Choose local help or man documentation.')
     man = shutil.which('man') if source == 'man' else None
     if source == 'man' and not man:
         raise ValueError('Local man command is not installed.')
-    invocation = [executable, *item['help']] if source == 'help' else [man, '-P', 'cat', tool_id]
+    help_args = [topic, '--help'] if topic else item['help']
+    invocation = [executable, *help_args] if source == 'help' else [man, '-P', 'cat', tool_id]
     try:
         with tempfile.TemporaryDirectory(prefix='yagura-help-') as home:
             env = {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL') if key in os.environ}
@@ -60,5 +63,5 @@ def read_help(tool_id, source='help'):
     if not content:
         raise ValueError('Selected tool returned no local documentation.')
     return dict(tool=tool_id, source=source,
-                invocation=[tool_id, *item['help']] if source == 'help' else ['man', tool_id], text=content,
+                invocation=[tool_id, *help_args] if source == 'help' else ['man', tool_id], text=content,
                 truncated=len(result.stdout) + len(result.stderr) > MAX_HELP_CHARS)
