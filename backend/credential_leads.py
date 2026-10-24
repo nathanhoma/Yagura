@@ -11,7 +11,27 @@ EMAIL_PAIR = re.compile(
     r'(?<![\w@])([A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,}))\s*:\s*([^\s<>"\']{4,})',
     re.I,
 )
+NAMED_SECRET = re.compile(
+    r'(?i)(?<![\w])(?:["\']?)(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|pwd)(?:["\']?)\s*[:=]\s*["\']?([^\s,;<>"\']{6,})'
+)
+BEARER = re.compile(r'(?i)\bAuthorization\s*:\s*Bearer\s+([^\s<>"\']{8,})')
 MAX_LEADS = 20
+
+
+def _matches(output):
+    rows = []
+    for match in EMAIL_PAIR.finditer(output):
+        rows.append((match.start(), 'email:secret', match.group(1), match.group(2).lower(), match.group(3)))
+    for match in NAMED_SECRET.finditer(output):
+        rows.append((match.start(), 'named-secret', match.group(1).lower(), '', match.group(2)))
+    for match in BEARER.finditer(output):
+        rows.append((match.start(), 'bearer-token', 'Bearer token', '', match.group(1)))
+    return sorted(rows)
+
+
+def _lead_id(evidence_id, offset, kind):
+    return 'cred-' + hashlib.sha256(
+        (evidence_id + '\0' + str(offset) + '\0' + kind).encode()).hexdigest()[:24]
 
 
 def credential_leads(document, scope, host_ids=None, limit=MAX_LEADS):
@@ -40,23 +60,21 @@ def credential_leads(document, scope, host_ids=None, limit=MAX_LEADS):
         if not linked:
             continue
         finding_id, source_id = linked
-        for match in EMAIL_PAIR.finditer(str(evidence.get('output') or '')):
-            principal, domain, secret = match.groups()
-            if secret.startswith(('/', ':')) or secret.lower() in ('[redacted]', 'redacted', 'unknown'):
+        for offset, kind, principal, domain, secret in _matches(str(evidence.get('output') or '')):
+            if secret.startswith(('/', ':')) or secret.lower() in ('[redacted]', 'redacted', 'unknown', 'example', 'changeme'):
                 continue
-            key = (source_id, evidence['id'], principal.lower())
+            key = (source_id, evidence['id'], kind, principal.lower(), secret)
             if key in seen:
                 continue
             seen.add(key)
-            lead_id = 'cred-' + hashlib.sha256(
-                (evidence['id'] + '\0' + principal.lower()).encode()).hexdigest()[:24]
+            lead_id = _lead_id(evidence['id'], offset, kind)
             related = [dict(hostId=host['id'], name=host.get('name') or host['ip'])
-                       for host in hosts.values() if host['id'] != source_id and
+                       for host in hosts.values() if domain and host['id'] != source_id and
                        (host.get('name') or '').lower().endswith('.' + domain.lower())]
             leads.append(dict(id=lead_id, sourceHostId=source_id,
                               sourceHostName=hosts[source_id].get('name') or hosts[source_id]['ip'],
                               sourceFindingId=finding_id,
-                              evidenceId=evidence['id'], principal=principal,
+                              evidenceId=evidence['id'], kind=kind, principal=principal,
                               accountDomain=domain.lower(), relatedApprovedHosts=related[:8],
                               sourceCommand=redact(str(evidence.get('command') or ''))[:300],
                               observedAt=evidence.get('observedAt'),
@@ -75,7 +93,7 @@ def reveal_credential(document, scope, lead_id):
     if not lead:
         raise ValueError('Credential candidate is no longer available in the approved scope.')
     evidence = next(row for row in document['evidence'] if row['id'] == lead['evidenceId'])
-    for match in EMAIL_PAIR.finditer(str(evidence.get('output') or '')):
-        if match.group(1).lower() == lead['principal'].lower():
-            return {'id': lead_id, 'value': match.group(3), 'principal': lead['principal']}
+    for offset, kind, principal, _, secret in _matches(str(evidence.get('output') or '')):
+        if _lead_id(evidence['id'], offset, kind) == lead_id:
+            return {'id': lead_id, 'value': secret, 'principal': principal}
     raise ValueError('Credential candidate changed; refresh the list.')

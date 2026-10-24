@@ -5,7 +5,7 @@ import unittest
 
 from backend import findings as F
 from backend.briefing import answer_question
-from backend.credential_leads import credential_leads
+from backend.credential_leads import credential_leads, reveal_credential
 from backend.server import Workspace
 from backend.sensitive import redact
 
@@ -78,6 +78,20 @@ class CredentialLeadTests(unittest.TestCase):
         self.assertEqual(credential_leads(self.ws.load(), self.scope), [])
         self.assertEqual(redact('Keiran.Reeves@elec.lab.test:sample-secret-123'),
                          'Keiran.Reeves@elec.lab.test:[REDACTED]')
+
+    def test_named_keys_and_bearer_tokens_are_listed_without_values(self):
+        doc = self.ws.load()
+        F.merge_parsed(doc, F.parse_import({'tool': 'evidence', 'ip': '100.96.3.20',
+            'title': 'Configuration',
+            'output': 'api_key="sample-api-key-123"\nAuthorization: Bearer sample-bearer-token-123'}))
+        self.ws.save(doc)
+        leads = credential_leads(self.ws.load(), self.scope)
+        by_kind = {row['kind']: row for row in leads}
+        self.assertIn('named-secret', by_kind)
+        self.assertIn('bearer-token', by_kind)
+        self.assertNotIn('sample-api-key-123', json.dumps(leads))
+        self.assertEqual(reveal_credential(self.ws.load(), self.scope,
+                         by_kind['named-secret']['id'])['value'], 'sample-api-key-123')
 
 
 if __name__ == '__main__':

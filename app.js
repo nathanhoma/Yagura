@@ -74,13 +74,13 @@ async function loadCredentialLeads(){
 }
 function renderCredentialLeads(){
   const query=$('#credentialSearch').value.trim().toLowerCase();
-  const shown=credentialLeads.filter(lead=>[lead.principal,lead.accountDomain,lead.sourceHostName,
+  const shown=credentialLeads.filter(lead=>[lead.principal,lead.kind,lead.accountDomain,lead.sourceHostName,
     lead.sourceCommand,...(lead.relatedApprovedHosts||[]).map(host=>host.name)].join(' ').toLowerCase().includes(query));
   $('#credentialCount').textContent=`${shown.length} shown · ${credentialLeads.length}${credentialLeads.length===500?'+':''} candidate${credentialLeads.length===1?'':'s'}`;
   const box=$('#credentialList');
   box.innerHTML=shown.length?shown.map(lead=>{
     const source=findings.find(row=>row.id===lead.sourceFindingId);
-    return `<article class="credential-row"><div><strong>${esc(lead.principal)}</strong><small class="credential-state">Unverified candidate · ${esc(lead.accountDomain)}</small><small class="credential-value" data-credential-value="${esc(lead.id)}">••••••••</small></div><div class="credential-source"><strong>${esc(lead.sourceHostName)}</strong><small>${esc(source?.title||'Saved evidence')} · ${esc(date(lead.observedAt))}</small><small>${esc(lead.sourceCommand||'')}</small><button class="ref" type="button" data-ref="${esc(lead.sourceFindingId)}">View source &amp; evidence</button>${lead.relatedApprovedHosts?.length?`<small>Related approved hosts: ${lead.relatedApprovedHosts.map(host=>esc(host.name)).join(', ')}</small>`:''}</div><div class="credential-actions"><button class="btn" type="button" data-reveal-credential="${esc(lead.id)}" aria-label="Show value for ${esc(lead.principal)}">Show value</button></div></article>`;
+    return `<article class="credential-row"><div><strong>${esc(lead.principal)}</strong><small class="credential-state">Unverified · ${esc(lead.kind)}${lead.accountDomain?' · '+esc(lead.accountDomain):''}</small><small class="credential-value" data-credential-value="${esc(lead.id)}">••••••••</small></div><div class="credential-source"><strong>${esc(lead.sourceHostName)}</strong><small>${esc(source?.title||'Saved evidence')} · ${esc(date(lead.observedAt))}</small><small>${esc(lead.sourceCommand||'')}</small><button class="ref" type="button" data-ref="${esc(lead.sourceFindingId)}">View source &amp; evidence</button>${lead.relatedApprovedHosts?.length?`<small>Related approved hosts: ${lead.relatedApprovedHosts.map(host=>esc(host.name)).join(', ')}</small>`:''}</div><div class="credential-actions"><button class="btn" type="button" data-reveal-credential="${esc(lead.id)}" aria-label="Show value for ${esc(lead.principal)}">Show value</button></div></article>`;
   }).join(''):'<div class="empty">No credential-shaped candidates in the current approved scope.</div>';
   wireRefs(box);
   box.querySelectorAll('[data-reveal-credential]').forEach(button=>button.onclick=async()=>{
