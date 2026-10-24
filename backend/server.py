@@ -447,7 +447,6 @@ class Workspace:
             raise RuntimeError(f'Cannot read findings: {exc}')
 
     def save(self, doc):
-        doc = sanitize_document(doc)
         if len(doc['findings']) > 10000 or len(doc['evidence']) > 2000:
             raise ValueError('Workspace capacity reached. Export findings before creating a new workspace.')
         self.findings_file.parent.mkdir(parents=True, exist_ok=True)

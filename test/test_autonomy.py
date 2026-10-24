@@ -12,7 +12,6 @@ from backend.goal_evaluation import validate as validate_goal_evaluation
 from backend.llm import LlmError
 from backend.output_review import CHUNK_CHARS, chunks as output_chunks
 from backend.reviewed_check import validate as validate_reviewed_check
-from backend.sensitive import redact
 from backend.server import Workspace
 
 
@@ -217,8 +216,7 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(self.ws.llm.prompts[0]['goal'], saved['goal'])
         self.assertTrue(any(p.get('lastResult', {}).get('evidenceIds') for p in self.ws.llm.prompts[2:]))
         self.assertEqual(len(self.calls), 1)
-        self.assertIn('[REDACTED]', json.dumps(self.ws.load()))
-        self.assertNotIn('very-secret', self.ws.findings_file.read_text())
+        self.assertIn('very-secret', self.ws.findings_file.read_text())
 
     def test_truncated_tool_selection_retries_once_with_larger_output_cap(self):
         class TruncatedSelection(FakeLlm):
@@ -743,7 +741,7 @@ class AutonomyTests(unittest.TestCase):
         marker = 'LDAP password=middle-secret-value\n'
         output = 'begin\n' + 'A' * (CHUNK_CHARS + 600) + marker + 'B' * CHUNK_CHARS + '\nend'
         parsed = F.parse_import({'tool': 'evidence', 'ip': self.host['ip'],
-                                 'title': 'Fetched page', 'output': output})
+                                 'title': 'Fetched page', 'output': output, 'sensitive': True})
         doc = self.ws.load()
         F.merge_parsed(doc, parsed)
         self.ws.save(doc)
@@ -758,11 +756,11 @@ class AutonomyTests(unittest.TestCase):
                 user = json.loads(messages[1]['content'])
                 if messages[0]['content'] == FLAG_PROMPT:
                     self.chunks.append(user)
-                    has_lead = 'LDAP password=[REDACTED]' in user['evidence'][0]['output']
+                    has_lead = marker in user['evidence'][0]['output']
                     finding = next(f for f in user['findings'] if evidence_id in f['evidenceIds'])
                     return {'model': 'fake', 'data': {
                         'summary': 'Possible LDAP credential lead.' if has_lead else 'Other page text.',
-                        'flag': {'reason': 'Possible LDAP credential lead; value masked.',
+                        'flag': {'reason': 'Possible LDAP credential lead; value kept in source evidence.',
                                  'uncertainty': 'Credential has not been verified.',
                                  'findingIds': [finding['id']], 'evidenceIds': [evidence_id]}
                         if has_lead else None}}
@@ -775,16 +773,14 @@ class AutonomyTests(unittest.TestCase):
         result = dict(outcome='completed', imported=True, evidenceIds=[evidence_id])
         self.assertTrue(self.ws.autonomy._review_check_result(
             'review-run', self.host['id'], self.scope, '', result))
-        self.assertEqual(len(model.chunks), len(list(output_chunks(redact(output)))))
-        self.assertTrue(any('LDAP password=[REDACTED]' in row['evidence'][0]['output']
+        self.assertEqual(len(model.chunks), len(list(output_chunks(output))))
+        self.assertTrue(any(marker in row['evidence'][0]['output']
                             for row in model.chunks))
-        self.assertFalse(any('middle-secret-value' in row['evidence'][0]['output']
-                             for row in model.chunks))
-        reviewed = [''] * len(redact(output))
+        reviewed = [''] * len(output)
         for row in model.chunks:
             start, end = row['chunk']['start'], row['chunk']['end']
             reviewed[start:end] = row['evidence'][0]['output']
-        self.assertEqual(''.join(reviewed), redact(output))
+        self.assertEqual(''.join(reviewed), output)
         saved = self.ws.autonomy.history()['runs'][0]
         self.assertEqual(len(saved['flags']), 1)
         self.assertEqual(saved['flags'][0]['evidenceIds'], [evidence_id])

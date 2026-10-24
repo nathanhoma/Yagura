@@ -1160,7 +1160,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(first[0][0], 200)
         self.assertEqual(self.call('/api/discovery/pending')[1]['runs'][0]['completed'], 1)
 
-    def test_sensitive_evidence_is_not_saved_exported_or_sent_to_analysis(self):
+    def test_sensitive_evidence_is_saved_privately_but_not_exported_or_sent_to_analysis(self):
         class CapturingModel:
             base = 'http://127.0.0.1:11434/v1'
             def configuration(self):
@@ -1174,7 +1174,8 @@ class HttpTests(unittest.TestCase):
         status, response = self.call('/api/import', 'POST', payload)
         self.assertEqual(status, 201)
         self.assertNotIn('abc123', json.dumps(response))
-        self.assertNotIn('abc123', self.workspace.findings_file.read_text())
+        self.assertIn('abc123', self.workspace.findings_file.read_text())
+        self.assertEqual(self.workspace.findings_file.stat().st_mode & 0o077, 0)
         self.assertNotIn('abc123', json.dumps(self.call('/api/export')[1]))
         self.assertEqual(self.call('/api/analysis', 'POST', {'authorizedCidr': '10.0.4.80/32'})[0], 200)
         self.assertNotIn('abc123', json.dumps(self.workspace.llm.messages))

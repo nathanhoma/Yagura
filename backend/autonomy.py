@@ -888,7 +888,7 @@ class AutonomyController:
         return self._goal_worker(run_id, scope, model, stop_event)
 
     def _review_check_result(self, run_id, host_id, scope, model, result):
-        """Review every character of newly imported, redacted evidence once."""
+        """Review every character of newly imported evidence once."""
         if result['outcome'] not in ('completed', 'denied') or not result['imported'] or not result['evidenceIds']:
             return False
         if result.get('outputTruncated'):
@@ -902,7 +902,7 @@ class AutonomyController:
             with self.workspace.lock:
                 if self.workspace.load_scope() != scope:
                     raise ValueError('Authorized scope changed.')
-                doc = sanitize_document(self.workspace.load())
+                doc = self.workspace.load()
                 host = next((f for f in doc['findings'] if f['kind'] == 'host' and f['id'] == host_id), None)
                 if host is None:
                     raise ValueError('Approved host was removed.')

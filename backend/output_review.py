@@ -1,4 +1,4 @@
-"""Cover a saved, redacted tool output once without repeating it in later plans."""
+"""Cover a saved tool output once without repeating it in later plans."""
 
 CHUNK_CHARS = 10000
 OVERLAP_CHARS = 250
