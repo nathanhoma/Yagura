@@ -5,6 +5,8 @@ import re
 
 WEB = re.compile(r'web|ウェブ|http|site|サイト', re.I)
 ACCESS = re.compile(r'initial access|イニシャルアクセス|侵入|foothold', re.I)
+CREDENTIAL = re.compile(r'credential|認証情報|パスワード|password|secret|token', re.I)
+PUBLIC_CONTENT = re.compile(r'paste|gitlab|nextcloud|wiki|www|web|files', re.I)
 WEB_PORTS = {80, 443, 8000, 8080, 8443, 8888}
 ACCESS_PORTS = {21, 22, 80, 443, 445, 1433, 3389, 8000, 8080, 8443}
 
@@ -28,6 +30,8 @@ def refresh(plan, document, flags=()):
         signals = []
         if row['hostId'] in flagged:
             signals.append('Saved review lead')
+        if CREDENTIAL.search(plan['goal']) and PUBLIC_CONTENT.search(row['name'].split('.')[0]):
+            signals.append('Hostname suggests a content source; unverified')
         if WEB.search(plan['goal']) and ports & WEB_PORTS:
             signals.append('Observed web service')
         elif ACCESS.search(plan['goal']) and ports & ACCESS_PORTS:
@@ -36,6 +40,8 @@ def refresh(plan, document, flags=()):
             signals.append(f'{len(observed)} observed open services')
         row['signals'] = signals
         row['score'] = (20 if row['hostId'] in flagged else 0) + (10 if len(signals) > 1 else 0) + min(len(observed), 9)
+        if CREDENTIAL.search(plan['goal']) and PUBLIC_CONTENT.search(row['name'].split('.')[0]):
+            row['score'] += 3
         row['openQuestion'] = row.get('modelQuestion') or (
             'Which check would verify the goal from the saved service evidence?'
             if observed else 'Which services, if any, are reachable on this approved host?')

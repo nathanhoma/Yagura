@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -10,6 +11,7 @@ from backend.autonomy import FLAG_PROMPT, FLAG_RESPONSE_TOKENS, MAX_RESPONSE_TOK
 from backend.goal_evaluation import PROMPT as GOAL_EVALUATION_PROMPT
 from backend.goal_evaluation import validate as validate_goal_evaluation
 from backend.llm import LlmError
+from backend.investigation_plan import create as create_goal_plan
 from backend.output_review import CHUNK_CHARS, chunks as output_chunks
 from backend.reviewed_check import validate as validate_reviewed_check
 from backend.server import Workspace
@@ -56,6 +58,17 @@ class AutonomyTests(unittest.TestCase):
         self.host = next(f for f in doc['findings'] if f['kind'] == 'host')
         self.host['approval'] = {'ip': self.host['ip'], 'name': self.host['name'], 'scope': self.scope}
         self.ws.save(doc)
+
+    def test_credential_goal_prioritizes_content_source_without_calling_it_proof(self):
+        doc = self.ws.load()
+        quiet = {**self.host, 'id': 'quiet-host', 'ip': '100.96.1.71',
+                 'name': 'adcs.03.crimsonia.net'}
+        paste = {**self.host, 'id': 'paste-host', 'ip': '100.96.1.72',
+                 'name': 'pastebin.03.crimsonia.net'}
+        plan = create_goal_plan('Find credential candidates on approved hosts.', [quiet, paste], doc)
+        self.assertEqual(plan['nextHostId'], paste['id'])
+        self.assertIn('unverified', next(row for row in plan['candidates']
+                                        if row['hostId'] == paste['id'])['signals'][0])
 
     def test_goal_plan_uses_saved_services_then_replans_across_hosts(self):
         second_doc = F.parse_import({'tool': 'nmap', 'output':
@@ -171,6 +184,46 @@ class AutonomyTests(unittest.TestCase):
         self.assertEqual(run['goalPlan']['reviewedHosts'], 2)
         self.assertIn(second['ip'], model.hosts)
 
+    def test_goal_plan_continues_after_unimportable_check_output(self):
+        other = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for quiet.03.crimsonia.net (100.96.1.71)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'})
+        doc = self.ws.load()
+        F.merge_parsed(doc, other)
+        second = next(f for f in doc['findings'] if f.get('kind') == 'host' and f['ip'] == '100.96.1.71')
+        second['approval'] = {'ip': second['ip'], 'name': second['name'], 'scope': self.scope}
+        self.ws.save(doc)
+
+        class FailedCheckModel:
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                if messages[0]['content'] == TOOL_SELECTION_PROMPT:
+                    host_ip = json.loads(messages[1]['content'])['hostIp']
+                    return {'model': 'fake', 'data': {'toolId': 'nmap' if host_ip == '100.96.1.70' else None,
+                                                    'unlistedTool': None, 'reason': 'Check reachability.'}}
+                return {'model': 'fake', 'data': {'command': 'nmap -sn 100.96.1.70',
+                                                'reason': 'Check reachability.',
+                                                'expectedEvidence': 'Host status.',
+                                                'reviewNotes': 'One approved IP.'}}
+
+        self.ws.llm = FailedCheckModel()
+        self.ws.runner = lambda program, args, timeout: {'ok': True,
+            'stdout': 'Starting Nmap\nNote: Host seems down\nNmap done: 1 IP address (0 hosts up) scanned',
+            'stderr': ''}
+        with patch('backend.autonomy.available_tools', return_value=[{'id': 'nmap', 'purpose': 'Reachability'}]), \
+             patch('backend.autonomy.read_help', return_value={'tool': 'nmap',
+                 'invocation': ['nmap', '--help'], 'text': 'usage', 'truncated': False}):
+            self.ws.autonomy.start_goal_plan([self.host['id'], second['id']], self.scope,
+                goal='Investigate initial access on approved exercise hosts.')
+            self.ws.autonomy.thread.join(5)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(run['goalPlan']['reviewedHosts'], 2)
+        self.assertEqual(next(row for row in run['goalPlan']['candidates']
+                              if row['hostId'] == self.host['id'])['status'], 'blocked')
+        self.assertTrue(any(e['type'] == 'replan' and 'Check failed' in e['reason'] for e in run['events']))
+
     def test_paused_goal_plan_resumes_with_same_candidates(self):
         class ReadyModel:
             def assert_configuration(self):
@@ -217,6 +270,60 @@ class AutonomyTests(unittest.TestCase):
         self.assertTrue(any(p.get('lastResult', {}).get('evidenceIds') for p in self.ws.llm.prompts[2:]))
         self.assertEqual(len(self.calls), 1)
         self.assertIn('very-secret', self.ws.findings_file.read_text())
+
+    def test_saved_web_href_reaches_next_tool_selection(self):
+        doc = self.ws.load()
+        evidence = {'id': 'evidence-web-link', 'tool': 'evidence',
+                    'command': 'curl -q http://100.96.1.70/',
+                    'output': 'x' * 500 + '<a href="/paste.php?id=1">My Password</a>' + 'x' * 500,
+                    'observedAt': F.now()}
+        doc['evidence'].append(evidence)
+        next(row for row in doc['findings'] if row['id'] == self.host['id'])['evidenceIds'].append(evidence['id'])
+        self.ws.save(doc)
+
+        class CaptureModel:
+            def __init__(self):
+                self.links = []
+            def assert_configuration(self):
+                pass
+            def complete(self, messages, max_tokens=400, model=''):
+                self.links = json.loads(messages[1]['content'])['context']['observedLinks']
+                return {'model': 'fake', 'data': {'toolId': None, 'unlistedTool': None,
+                                                'reason': 'No additional check.'}}
+
+        model = CaptureModel()
+        self.ws.llm = model
+        with patch('backend.autonomy.available_tools', return_value=[]):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        self.assertEqual(model.links[0]['url'], 'http://100.96.1.70/paste.php?id=1')
+
+    def test_invalid_default_model_response_uses_configured_fallback(self):
+        class FallbackModel:
+            model = 'primary'
+            def __init__(self):
+                self.models = []
+            def assert_configuration(self):
+                pass
+            def select_model(self, requested=''):
+                self.models.append(requested)
+                return requested
+            def complete(self, messages, max_tokens=400, model=''):
+                if model != 'backup':
+                    raise LlmError('invalid-response', 'The local model returned no JSON content.')
+                return {'model': 'backup', 'data': {'toolId': None, 'unlistedTool': None,
+                                                  'reason': 'No justified check.'}}
+
+        model = FallbackModel()
+        self.ws.llm = model
+        with patch.dict(os.environ, {'LLM_FALLBACK_MODEL': 'backup'}), \
+             patch('backend.autonomy.available_tools', return_value=[]):
+            self.ws.autonomy.start(self.host['id'], self.scope)
+            self.ws.autonomy.thread.join(3)
+        run = self.ws.autonomy.history()['runs'][0]
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(model.models, ['backup'])
+        self.assertTrue(any(e['type'] == 'model-fallback' for e in run['events']))
 
     def test_truncated_tool_selection_retries_once_with_larger_output_cap(self):
         class TruncatedSelection(FakeLlm):

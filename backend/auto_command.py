@@ -21,6 +21,12 @@ CATALOG_IDS = {item['id'] for item in TOOLS}
 
 
 def auto_requirements(tool_id, host):
+    if tool_id == 'gobuster':
+        return (f"Use gobuster dir with the approved IP URL and the bundled wordlist {WORDLIST}. "
+                "At most two threads; no redirects, credentials, proxies, or output files.")
+    if tool_id == 'nmap':
+        return ("For port or service checks, skip ICMP discovery with -Pn. Keep the probe bounded "
+                "with a specific port list or -F, --max-retries 1, and --host-timeout 2m.")
     if tool_id == 'nxc':
         authenticated = (f"A private Kerberos cache is available: use nxc mssql {host['ip']} "
                          "--use-kcache -M enum_links to read linked-server names."
@@ -37,13 +43,35 @@ def auto_requirements(tool_id, host):
 
 
 def prepare_auto_command(command, host):
-    """Add containment options for supported web checks before validation."""
+    """Add deterministic containment options before the existing strict validation."""
     try:
         parts = shlex.split(command)
     except ValueError:
         return command
     if not parts:
         return command
+    if parts[0] == 'gobuster' and parts[1:2] == ['dir']:
+        args = parts[1:]
+        for option in ('-w', '--wordlist'):
+            if option in args:
+                position = args.index(option)
+                if position + 1 < len(args):
+                    args[position + 1] = str(WORDLIST)
+                break
+        else:
+            args.extend(['-w', str(WORDLIST)])
+        return shlex.join(['gobuster', *args])
+    if parts[0] == 'nmap' and '-sn' not in parts[1:]:
+        args = parts[1:]
+        if '-Pn' not in args:
+            args.insert(0, '-Pn')
+        if '-sV' in args and '-p' not in args and '-F' not in args:
+            args.insert(0, '-F')
+        if '--max-retries' not in args:
+            args[0:0] = ['--max-retries', '1']
+        if '--host-timeout' not in args:
+            args[0:0] = ['--host-timeout', '2m']
+        return shlex.join(['nmap', *args])
     if parts[0] == 'whatweb':
         args = [item for item in parts[1:] if not item.startswith('--follow-redirect=')]
         args.insert(0, '--follow-redirect=never')

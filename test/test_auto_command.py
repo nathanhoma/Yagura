@@ -107,6 +107,24 @@ class AutoCommandTests(unittest.TestCase):
         self.assertEqual(command, 'whatweb --follow-redirect=never --aggression=1 http://100.96.1.70/')
         self.assertIn('approved IP', auto_requirements('whatweb', self.host))
 
+    def test_service_scan_is_ping_independent_and_bounded(self):
+        command = prepare_auto_command('nmap -sV 100.96.1.70', self.host)
+        self.check(command)
+        self.assertIn('-Pn', command)
+        self.assertIn('-F', command)
+        self.assertIn('--max-retries 1', command)
+        self.assertIn('--host-timeout 2m', command)
+        self.assertEqual(prepare_auto_command('nmap -sn 100.96.1.70', self.host),
+                         'nmap -sn 100.96.1.70')
+
+    def test_gobuster_uses_only_the_bundled_wordlist(self):
+        command = prepare_auto_command('gobuster dir -u http://100.96.1.70/ -w /tmp/other-list', self.host)
+        self.check(command)
+        self.assertIn(str(WORDLIST), command)
+        self.assertNotIn('/tmp/other-list', command)
+        self.assertIn(str(WORDLIST), auto_requirements('gobuster', self.host))
+        self.reject(prepare_auto_command('gobuster dir -u http://100.96.1.71/', self.host))
+
     def test_whatweb_rejects_proxy_with_specific_feedback(self):
         command = prepare_auto_command('whatweb --proxy proxy.example http://100.96.1.70/', self.host)
         with self.assertRaisesRegex(ValueError, 'unsupported WhatWeb option --proxy'):
