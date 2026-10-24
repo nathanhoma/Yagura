@@ -28,6 +28,21 @@ class FakeLlm:
 
 
 class BackendTests(unittest.TestCase):
+    def test_imported_ptr_does_not_replace_approved_hostname(self):
+        scope = {'cidrs': ['10.3.20.0/23'], 'domains': ['03.crimsonia.net'], 'matchMode': 'and'}
+        doc = F.empty()
+        F.merge_parsed(doc, F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for files.caf.03.crimsonia.net (10.3.20.4)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'}))
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        F.merge_parsed(doc, F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for fs.caf.03.crimsonia.net (10.3.20.4)\nHost is up.\n'
+            'Nmap done: 1 IP address (1 host up) scanned'}))
+        self.assertEqual(host['name'], 'files.caf.03.crimsonia.net')
+        from backend.scope import approved_host
+        self.assertTrue(approved_host(host, scope))
+
     def test_llm_metrics_keep_per_run_totals_beyond_recent_call_log(self):
         with tempfile.TemporaryDirectory() as folder:
             metrics = LlmMetrics(Path(folder) / 'llm-metrics.json')

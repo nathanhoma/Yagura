@@ -361,6 +361,10 @@ def merge_parsed(doc, parsed):
                     f['local'] = existing.get('local') or f.get('local')
                 if existing['reviewStatus'] != 'reviewed' and latest:
                     for key, value in f.items():
+                        # An imported PTR/Nmap name is an observation, not a new
+                        # authorization for an already approved IP/name pair.
+                        if kind == 'host' and key == 'name' and existing.get('approval'):
+                            continue
                         if key not in ('id', 'evidenceIds', 'firstSeen', 'lastSeen', 'createdAt', 'updatedAt', 'reviewStatus', 'aliases') and value not in ('', 'unknown'):
                             existing[key] = value
                 if kind == 'host':
