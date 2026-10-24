@@ -6,6 +6,7 @@ import re
 from .analysis import scoped_document
 from .briefing import _inventory, answer_question, answer_general_question
 from .briefing_history import normalize_history, redact_chat
+from .credential_leads import credential_leads
 from .investigation_goal import PORT_SCAN_INTENT, resolve_goal_target, selected_hosts
 from .llm import LlmError
 from .sensitive import sanitize_document
@@ -55,7 +56,9 @@ def plan_turn(workspace, message, model, requested_scope, history=None):
     history = normalize_history(history)
     with workspace.lock:
         scope = workspace.resolve_scope(requested_scope)
-        inventory = (_inventory(scoped_document(sanitize_document(workspace.load()), None, scope))
+        raw = workspace.load()
+        inventory = (_inventory(scoped_document(sanitize_document(raw), None, scope),
+                                credential_leads(raw, scope))
                      if scope['cidrs'] else {'approvedHosts': 0, 'hosts': [], 'omittedHosts': 0})
     summary = {'approvedHosts': inventory['approvedHosts'],
                'hostsWithOpenServices': sum(bool(host['openServices']) for host in inventory['hosts']),
