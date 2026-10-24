@@ -1,14 +1,15 @@
 'use strict';
 const $=s=>document.querySelector(s);
 let findings=[],evidence=[],attentionFlags=[],vulnerabilityMatches=[],vulnerabilityCatalog=null,toolCatalog=[],map={targets:[],candidates:[]},previewPayload=null,toastTimer;
+let credentialLeads=[];
 const runResults=new Map();
 let currentSuggestions=[];
 let autoPlan=null,autoRunning=false,autoStop=false,autoCurrentCheck='',autoStartedAt=null;
 const autoKinds=['ping','nmap-ports','nmap-service','http-headers','ssh-hostkey','dns-ptr'];
 function checkOutcome(result){return result.outcome==='no-response'?'No response':result.outcome==='denied'?'Access denied':result.outcome==='completed'?'Completed':result.outcome==='failed'?'Failed':result.ok?'Completed':'Failed';}
 let emailContacts=[],emailDrafts=[],activeDraft=null,draftDirty=false,draftBusy=false;
-const views={drafts:'Prepare, review, and save email drafts. Sender infrastructure can be configured later.',scope:'Define and save the authorized target ranges and domains before working with evidence or checks.',briefing:'Review what the saved evidence supports and ask grounded follow-up questions.',review:'Import output, inspect linked evidence, and correct findings.',checks:'Review grounded checks, then run a check against an authorized local target.',autonomy:'See exactly what the AI chose, what Yagura executed, and why it stopped.',triage:'Choose a host for deeper investigation from saved, linked evidence.'};
-const viewTitles={scope:'Targets & scope',briefing:'Investigation chat',review:'Findings',checks:'Manual checks',drafts:'Email drafts',autonomy:'AI investigation',triage:'Deep-dive candidates'};
+const views={drafts:'Prepare, review, and save email drafts. Sender infrastructure can be configured later.',scope:'Define and save the authorized target ranges and domains before working with evidence or checks.',briefing:'Review what the saved evidence supports and ask grounded follow-up questions.',review:'Import output, inspect linked evidence, and correct findings.',credentials:'Credential-shaped values found in saved evidence. Candidates have not been verified by login.',checks:'Review grounded checks, then run a check against an authorized local target.',autonomy:'See exactly what the AI chose, what Yagura executed, and why it stopped.',triage:'Choose a host for deeper investigation from saved, linked evidence.'};
+const viewTitles={scope:'Targets & scope',briefing:'Investigation chat',review:'Findings',credentials:'Credential leads',checks:'Manual checks',drafts:'Email drafts',autonomy:'AI investigation',triage:'Deep-dive candidates'};
 let workflowMode='ai';
 try{workflowMode=localStorage.getItem('yagura-workflow-mode')==='manual'?'manual':'ai';}catch{}
 function applyWorkflowMode(){document.body.dataset.workflowMode=workflowMode;document.querySelectorAll('[data-workflow-switch]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.workflowSwitch===workflowMode)));$('#briefingNewRun').hidden=workflowMode==='manual';$('#workflowModeHint').textContent=(workflowMode==='ai'?'Yagura can investigate after target confirmation. Catalog checks run automatically; unlisted tools need review.':'Questions still use saved evidence. Investigation plans lead to manual checks.')+' Switching modes does not stop an active run.';}
@@ -21,7 +22,7 @@ const emptyScope=()=>({cidrs:[],domains:[],matchMode:'and'});
 let savedScope=emptyScope(),scopeLoaded=false,scopeLoadError='';
 let stopDiscovery=false;
 const scopeLabel=()=>[savedScope.cidrs.join(', '),savedScope.domains.length?`${(savedScope.matchMode||'and').toUpperCase()} domains: `+savedScope.domains.join(', '):''].filter(Boolean).join(' · ');
-function showView(){const hash=location.hash.slice(1);const view=hash==='recon'?'scope':['analysis','triage'].includes(hash)?'review':hash;const selected=views[view]?view:'briefing';if(!['autonomy','briefing'].includes(selected)&&$('#autonomyNewRun')?.open)$('#autonomyNewRun').close();if(selected!=='review'&&$('#analysisNewDialog')?.open)$('#analysisNewDialog').close();applyWorkflowMode();document.body.dataset.view=selected;$('#viewTitle').textContent=viewTitles[selected];document.title=viewTitles[selected]+' · Yagura';$('#viewIntro').textContent=views[selected];document.querySelectorAll('.nav a,.mobile-nav a').forEach(a=>{const active=a.hash==='#'+selected;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});const advanced=document.querySelector('.nav-advanced');if(advanced&&['checks','drafts'].includes(selected))advanced.open=true;updateScopeGate();window.scrollTo(0,0);if(selected==='briefing')requestAnimationFrame(boxScroll);if(['analysis','triage'].includes(hash))requestAnimationFrame(()=>setReviewTab('candidates'));}
+function showView(){const hash=location.hash.slice(1);const view=hash==='recon'?'scope':['analysis','triage'].includes(hash)?'review':hash;const selected=views[view]?view:'briefing';if(!['autonomy','briefing'].includes(selected)&&$('#autonomyNewRun')?.open)$('#autonomyNewRun').close();if(selected!=='review'&&$('#analysisNewDialog')?.open)$('#analysisNewDialog').close();applyWorkflowMode();document.body.dataset.view=selected;$('#viewTitle').textContent=viewTitles[selected];document.title=viewTitles[selected]+' · Yagura';$('#viewIntro').textContent=views[selected];document.querySelectorAll('.nav a,.mobile-nav a').forEach(a=>{const active=a.hash==='#'+selected;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});const advanced=document.querySelector('.nav-advanced');if(advanced&&['checks','drafts'].includes(selected))advanced.open=true;updateScopeGate();window.scrollTo(0,0);if(selected==='briefing')requestAnimationFrame(boxScroll);if(selected==='credentials')requestAnimationFrame(loadCredentialLeads);if(['analysis','triage'].includes(hash))requestAnimationFrame(()=>setReviewTab('candidates'));}
 function updateScopeGate(){
   const ready=scopeLoaded&&savedScope.cidrs.length>0;
   document.body.dataset.scopeState=ready?'ready':scopeLoaded?'required':scopeLoadError?'error':'loading';
@@ -63,6 +64,42 @@ function updatePrerequisites(){
 function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),3500);}
 async function api(url,options={}){const r=await fetch(url,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});const d=await r.json().catch(()=>null);if(!r.ok){const missingApi=r.status===404&&(!d||d.error==='Not found.');const error=new Error(missingApi?`Yagura API is unavailable at ${location.origin}. Run python3 main.py on the machine serving this page and open its configured app address.`:d?.error||`Request failed (HTTP ${r.status}).`);error.message+=` (${url})`;error.status=r.status;throw error;}if(!d)throw new Error('The server returned an invalid API response. Check that this page is served by Yagura.');return d;}
 const post=(url,data)=>api(url,{method:'POST',body:JSON.stringify(data)});
+async function loadCredentialLeads(){
+  const box=$('#credentialList');
+  try{
+    const result=await api('/api/credentials');
+    credentialLeads=result.candidates||[];
+    renderCredentialLeads();
+  }catch(error){box.innerHTML=`<div class="empty">${esc(error.message)}</div>`;$('#credentialCount').textContent='Unavailable';}
+}
+function renderCredentialLeads(){
+  const query=$('#credentialSearch').value.trim().toLowerCase();
+  const shown=credentialLeads.filter(lead=>[lead.principal,lead.accountDomain,lead.sourceHostName,
+    lead.sourceCommand,...(lead.relatedApprovedHosts||[]).map(host=>host.name)].join(' ').toLowerCase().includes(query));
+  $('#credentialCount').textContent=`${shown.length} shown · ${credentialLeads.length}${credentialLeads.length===500?'+':''} candidate${credentialLeads.length===1?'':'s'}`;
+  const box=$('#credentialList');
+  box.innerHTML=shown.length?shown.map(lead=>{
+    const source=findings.find(row=>row.id===lead.sourceFindingId);
+    return `<article class="credential-row"><div><strong>${esc(lead.principal)}</strong><small class="credential-state">Unverified candidate · ${esc(lead.accountDomain)}</small><small class="credential-value" data-credential-value="${esc(lead.id)}">••••••••</small></div><div class="credential-source"><strong>${esc(lead.sourceHostName)}</strong><small>${esc(source?.title||'Saved evidence')} · ${esc(date(lead.observedAt))}</small><small>${esc(lead.sourceCommand||'')}</small><button class="ref" type="button" data-ref="${esc(lead.sourceFindingId)}">View source &amp; evidence</button>${lead.relatedApprovedHosts?.length?`<small>Related approved hosts: ${lead.relatedApprovedHosts.map(host=>esc(host.name)).join(', ')}</small>`:''}</div><div class="credential-actions"><button class="btn" type="button" data-reveal-credential="${esc(lead.id)}" aria-label="Show value for ${esc(lead.principal)}">Show value</button></div></article>`;
+  }).join(''):'<div class="empty">No credential-shaped candidates in the current approved scope.</div>';
+  wireRefs(box);
+  box.querySelectorAll('[data-reveal-credential]').forEach(button=>button.onclick=async()=>{
+    const value=box.querySelector(`[data-credential-value="${button.dataset.revealCredential}"]`);
+    if(button.dataset.visible==='true'){
+      value.textContent='••••••••';button.textContent='Show value';button.dataset.visible='false';
+      button.setAttribute('aria-label',`Show value for ${credentialLeads.find(row=>row.id===button.dataset.revealCredential)?.principal||'candidate'}`);
+      return;
+    }
+    button.disabled=true;
+    try{
+      const result=await post('/api/credentials/reveal',{id:button.dataset.revealCredential,authorizedScope:checkScope()});
+      value.textContent=result.value;button.textContent='Hide value';button.dataset.visible='true';
+      button.setAttribute('aria-label',`Hide value for ${result.principal}`);
+    }catch(error){toast(error.message);}finally{button.disabled=false;}
+  });
+}
+$('#credentialSearch').addEventListener('input',renderCredentialLeads);
+$('#credentialRefresh').onclick=loadCredentialLeads;
 const checkScope=()=>savedScope.cidrs.length?savedScope:null;
 const showScope=()=>{$('#checksScopeDisplay').textContent=scopeLabel()||'No range set';};
 let scopeSave=Promise.resolve();

@@ -1,8 +1,10 @@
 """Find credential-shaped leads in saved evidence without exposing their values."""
 
 import re
+import hashlib
 
 from .analysis import scoped_document
+from .sensitive import redact
 
 
 EMAIL_PAIR = re.compile(
@@ -12,7 +14,7 @@ EMAIL_PAIR = re.compile(
 MAX_LEADS = 20
 
 
-def credential_leads(document, scope, host_ids=None):
+def credential_leads(document, scope, host_ids=None, limit=MAX_LEADS):
     """Return evidence-linked candidates from approved source hosts only.
 
     Detection establishes a credential-shaped string, never that the secret is
@@ -46,13 +48,34 @@ def credential_leads(document, scope, host_ids=None):
             if key in seen:
                 continue
             seen.add(key)
+            lead_id = 'cred-' + hashlib.sha256(
+                (evidence['id'] + '\0' + principal.lower()).encode()).hexdigest()[:24]
             related = [dict(hostId=host['id'], name=host.get('name') or host['ip'])
                        for host in hosts.values() if host['id'] != source_id and
                        (host.get('name') or '').lower().endswith('.' + domain.lower())]
-            leads.append(dict(sourceHostId=source_id, sourceFindingId=finding_id,
+            leads.append(dict(id=lead_id, sourceHostId=source_id,
+                              sourceHostName=hosts[source_id].get('name') or hosts[source_id]['ip'],
+                              sourceFindingId=finding_id,
                               evidenceId=evidence['id'], principal=principal,
                               accountDomain=domain.lower(), relatedApprovedHosts=related[:8],
+                              sourceCommand=redact(str(evidence.get('command') or ''))[:300],
+                              observedAt=evidence.get('observedAt'),
                               status='unverified-candidate'))
-            if len(leads) >= MAX_LEADS:
+            if len(leads) >= limit:
                 return leads
     return leads
+
+
+def reveal_credential(document, scope, lead_id):
+    """Resolve one currently scoped lead to its exact saved value on demand."""
+    if not isinstance(lead_id, str) or not re.fullmatch(r'cred-[0-9a-f]{24}', lead_id):
+        raise ValueError('Choose a saved credential candidate.')
+    allowed = {row['id']: row for row in credential_leads(document, scope, limit=500)}
+    lead = allowed.get(lead_id)
+    if not lead:
+        raise ValueError('Credential candidate is no longer available in the approved scope.')
+    evidence = next(row for row in document['evidence'] if row['id'] == lead['evidenceId'])
+    for match in EMAIL_PAIR.finditer(str(evidence.get('output') or '')):
+        if match.group(1).lower() == lead['principal'].lower():
+            return {'id': lead_id, 'value': match.group(3), 'principal': lead['principal']}
+    raise ValueError('Credential candidate changed; refresh the list.')

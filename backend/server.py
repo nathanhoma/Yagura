@@ -26,6 +26,7 @@ from .discovery import contained_range, discovery_chunks, discovery_progress, dn
 from .inventory import parse_inventory, verify_inventory_host
 from .investigation_goal import resolve_goal_target
 from .sensitive import redact, sanitize_document
+from .credential_leads import credential_leads, reveal_credential
 from .outbound import require_target, require_web_origin
 from .autonomy import AutonomyController
 from .briefing import answer_question
@@ -669,6 +670,22 @@ def create_server(host='127.0.0.1', port=8080, workspace=None):
                     return self.send_json(200, workspace.activity.snapshot())
                 if self.command == 'GET' and path == '/api/autonomy':
                     return self.send_json(200, {**workspace.autonomy.history(), 'limits': workspace.autonomy.limits()})
+                if self.command == 'GET' and path == '/api/credentials':
+                    with workspace.lock:
+                        scope = workspace.load_scope()
+                        leads = credential_leads(workspace.load(), scope, limit=500)
+                    return self.send_json(200, {'candidates': leads, 'limit': 500})
+                if self.command == 'POST' and path == '/api/credentials/reveal':
+                    body = self.body(2000)
+                    if (not isinstance(body, dict) or set(body) != {'id', 'authorizedScope'} or
+                            not isinstance(body['id'], str)):
+                        raise ValueError('Choose one credential candidate in the current scope.')
+                    with workspace.lock:
+                        if body['authorizedScope'] != workspace.load_scope():
+                            raise ValueError('Saved target scope changed. Refresh the credential list.')
+                        scope = workspace.resolve_scope(body['authorizedScope'])
+                        value = reveal_credential(workspace.load(), scope, body['id'])
+                    return self.send_json(200, value)
                 if self.command == 'POST' and path == '/api/briefing/ask':
                     body = self.body(8000)
                     if (not isinstance(body, dict) or set(body) - {'question', 'model', 'history'} or

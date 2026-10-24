@@ -1396,5 +1396,31 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.call('/api/check-proposals/manual-result', 'POST', record)[0], 400)
 
 
+    def test_credential_list_masks_values_and_reveal_requires_current_scope(self):
+        scope = self.workspace.save_scope({'cidrs': ['100.96.3.0/24'], 'domains': ['lab.test']})
+        parsed = F.parse_import({'tool': 'nmap', 'output':
+            'Nmap scan report for paste.dev.lab.test (100.96.3.20)\nHost is up.\n'
+            '80/tcp open http\nNmap done: 1 IP address (1 host up) scanned'})
+        self.workspace.save(parsed)
+        doc = self.workspace.load()
+        host = next(f for f in doc['findings'] if f['kind'] == 'host')
+        host['approval'] = {'ip': host['ip'], 'name': host['name'], 'scope': scope}
+        F.merge_parsed(doc, F.parse_import({'tool': 'evidence', 'ip': host['ip'],
+            'title': 'Paste', 'output': 'Keiran.Reeves@elec.lab.test:sample-secret-123'}))
+        self.workspace.save(doc)
+        status, listing = self.call('/api/credentials')
+        self.assertEqual(status, 200)
+        self.assertEqual(len(listing['candidates']), 1)
+        self.assertNotIn('sample-secret-123', json.dumps(listing))
+        lead_id = listing['candidates'][0]['id']
+        self.assertEqual(self.call('/api/credentials/reveal', 'POST',
+            {'id': lead_id, 'authorizedScope': None})[0], 400)
+        status, revealed = self.call('/api/credentials/reveal', 'POST',
+            {'id': lead_id, 'authorizedScope': scope})
+        self.assertEqual(status, 200)
+        self.assertEqual(revealed['value'], 'sample-secret-123')
+        self.assertEqual(self.calls, [])
+
+
 if __name__ == '__main__':
     unittest.main()
